@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  RESIDENT   // Cư dân (Android App)
+  TECHNICIAN // Kỹ thuật viên (Android App)
+  BMB        // Ban quản lý tòa nhà (Web App)
+}
+
+enum TicketStatus {
+  PENDING     // Chờ duyệt
+  ASSIGNED    // Đã phân công
+  IN_PROGRESS // Đang xử lý
+  COMPLETED   // Hoàn thành
+  CLOSED      // Đã đóng 
+}
+
+// Mức độ ưu tiên sự cố 
+enum PriorityLevel {
+  LOW    // Thấp
+  MEDIUM // Trung bình
+  HIGH   // Cao
+}
+
+enum IncidentCategory {
+  PLUMBING        // Hệ thống Điện - Nước
+  ELECTRICAL      // Điện & Chiếu sáng 
+  ELEVATOR        // Thang máy & Cơ khí 
+  HVAC            // Điều hòa & Thông gió
+  ACCESS_SECURITY // Điện tử & An ninh
+  OTHER           // Khác
+}
+
+// Phân loại hình ảnh lưu trên Cloudinary
+enum MediaType {
+  SCENE_BEFORE // Ảnh hiện trường do Cư dân chụp
+  REPAIR_PROOF // Ảnh bằng chứng nghiệm thu do KTV chụp
+}
+
+// Phân loại thông báo trong Hộp thư & FCM 
+enum NotificationType {
+  NEW_INCIDENT_AI   // Báo cáo mới gửi về cho BMB kèm gợi ý AI
+  AI_TIMEOUT_ALERT  // Cảnh báo Gemini AI quá thời gian chờ (>4s - US-19)
+  TASK_ASSIGNED     // BMB giao việc mới cho Kỹ thuật viên
+  STATUS_UPDATED    // Cập nhật tiến độ (Đang xử lý / Hoàn thành) cho Cư dân
+  TICKET_CLOSED     // Cư dân đã xác nhận giải quyết & đánh giá sao
+}
+
+// 2. MODELS
+
+// BẢNG 1: NGƯỜI DÙNG (Cư dân, Kỹ thuật viên, Ban quản lý)
+model User {
+  id            String            @id @default(uuid())
+  phone         String            @unique // SĐT đăng nhập chính
+  email         String?           @unique // Email công vụ
+  passwordHash  String            // Mật khẩu mã hóa bằng Bcrypt
+  fullName      String            // Họ tên
+  avatarUrl     String?           // Ảnh đại diện trên màn hình Hồ sơ
+  role          Role              @default(RESIDENT)
+  isActive      Boolean           @default(true)
+
+  // Trường dành riêng cho CƯ DÂN
+  apartmentCode String?           // Mã căn hộ 
+  buildingBlock String?           // Tòa nhà
+  floorNumber   Int?              // Tầng
+
+  // Trường dành riêng cho KỸ THUẬT VIÊN
+  specialty     IncidentCategory? // Chuyên môn chính
+  specialtyLabel String?          // Nhãn hiển thị tiếng Việt
+  shiftName     String?           // Ca trực trên Figma
+  isOnDuty      Boolean           @default(false) // Nút gạt Toggle On-duty trên App KTV
+
+  // Thiết bị nhận Push Notification
+  fcmToken      String?           // Firebase Cloud Messaging Token của máy Android
+
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  // Quan hệ
+  reportedTickets  IncidentTicket[]  @relation("ResidentTickets")
+  assignedTickets  IncidentTicket[]  @relation("TechnicianTickets")
+  approvedTickets  IncidentTicket[]  @relation("BmbApprovedTickets")
+  uploadedMedia    TicketMedia[]
+  statusLogs       TicketStatusLog[]
+  notifications    Notification[]
+
+  @@index([role, isOnDuty])
+  @@index([apartmentCode])
+}
+
+// BẢNG 2: THIẾT BỊ & VỊ TRÍ GẮN MÃ QR 
+model EquipmentAsset {
+  id            String           @id @default(uuid())
+  qrCode        String           @unique // Mã QR dán trên thiết bị 
+  assetName     String           // Tên thiết bị tự điền khi quét 
+  category      IncidentCategory // Loại thiết bị
+  locationLabel String           // Vị trí hiển thị
+  buildingBlock String           // Tòa nhà 
+  floor         String           // Tầng 
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+
+  // Quan hệ
+  tickets       IncidentTicket[]
+
+  @@index([qrCode])
+}
+
+// BẢNG 3: PHIẾU BÁO CÁO SỰ CỐ 
+model IncidentTicket {
+  id                  String            @id @default(uuid())
+  ticketCode          String            @unique // Mã Ticket duy nhất trên UI
+  title               String            // Tiêu đề sự cố 
+  description         String            @db.Text // Mô tả tự nhiên >= 10 ký tự 
+  isVoiceInput        Boolean           @default(false) // Có dùng Speech-to-Text tiếng Việt không
+  locationNote        String            // Địa điểm hiển thị trên Card
+
+  // Bước 1: Quét mã QR thiết bị
+  assetId             String?
+  asset               EquipmentAsset?   @relation(fields: [assetId], references: [id])
+  isQrScannedByRes    Boolean           @default(false) // Hiện nhãn "Đã nhận diện từ mã QR"
+
+  // Phân tích & Gợi ý từ Trợ lý Gemini Flash AI 
+  aiSummary           String?           @db.Text // Tóm tắt AI trên Web BMB
+  aiSuggestedCategory IncidentCategory? // Danh mục do AI gợi ý
+  aiSuggestedPriority PriorityLevel?    // Độ ưu tiên do AI gợi ý
+  aiLatencyMs         Int?              // Thời gian phản hồi AI tính bằng ms
+  isAiValidJson       Boolean           @default(true)  // Kiểm tra JSON hợp lệ
+  isAiFallbackManual  Boolean           @default(false) // Cờ báo AI lỗi/timeout chuyển sang duyệt tay
+  aiRawResponse       Json?             // Lưu nguyên bản JSON trả về từ Gemini để kiểm thử >80%
+
+  // Bước 2: Ban Quản Lý (BMB) Duyệt & Điều phối
+  finalCategory       IncidentCategory? // Danh mục chốt cuối cùng
+  finalPriority       PriorityLevel?    // Độ ưu tiên chốt cuối cùng
+  bmbAdminNote        String?           // Ghi chú điều phối của BMB khi giao việc cho KTV
+  bmbApprovedById     String?
+  bmbApprovedBy       User?             @relation("BmbApprovedTickets", fields: [bmbApprovedById], references: [id])
+  assignedAt          DateTime?         // Thời điểm BMB bấm "Xác nhận Phân loại & Giao việc"
+
+  // Bước 3: Kỹ thuật viên Nhận việc & Xử lý hiện trường
+  assignedTechId      String?
+  assignedTech        User?             @relation("TechnicianTickets", fields: [assignedTechId], references: [id])
+  acknowledgedAt      DateTime?         // Thời điểm KTV bấm "Nhận việc ngay"
+  isQrVerifiedByTech  Boolean           @default(false) // KTV quét lại QR tại chỗ xác thực
+  techRepairNote      String?           @db.Text // Ghi chú KTV: "Đã thay mới đoạn ống dẫn nước..."
+  completedAt         DateTime?         // Thời điểm KTV bấm "Hoàn thành & Gửi ảnh nghiệm thu"
+
+  // Bước 4: Cư dân Nghiệm thu & Đánh giá 1-5 sao
+  status              TicketStatus      @default(PENDING)
+  resolvedConfirmedAt DateTime?         // Thời điểm Cư dân bấm "Xác nhận Đã giải quyết"
+  ratingStars         Int?              // Điểm đánh giá từ 1 đến 5 sao 
+  ratingComment       String?           @db.Text // Nhận xét tùy chọn của cư dân về KTV
+
+  // --- Người báo cáo (Cư dân) ---
+  residentId          String
+  resident            User              @relation("ResidentTickets", fields: [residentId], references: [id])
+
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  // Quan hệ phụ thuộc
+  media               TicketMedia[]     // Danh sách ảnh Trước (Cư dân) & Sau khi sửa (KTV)
+  statusLogs          TicketStatusLog[] // Lịch sử 5 mốc thời gian trên màn hình Chi tiết
+  notifications       Notification[]
+
+  @@index([status])
+  @@index([residentId, status])
+  @@index([assignedTechId, status])
+  @@index([ticketCode])
+}
+
+// BẢNG 4: HÌNH ẢNH CLOUDINARY
+model TicketMedia {
+  id           String         @id @default(uuid())
+  ticketId     String
+  ticket       IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  
+  imageUrl     String         // Đường dẫn HTTPS ảnh lưu trên Cloudinary
+  publicId     String?        // Cloudinary public_id để tối ưu dung lượng Free Tier
+  mediaType    MediaType      // SCENE_BEFORE hoặc REPAIR_PROOF 
+  caption      String?        // Chú thích ảnh
+  
+  uploadedById String
+  uploadedBy   User           @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime       @default(now())
+
+  @@index([ticketId, mediaType])
+}
+
+// BẢNG 5: NHẬT KÝ TIẾN ĐỘ VÒNG ĐỜI SỰ CỐ 
+// Phục vụ hiển thị khung "Tiến độ xử lý sự cố"
+model TicketStatusLog {
+  id          String         @id @default(uuid())
+  ticketId    String
+  ticket      IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  
+  fromStatus  TicketStatus?  // Trạng thái cũ
+  toStatus    TicketStatus   // Trạng thái mới
+  title       String         // Tiêu đề mốc 
+  note        String?        // Mô tả chi tiết
+  
+  changedById String
+  changedBy   User           @relation(fields: [changedById], references: [id])
+  createdAt   DateTime       @default(now()) // Giờ hiển thị trên Timeline 
+
+  @@index([ticketId, createdAt])
+}
+
+// BẢNG 6: HỘP THƯ THÔNG BÁO & LỊCH SỬ FCM 
+// Phục vụ màn hình "04. Hộp thư Thông báo" trên Mobile và "03. Thông báo hệ thống" trên BMB Web
+model Notification {
+  id          String           @id @default(uuid())
+  userId      String           // Người nhận thông báo
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  ticketId    String?          // Gắn với sự cố nào 
+  ticket      IncidentTicket?  @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  
+  type        NotificationType
+  title       String           // Tiêu đề
+  message     String           @db.Text // Nội dung chi tiết thông báo
+  isRead      Boolean          @default(false) // Chấm xanh/đỏ "chưa đọc" trên Figma (US-36)
+  fcmSent     Boolean          @default(false) // Đã bắn thành công qua Firebase Cloud Messaging chưa
+  
+  createdAt   DateTime         @default(now())
+
+  @@index([userId, isRead])
+}
