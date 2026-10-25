@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import authRoutes from './routes/auth.routes';
 
 dotenv.config();
 
@@ -12,7 +13,10 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// 1. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
+// 1. Kết nối Module Xác thực & Phân quyền RBAC (EP01: US-01 -> US-05)
+app.use('/api/auth', authRoutes);
+
+// 2. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
 app.get('/api/health', async (req: Request, res: Response) => {
   try {
     const userCount = await prisma.user.count();
@@ -28,7 +32,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
   }
 });
 
-// 2. API Lấy danh sách Sự cố (Phục vụ Trang chủ Cư dân, KTV & BMB Web - US-13, US-21, US-29)
+// 3. API Lấy danh sách Sự cố
 app.get('/api/tickets', async (req: Request, res: Response) => {
   try {
     const tickets = await prisma.incidentTicket.findMany({
