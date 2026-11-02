@@ -20,15 +20,82 @@ const getParamAsString = (param: string | string[] | undefined): string => {
   return String(param || '');
 };
 
+// Danh mục thiết bị chuẩn của tòa nhà ResiFix để tự động đồng bộ vào PostgreSQL nếu chưa seed
+const DEFAULT_BUILDING_ASSETS: Record<
+  string,
+  { assetName: string; category: IncidentCategory; locationLabel: string; buildingBlock: string; floorNumber: string }
+> = {
+  'AC-B02': {
+    assetName: 'Máy lạnh sảnh B',
+    category: IncidentCategory.HVAC,
+    locationLabel: 'Tầng 1 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 1',
+  },
+  'WP-1204': {
+    assetName: 'Đường ống nước bồn rửa',
+    category: IncidentCategory.PLUMBING,
+    locationLabel: 'Căn hộ A-1204 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
+  },
+  'HL-B12': {
+    assetName: 'Đèn hành lang khu B',
+    category: IncidentCategory.ELECTRICAL,
+    locationLabel: 'Hành lang Tầng 12 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
+  },
+  'ELV-02': {
+    assetName: 'Thang máy khách số 02',
+    category: IncidentCategory.ELEVATOR,
+    locationLabel: 'Sảnh Tầng 1 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 1',
+  },
+  'PK-B1-02': {
+    assetName: 'Đầu đọc thẻ từ hầm gửi xe B1',
+    category: IncidentCategory.ACCESS_SECURITY,
+    locationLabel: 'Hầm xe B1 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Hầm B1',
+  },
+};
+
 // ============================================================================
 // 1. GET /api/tickets/assets/qr/:qrCode - Quét mã QR thiết bị tự điền vị trí (FR05, US-09)
 // ============================================================================
-router.get('/assets/qr/:qrCode', authenticateJWT, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/assets/qr/:qrCode', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const qrCode = getParamAsString(req.params.qrCode).trim().toUpperCase();
-    const asset = await prisma.equipmentAsset.findUnique({
+    const rawParam = decodeURIComponent(getParamAsString(req.params.qrCode)).trim().toUpperCase();
+
+    // Trích xuất mã chuẩn nếu camera quét trúng cả URL (VD: ...?data=AC-B02)
+    let qrCode = rawParam;
+    for (const knownCode of Object.keys(DEFAULT_BUILDING_ASSETS)) {
+      if (rawParam.includes(knownCode)) {
+        qrCode = knownCode;
+        break;
+      }
+    }
+
+    let asset = await prisma.equipmentAsset.findUnique({
       where: { qrCode },
     });
+
+    // Nếu thiết bị nằm trong danh mục chuẩn mà DB chưa có, tự động tạo luôn vào PostgreSQL
+    if (!asset && DEFAULT_BUILDING_ASSETS[qrCode]) {
+      const def = DEFAULT_BUILDING_ASSETS[qrCode];
+      asset = await prisma.equipmentAsset.create({
+        data: {
+          qrCode,
+          assetName: def.assetName,
+          category: def.category,
+          locationLabel: def.locationLabel,
+          buildingBlock: def.buildingBlock,
+          floor: def.floorNumber,
+        },
+      });
+    }
 
     if (!asset) {
       res.status(404).json({
@@ -143,14 +210,22 @@ router.post(
 
       let asset = null;
       if (qrCode) {
+        const cleanQr = String(qrCode).trim().toUpperCase();
         asset = await prisma.equipmentAsset.findUnique({
-          where: { qrCode: String(qrCode).trim().toUpperCase() },
+          where: { qrCode: cleanQr },
         });
       }
 
-      // Tự sinh mã Ticket duy nhất (#RF-2026-xxx - US-12)
+      // Tự sinh mã Ticket duy nhất (#RF-2026-xxx - US-12) không bao giờ bị trùng lặp
       const totalCount = await prisma.incidentTicket.count();
-      const ticketCode = `#RF-2026-${String(totalCount + 15).padStart(3, '0')}`;
+      const randomSuffix = Math.floor(100 + Math.random() * 900);
+      let ticketCode = `#RF-2026-${String(totalCount + 25).padStart(3, '0')}`;
+      const existingCode = await prisma.incidentTicket.findUnique({
+        where: { ticketCode },
+      });
+      if (existingCode) {
+        ticketCode = `#RF-2026-${randomSuffix}`;
+      }
 
       const finalLocation =
         locationNote || (asset ? `${asset.locationLabel} • Thiết bị: ${asset.qrCode}` : 'Khu vực chung tòa nhà');

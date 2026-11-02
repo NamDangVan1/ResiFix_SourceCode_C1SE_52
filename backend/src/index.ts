@@ -1,13 +1,16 @@
+import path from 'path';
+import dotenv from 'dotenv';
+
+// BẮT BUỘC NẠP FILE .ENV NGAY DÒNG ĐẦU TIÊN TRƯỚC KHI IMPORT CÁC ROUTES & PRISMA
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import authRoutes from './routes/auth.routes';
 import ticketRoutes from './routes/ticket.routes';
 import notificationRoutes from './routes/notification.routes';
 import uploadRoutes from './routes/upload.routes';
-
-dotenv.config();
 
 const app = express();
 const prisma = new PrismaClient();
@@ -51,6 +54,8 @@ app.get('/api/health', async (_req: Request, res: Response) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(Number(PORT), '0.0.0.0', () => {
+  console.log(`✅ Đã nạp DATABASE_URL: ${process.env.DATABASE_URL ? 'THÀNH CÔNG' : 'THẤT BẠI (Kiểm tra lại tên file .env)'}`);
   console.log(`🚀 ResiFix Backend Server đang chạy tại: http://localhost:${PORT}/api/health`);
+  console.log(`📱 Điện thoại kết nối qua Wi-Fi tại: http://192.168.1.11:${PORT}/api/health`);
 });
