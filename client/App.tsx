@@ -1,35 +1,52 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   StyleSheet,
-  Text,
-  View,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  ActivityIndicator,
   Platform,
-  SafeAreaView,
   Image,
   StatusBar,
   Alert,
+  Modal,
 } from 'react-native';
+import {
+  UiActivityIndicator as ActivityIndicator,
+  UiSafeAreaView as SafeAreaView,
+  UiScrollView as ScrollView,
+  UiStatusBar as ThemedStatusBar,
+  UiText as Text,
+  UiTextInput as TextInput,
+  UiTouchableOpacity as TouchableOpacity,
+  UiView as View,
+  PreferenceControls,
+  UiPreferencesProvider,
+  useUiPreferences,
+} from './UiPreferences';
 import QrScannerModal from './QrScannerModal';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ============================================================================
 // CẤU HÌNH ĐỊA CHỈ BACKEND CHUẨN CHO CẢ WEB & ĐIỆN THOẠI
 // ============================================================================
-const COMPUTER_LAN_IP = '192.168.1.24'; // IP Wi-Fi máy tính của bạn
+const COMPUTER_LAN_IP = '192.168.1.50'; // IP Wi-Fi hiện tại của máy tính
 
 const getApiBaseUrl = () => {
   if (Platform.OS === 'web') {
     // Trên trình duyệt máy tính: Luôn gọi thẳng vào cổng 5000 nội bộ của máy tính
     return 'http://localhost:5000/api';
   }
-  return 'https://silver-guests-wink.loca.lt/api'; // Trên điện thoại: Gọi qua LocalTunnel (hoặc ngrok) để truy cập cổng 5000 của máy tính
+  return `http://${COMPUTER_LAN_IP}:5000/api`;
 };
 
 const API_BASE_URL = getApiBaseUrl();
+const AUTH_SESSION_STORAGE_KEY = 'resifix.auth.session';
+
+export default function App() {
+  return (
+    <UiPreferencesProvider>
+      <AppContent />
+    </UiPreferencesProvider>
+  );
+}
 
 const CATEGORY_VN: Record<string, string> = {
   PLUMBING: 'Hệ thống Điện - Nước',
@@ -58,7 +75,28 @@ const PRIORITY_VN: Record<string, string> = {
 const CATEGORIES_LIST = ['PLUMBING', 'ELECTRICAL', 'ELEVATOR', 'HVAC', 'ACCESS_SECURITY', 'OTHER'];
 const PRIORITIES_LIST = ['HIGH', 'MEDIUM', 'LOW'];
 
-export default function App() {
+type TechnicianForm = {
+  fullName: string;
+  phone: string;
+  email: string;
+  password: string;
+  specialty: string;
+  shiftName: string;
+  isOnDuty: boolean;
+};
+
+const EMPTY_TECHNICIAN_FORM: TechnicianForm = {
+  fullName: '',
+  phone: '',
+  email: '',
+  password: '',
+  specialty: 'PLUMBING',
+  shiftName: '',
+  isOnDuty: false,
+};
+
+function AppContent() {
+  const { t: translate } = useUiPreferences();
   // 1. State Xác thực & Chuyển đổi giao diện Login Web / Mobile (FR01)
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<any | null>(null);
@@ -72,6 +110,7 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [dutyUpdating, setDutyUpdating] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   // 2. Điều hướng màn hình theo từng vai trò (Chuẩn 15 màn hình Figma)
@@ -88,6 +127,11 @@ export default function App() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [technicians, setTechnicians] = useState<any[]>([]);
+  const [technicianDialogMode, setTechnicianDialogMode] = useState<'create' | 'edit' | 'delete' | null>(null);
+  const [selectedTechnician, setSelectedTechnician] = useState<any | null>(null);
+  const [technicianForm, setTechnicianForm] = useState<TechnicianForm>(EMPTY_TECHNICIAN_FORM);
+  const [technicianFormBusy, setTechnicianFormBusy] = useState(false);
+  const [technicianFormError, setTechnicianFormError] = useState<string | null>(null);
 
   // 4. Bộ lọc trên các màn hình
   const [homeFilter, setHomeFilter] = useState<'ALL' | 'PENDING' | 'IN_PROGRESS' | 'COMPLETED'>('ALL');
@@ -110,7 +154,7 @@ export default function App() {
     assetName: 'Máy lạnh sảnh B',
     locationLabel: 'Tầng 1 - Tòa S1',
   });
-  const [reportPhotos, setReportPhotos] = useState<Array<{ label: string; url: string }>>([
+  const [reportPhotos, setReportPhotos] = useState<{ label: string; url: string }[]>([
     {
       label: 'Máy lạnh sảnh B',
       url: 'https://images.unsplash.com/photo-1585704032915-c3400ca199e7?auto=format&fit=crop&w=600&q=80',
@@ -129,9 +173,7 @@ export default function App() {
   const [activeTicket, setActiveTicket] = useState<any | null>(null);
   const [ratingStars, setRatingStars] = useState<number>(5);
   const [ratingComment, setRatingComment] = useState<string>('');
-  const [techProofPhotos, setTechProofPhotos] = useState<string[]>([
-    'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=600&q=80',
-  ]);
+  const [techProofPhotos, setTechProofPhotos] = useState<string[]>([]);
   const [techRepairNote, setTechRepairNote] = useState<string>(
     'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.'
   );
@@ -170,7 +212,7 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        showToast(data.message || 'Sai thông tin đăng nhập!');
+        showToast(data.message || translate('Sai thông tin đăng nhập!'));
         return;
       }
       setToken(data.token);
@@ -178,9 +220,17 @@ export default function App() {
       setResScreen('HOME');
       setTechScreen('HOME');
       setBmbNavTab('TICKETS');
+      if (rememberMe) {
+        void AsyncStorage.setItem(
+          AUTH_SESSION_STORAGE_KEY,
+          JSON.stringify({ token: data.token, user: data.user })
+        ).catch(() => showToast(translate('Không thể lưu phiên đăng nhập trên thiết bị này.')));
+      } else {
+        void AsyncStorage.removeItem(AUTH_SESSION_STORAGE_KEY).catch(() => undefined);
+      }
       fetchAllData(data.token, data.user);
     } catch {
-      showToast(`Không kết nối được Backend (${API_BASE_URL}). Hãy đảm bảo cổng 5000 đang chạy!`);
+      showToast(translate(`Không kết nối được Backend (${API_BASE_URL}). Hãy đảm bảo cổng 5000 đang chạy!`));
     } finally {
       setLoading(false);
     }
@@ -236,12 +286,165 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    let mounted = true;
+    void AsyncStorage.getItem(AUTH_SESSION_STORAGE_KEY)
+      .then(async (savedSession) => {
+        if (!savedSession) return;
+        const session = JSON.parse(savedSession);
+        if (!session?.token || !session?.user) {
+          await AsyncStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+          return;
+        }
+        if (!mounted) return;
+        setToken(session.token);
+        setUser(session.user);
+        setRememberMe(true);
+        await fetchAllData(session.token, session.user);
+      })
+      .catch(() => {
+        if (mounted) void AsyncStorage.removeItem(AUTH_SESSION_STORAGE_KEY).catch(() => undefined);
+      });
+
+    return () => {
+      mounted = false;
+    };
+    // Restore the saved session once on launch; explicit token/user arguments avoid stale auth values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleLogout = () => {
+    void AsyncStorage.removeItem(AUTH_SESSION_STORAGE_KEY).catch(() => undefined);
+    setToken(null);
+    setUser(null);
+    setTickets([]);
+    setNotifications([]);
+    setUnreadCount(0);
+    setTechnicians([]);
+    setActiveTicket(null);
+    setTechnicianDialogMode(null);
+  };
+
+  const openCreateTechnician = () => {
+    setSelectedTechnician(null);
+    setTechnicianForm(EMPTY_TECHNICIAN_FORM);
+    setTechnicianFormError(null);
+    setTechnicianDialogMode('create');
+  };
+
+  const openEditTechnician = (technician: any) => {
+    setSelectedTechnician(technician);
+    setTechnicianForm({
+      fullName: technician.fullName || '',
+      phone: technician.phone || '',
+      email: technician.email || '',
+      password: '',
+      specialty: technician.specialty || 'OTHER',
+      shiftName: technician.shiftName || '',
+      isOnDuty: Boolean(technician.isOnDuty),
+    });
+    setTechnicianFormError(null);
+    setTechnicianDialogMode('edit');
+  };
+
+  const closeTechnicianDialog = () => {
+    if (technicianFormBusy) return;
+    setTechnicianDialogMode(null);
+    setTechnicianFormError(null);
+  };
+
+  const saveTechnician = async () => {
+    if (!technicianForm.fullName.trim() || !technicianForm.phone.trim()) {
+      setTechnicianFormError(translate('Vui lòng nhập họ tên và số điện thoại hợp lệ.'));
+      return;
+    }
+    if (technicianDialogMode === 'create' && technicianForm.password.length < 6) {
+      setTechnicianFormError(translate('Mật khẩu ban đầu phải có ít nhất 6 ký tự.'));
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      fullName: technicianForm.fullName.trim(),
+      phone: technicianForm.phone.trim(),
+      email: technicianForm.email.trim() || null,
+      specialty: technicianForm.specialty,
+      shiftName: technicianForm.shiftName.trim() || null,
+      isOnDuty: technicianForm.isOnDuty,
+    };
+    if (technicianForm.password) payload.password = technicianForm.password;
+
+    try {
+      setTechnicianFormError(null);
+      setTechnicianFormBusy(true);
+      const isEditing = technicianDialogMode === 'edit';
+      const endpoint = isEditing
+        ? `${API_BASE_URL}/tickets/technicians/${selectedTechnician.id}`
+        : `${API_BASE_URL}/tickets/technicians`;
+      const response = await fetch(endpoint, {
+        method: isEditing ? 'PATCH' : 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        setTechnicianFormError(result.message || translate('Không thể lưu thông tin kỹ thuật viên.'));
+        return;
+      }
+
+      await fetchAllData();
+      setTechnicianDialogMode(null);
+      showToast(translate(isEditing ? 'Đã cập nhật kỹ thuật viên.' : 'Đã thêm kỹ thuật viên.'));
+    } catch {
+      setTechnicianFormError(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+    } finally {
+      setTechnicianFormBusy(false);
+    }
+  };
+
+  const deleteTechnician = async () => {
+    if (!selectedTechnician) return;
+    try {
+      setTechnicianFormError(null);
+      setTechnicianFormBusy(true);
+      const response = await fetch(
+        `${API_BASE_URL}/tickets/technicians/${selectedTechnician.id}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+      );
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        setTechnicianFormError(result.message || translate('Không thể xóa kỹ thuật viên.'));
+        return;
+      }
+
+      await fetchAllData();
+      setTechnicianDialogMode(null);
+      setSelectedTechnician(null);
+      showToast(translate('Đã vô hiệu hóa kỹ thuật viên.'));
+    } catch {
+      setTechnicianFormError(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+    } finally {
+      setTechnicianFormBusy(false);
+    }
+  };
+
   const handleSelectBmbTicket = (t: any) => {
     setBmbSelectedTicket(t);
     setBmbCategory(t.finalCategory || t.aiSuggestedCategory || 'PLUMBING');
     setBmbPriority(t.finalPriority || t.aiSuggestedPriority || 'HIGH');
     setBmbNote(t.bmbAdminNote || '');
     if (t.assignedTechId) setBmbTechId(t.assignedTechId);
+  };
+
+  const openTechnicianTask = (ticket: any) => {
+    setActiveTicket(ticket);
+    setTechRepairNote(
+      ticket.techRepairNote || 'Đã hoàn thành khắc phục sự cố và kiểm tra hoạt động ổn định.'
+    );
+    setTechProofPhotos([]);
+    setTechScreen('TASK_DETAIL');
   };
 
   // Quét QR tự động điền thiết bị (Màn hình 02 Cư dân)
@@ -302,7 +505,7 @@ export default function App() {
             assetName: data.asset.assetName,
             locationLabel: data.asset.locationLabel,
           });
-          showToast(`✅ Đã nhận diện từ mã QR: ${data.asset.assetName}`);
+          showToast(translate(`✅ Đã nhận diện từ mã QR: ${data.asset.assetName}`));
           return;
         }
       }
@@ -311,18 +514,18 @@ export default function App() {
       if (RESIFIX_ASSET_CATALOG[cleanCode]) {
         const fallbackAsset = RESIFIX_ASSET_CATALOG[cleanCode];
         setScannedAsset(fallbackAsset);
-        showToast(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`);
+        showToast(translate(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`));
       } else {
-        showToast(`⚠️ Mã QR "${cleanCode}" không tồn tại trong danh mục thiết bị tòa nhà!`);
+        showToast(translate(`⚠️ Mã QR "${cleanCode}" không tồn tại trong danh mục thiết bị tòa nhà!`));
       }
     } catch {
       // Nếu lỗi mạng khi gọi API, vẫn tự động điền nếu mã QR hợp lệ
       if (RESIFIX_ASSET_CATALOG[cleanCode]) {
         const fallbackAsset = RESIFIX_ASSET_CATALOG[cleanCode];
         setScannedAsset(fallbackAsset);
-        showToast(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`);
+        showToast(translate(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`));
       } else {
-        showToast(`❌ Không thể tra cứu mã "${cleanCode}". Kiểm tra lại kết nối Backend!`);
+        showToast(translate(`❌ Không thể tra cứu mã "${cleanCode}". Kiểm tra lại kết nối Backend!`));
       }
     } finally {
       setLoading(false);
@@ -369,24 +572,29 @@ export default function App() {
     folderName: 'incident_scene' | 'repair_proof',
     onSuccessUrl: (url: string) => void
   ) => {
-    const camPerm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!camPerm.granted) {
-      showToast('⚠️ Vui lòng cấp quyền Camera để chụp ảnh hiện trường!');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.6, // Tối ưu dung lượng ảnh theo Risk R4
-      base64: true,
-    });
-    if (!result.canceled && result.assets?.[0]) {
+    try {
+      const camPerm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!camPerm.granted) {
+        showToast(translate('⚠️ Vui lòng cấp quyền Camera để chụp ảnh hiện trường!'));
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 0.6,
+        base64: true,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
       setLoading(true);
-      showToast('☁️ Đang tải ảnh lên Cloudinary...');
+      showToast(translate('☁️ Đang tải ảnh lên Cloudinary...'));
       const finalUrl = await uploadAssetToCloudinary(result.assets[0], folderName);
-      setLoading(false);
       onSuccessUrl(finalUrl);
+    } catch {
+      showToast(translate('Không thể mở Camera. Vui lòng kiểm tra quyền truy cập.'));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -394,24 +602,31 @@ export default function App() {
     folderName: 'incident_scene' | 'repair_proof',
     onSuccessUrl: (url: string) => void
   ) => {
-    const libPerm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!libPerm.granted) {
-      showToast('⚠️ Vui lòng cấp quyền Thư viện ảnh để chọn ảnh!');
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.6,
-      base64: true,
-    });
-    if (!result.canceled && result.assets?.[0]) {
+    try {
+      if (Platform.OS !== 'web') {
+        const libPerm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!libPerm.granted) {
+          showToast(translate('⚠️ Vui lòng cấp quyền Thư viện ảnh để chọn ảnh!'));
+          return;
+        }
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 0.6,
+        base64: true,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
       setLoading(true);
-      showToast('☁️ Đang tải ảnh lên Cloudinary...');
+      showToast(translate('☁️ Đang tải ảnh lên Cloudinary...'));
       const finalUrl = await uploadAssetToCloudinary(result.assets[0], folderName);
-      setLoading(false);
       onSuccessUrl(finalUrl);
+    } catch {
+      showToast(translate('Không thể mở Thư viện ảnh. Vui lòng thử lại.'));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -427,18 +642,18 @@ export default function App() {
 
     // Trên Điện thoại Android: Hiển thị bảng chọn Chụp ảnh mới hoặc Chọn từ Thư viện
     Alert.alert(
-      'Đính kèm hình ảnh',
-      'Bạn muốn chụp ảnh trực tiếp bằng Camera hay chọn ảnh có sẵn từ Thư viện?',
+      translate('Đính kèm hình ảnh'),
+      translate('Bạn muốn chụp ảnh trực tiếp bằng Camera hay chọn ảnh có sẵn từ Thư viện?'),
       [
         {
-          text: '📷 Chụp ảnh mới (Camera)',
+          text: translate('📷 Chụp ảnh mới (Camera)'),
           onPress: () => launchCameraFlow(folderName, onSuccessUrl),
         },
         {
-          text: '🖼️ Chọn từ Thư viện ảnh',
+          text: translate('🖼️ Chọn từ Thư viện ảnh'),
           onPress: () => launchLibraryFlow(folderName, onSuccessUrl),
         },
-        { text: 'Hủy', style: 'cancel' },
+        { text: translate('Hủy'), style: 'cancel' },
       ],
       { cancelable: true }
     );
@@ -447,7 +662,7 @@ export default function App() {
   // Cư dân gửi báo cáo sự cố (Màn hình 02 - US-11, US-14, US-44)
   const handleSubmitReport = async () => {
     if (reportDesc.trim().length < 10) {
-      showToast('Mô tả sự cố cần tối thiểu 10 ký tự!');
+      showToast(translate('Mô tả sự cố cần tối thiểu 10 ký tự!'));
       return;
     }
     try {
@@ -483,17 +698,17 @@ export default function App() {
       }
 
       if (res.ok && data?.success) {
-        showToast(`🎉 Đã gửi ${data.ticket.ticketCode} thành công!`);
+        showToast(translate(`🎉 Đã gửi ${data.ticket.ticketCode} thành công!`));
         await fetchAllData();
         setResScreen('HOME');
       } else {
         showToast(
           data?.message ||
-          `Lỗi máy chủ (${res.status}). Hãy kiểm tra cửa sổ Terminal của Backend!`
+          translate(`Lỗi máy chủ (${res.status}). Hãy kiểm tra cửa sổ Terminal của Backend!`)
         );
       }
-    } catch (err: any) {
-      showToast('Không kết nối được Backend khi gửi báo cáo. Vui lòng thử lại!');
+    } catch {
+      showToast(translate('Không kết nối được Backend khi gửi báo cáo. Vui lòng thử lại!'));
     } finally {
       setLoading(false);
     }
@@ -514,12 +729,16 @@ export default function App() {
             ratingComment.trim() || 'Kỹ thuật viên xử lý rất nhanh và sạch sẽ!',
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`✅ Đã đóng sự cố ${ticketToClose.ticketCode} (${ratingStars} sao)!`);
-        await fetchAllData();
-        setResScreen('HOME');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Không thể xác nhận đã giải quyết. Vui lòng thử lại.'));
+        return;
       }
+      showToast(translate(`✅ Đã đóng sự cố ${ticketToClose.ticketCode} (${ratingStars} sao)!`));
+      await fetchAllData();
+      setResScreen('HOME');
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
@@ -528,6 +747,7 @@ export default function App() {
   // Kỹ thuật viên bật/tắt Ca trực On-duty
   const handleToggleOnDuty = async () => {
     try {
+      setDutyUpdating(true);
       const nextDuty = !user.isOnDuty;
       const res = await fetch(`${API_BASE_URL}/auth/on-duty`, {
         method: 'PATCH',
@@ -537,13 +757,17 @@ export default function App() {
         },
         body: JSON.stringify({ isOnDuty: nextDuty }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setUser({ ...user, isOnDuty: nextDuty });
-        showToast(data.message);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Không thể đổi trạng thái ca trực'));
+        return;
       }
+      setUser({ ...user, isOnDuty: data.technician?.isOnDuty ?? nextDuty });
+      showToast(data.message || translate('Đã cập nhật trạng thái ca trực.'));
     } catch {
-      showToast('Không thể đổi trạng thái ca trực');
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+    } finally {
+      setDutyUpdating(false);
     }
   };
 
@@ -555,13 +779,16 @@ export default function App() {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`🛠️ Đã nhận việc ${ticketObj.ticketCode}!`);
-        await fetchAllData();
-        setActiveTicket(data.ticket || { ...ticketObj, status: 'IN_PROGRESS' });
-        setTechScreen('TASK_DETAIL');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Không thể nhận việc. Vui lòng thử lại.'));
+        return;
       }
+      showToast(translate(`🛠️ Đã nhận việc ${ticketObj.ticketCode}!`));
+      await fetchAllData();
+      openTechnicianTask(data.ticket || { ...ticketObj, status: 'IN_PROGRESS' });
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
@@ -569,51 +796,53 @@ export default function App() {
 
   // Kỹ thuật viên bấm "Hoàn thành & Gửi ảnh nghiệm thu"
   const handleTechCompleteSubmit = async (ticketObj: any) => {
+    if (techProofPhotos.length === 0) {
+      showToast(translate('Vui lòng chọn ít nhất một ảnh nghiệm thu trước khi hoàn tất.'));
+      return;
+    }
+
     try {
       setLoading(true);
+      let currentTicket = ticketObj;
       if (ticketObj.status === 'ASSIGNED') {
-        await fetch(`${API_BASE_URL}/tickets/${ticketObj.id}/acknowledge`, {
+        const acknowledgeRes = await fetch(`${API_BASE_URL}/tickets/${ticketObj.id}/acknowledge`, {
           method: 'PATCH',
           headers: { Authorization: `Bearer ${token}` },
         });
+        const acknowledgeData = await acknowledgeRes.json().catch(() => ({}));
+        if (!acknowledgeRes.ok || !acknowledgeData.success) {
+          showToast(acknowledgeData.message || translate('Không thể nhận việc. Vui lòng tải lại danh sách.'));
+          return;
+        }
+        currentTicket = acknowledgeData.ticket || { ...ticketObj, status: 'IN_PROGRESS' };
+        setActiveTicket(currentTicket);
       }
-      const uploadRes = await fetch(`${API_BASE_URL}/upload`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          imageBase64:
-            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-          folder: 'repair_proof',
-        }),
-      });
-      const uploadData = await uploadRes.json();
-      const finalProofUrls = uploadData.imageUrl
-        ? [uploadData.imageUrl, ...techProofPhotos.slice(1)]
-        : techProofPhotos;
 
-      const res = await fetch(`${API_BASE_URL}/tickets/${ticketObj.id}/complete`, {
+      const res = await fetch(`${API_BASE_URL}/tickets/${currentTicket.id}/complete`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          proofImageUrls: finalProofUrls,
+          proofImageUrls: techProofPhotos,
           techRepairNote:
             techRepairNote.trim() ||
-            'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.',
-          isQrVerifiedByTech: true,
+            'Đã hoàn thành khắc phục sự cố và kiểm tra hoạt động ổn định.',
+          isQrVerifiedByTech: Boolean(currentTicket.isQrVerifiedByTech),
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`📸 Đã hoàn thành & gửi ảnh nghiệm thu ${ticketObj.ticketCode}!`);
-        await fetchAllData();
-        setTechScreen('HOME');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Không thể hoàn tất công việc. Vui lòng thử lại.'));
+        return;
       }
+      showToast(translate(`📸 Đã hoàn thành & gửi ảnh nghiệm thu ${ticketObj.ticketCode}!`));
+      setTechProofPhotos([]);
+      await fetchAllData();
+      setTechScreen('HOME');
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
@@ -624,7 +853,7 @@ export default function App() {
     const targetTicketId = customTicketId || bmbSelectedTicket?.id;
     const targetTechId = customTechId || bmbTechId;
     if (!targetTicketId || !targetTechId) {
-      showToast('Vui lòng chọn sự cố và Kỹ thuật viên đang trực!');
+      showToast(translate('Vui lòng chọn sự cố và Kỹ thuật viên đang trực!'));
       return;
     }
     try {
@@ -642,26 +871,68 @@ export default function App() {
           bmbAdminNote: bmbNote || 'Kiểm tra kỹ và chụp ảnh nghiệm thu.',
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`✅ Đã duyệt & giao việc thành công! Đã gửi thông báo đẩy FCM.`);
-        setBmbSelectedTicket(data.ticket);
-        await fetchAllData();
-      } else {
-        showToast(data.message || 'Lỗi khi giao việc');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Lỗi khi giao việc'));
+        return;
       }
+      showToast(translate(`✅ Đã duyệt & giao việc thành công! Đã gửi thông báo đẩy FCM.`));
+      setBmbSelectedTicket(data.ticket);
+      await fetchAllData();
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
   };
 
   const handleMarkAllNotificationsRead = async () => {
-    await fetch(`${API_BASE_URL}/notifications/read-all`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    await fetchAllData();
-    showToast('✓ Đã đánh dấu tất cả thông báo là đã đọc!');
+    try {
+      const res = await fetch(`${API_BASE_URL}/notifications/read-all`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Không thể cập nhật thông báo. Vui lòng thử lại.'));
+        return;
+      }
+      setNotifications((current) => current.map((notification) => ({ ...notification, isRead: true })));
+      setUnreadCount(0);
+      showToast(translate('✓ Đã đánh dấu tất cả thông báo là đã đọc!'));
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+    }
+  };
+
+  const handleOpenBmbNotification = async (notification: any) => {
+    if (!notification.isRead) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/notifications/${notification.id}/read`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+          showToast(data.message || translate('Không thể cập nhật thông báo. Vui lòng thử lại.'));
+        } else {
+          setNotifications((current) =>
+            current.map((item) => item.id === notification.id ? { ...item, isRead: true } : item)
+          );
+          setUnreadCount((count) => Math.max(0, count - 1));
+        }
+      } catch {
+        showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+      }
+    }
+
+    if (notification.ticketId) {
+      const relatedTicket = tickets.find((ticket) => ticket.id === notification.ticketId);
+      if (relatedTicket) {
+        handleSelectBmbTicket(relatedTicket);
+        setBmbNavTab('TICKETS');
+      }
+    }
   };
 
   // ============================================================================
@@ -680,13 +951,12 @@ export default function App() {
                 <Text style={styles.bmbLoginBrandText}>ResiFix BMB</Text>
               </View>
               <Text style={styles.bmbLoginHeroTitle}>
-                Hệ thống Quản lý & Điều phối Sự cố Tòa nhà Thông minh
-              </Text>
+                {translate("Hệ thống Quản lý & Điều phối Sự cố Tòa nhà Thông minh")}</Text>
             </View>
 
             {/* Cột phải màu trắng */}
             <View style={styles.bmbLoginRightWhite}>
-              <Text style={styles.bmbLoginFormHeading}>Đăng nhập</Text>
+              <Text style={styles.bmbLoginFormHeading}>{translate("Đăng nhập")}</Text>
 
               {toastMsg && (
                 <View style={[styles.toastBanner, { marginHorizontal: 0, marginBottom: 12 }]}>
@@ -694,7 +964,7 @@ export default function App() {
                 </View>
               )}
 
-              <Text style={styles.fieldLabel}>Email hoặc Số điện thoại công vụ *</Text>
+              <Text style={styles.fieldLabel}>{translate("Email hoặc Số điện thoại công vụ *")}</Text>
               <TextInput
                 style={styles.bmbWebInput}
                 value={phoneInput}
@@ -703,7 +973,7 @@ export default function App() {
                 placeholderTextColor="#94A3B8"
               />
 
-              <Text style={styles.fieldLabel}>Mật khẩu *</Text>
+              <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
               <TextInput
                 style={styles.bmbWebInput}
                 value={passwordInput}
@@ -720,7 +990,7 @@ export default function App() {
                 <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
                   {rememberMe && <Text style={styles.checkMark}>✓</Text>}
                 </View>
-                <Text style={styles.rememberText}>Duy trì đăng nhập trên trình duyệt này</Text>
+                <Text style={styles.rememberText}>{translate("Duy trì đăng nhập trên trình duyệt này")}</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -731,7 +1001,7 @@ export default function App() {
                 {loading ? (
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.bmbWebLoginBtnText}>Đăng nhập Hệ thống BMB</Text>
+                  <Text style={styles.bmbWebLoginBtnText}>{translate("Đăng nhập Hệ thống BMB")}</Text>
                 )}
               </TouchableOpacity>
 
@@ -744,7 +1014,7 @@ export default function App() {
                     setPhoneInput('0905123456');
                   }}
                 >
-                  <Text style={styles.demoChipText}>📱 Xem màn hình Login Mobile (Cư dân/KTV)</Text>
+                  <Text style={styles.demoChipText}>{translate("📱 Xem màn hình Login Mobile (Cư dân/KTV)")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.demoChip}
@@ -753,7 +1023,7 @@ export default function App() {
                     handleLogin('myhanh.bmb@resifix.vn', '123456');
                   }}
                 >
-                  <Text style={styles.demoChipText}>⚡ Vào nhanh BMB Dashboard</Text>
+                  <Text style={styles.demoChipText}>{translate("⚡ Vào nhanh BMB Dashboard")}</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -765,7 +1035,7 @@ export default function App() {
     // B. Giao diện Đăng nhập Mobile App (Cư dân & Kỹ thuật viên chuẩn Figma 00 Mobile)
     return (
       <SafeAreaView style={styles.screenBg}>
-        <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
+        <ThemedStatusBar barStyle="dark-content" />
         <ScrollView contentContainerStyle={styles.loginScroll}>
           <View style={styles.mobileFrame}>
             <View style={styles.brandCenter}>
@@ -774,10 +1044,9 @@ export default function App() {
               </View>
               <Text style={styles.brandTitle}>ResiFix</Text>
               <Text style={styles.brandSub}>
-                Hệ thống Quản lý & Khắc phục Sự cố Tòa nhà
-              </Text>
+                {translate("Hệ thống Quản lý & Khắc phục Sự cố Tòa nhà")}</Text>
               <View style={styles.geminiBadgePill}>
-                <Text style={styles.geminiBadgeText}>✨ Tích hợp Trợ lý Gemini AI</Text>
+                <Text style={styles.geminiBadgeText}>{translate("✨ Tích hợp Trợ lý Gemini AI")}</Text>
               </View>
             </View>
 
@@ -788,12 +1057,11 @@ export default function App() {
             )}
 
             <View style={styles.loginCard}>
-              <Text style={styles.loginCardTitle}>Đăng nhập tài khoản</Text>
+              <Text style={styles.loginCardTitle}>{translate("Đăng nhập tài khoản")}</Text>
               <Text style={styles.loginCardSub}>
-                Sử dụng số điện thoại đã đăng ký với Ban quản lý tòa nhà
-              </Text>
+                {translate("Sử dụng số điện thoại đã đăng ký với Ban quản lý tòa nhà")}</Text>
 
-              <Text style={styles.fieldLabel}>Số điện thoại *</Text>
+              <Text style={styles.fieldLabel}>{translate("Số điện thoại *")}</Text>
               <View style={styles.inputWrapper}>
                 <Text style={styles.inputPrefixIcon}>📞</Text>
                 <TextInput
@@ -805,7 +1073,7 @@ export default function App() {
                 />
               </View>
 
-              <Text style={styles.fieldLabel}>Mật khẩu *</Text>
+              <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
               <View style={styles.inputWrapper}>
                 <Text style={styles.inputPrefixIcon}>🔒</Text>
                 <TextInput
@@ -829,14 +1097,14 @@ export default function App() {
                   <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
                     {rememberMe && <Text style={styles.checkMark}>✓</Text>}
                   </View>
-                  <Text style={styles.rememberText}>Ghi nhớ đăng nhập</Text>
+                  <Text style={styles.rememberText}>{translate("Ghi nhớ đăng nhập")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() =>
-                    showToast('Vui lòng liên hệ Ban quản lý Tòa S1 để cấp lại mật khẩu!')
+                    showToast(translate('Vui lòng liên hệ Ban quản lý Tòa S1 để cấp lại mật khẩu!'))
                   }
                 >
-                  <Text style={styles.forgotText}>Quên mật khẩu?</Text>
+                  <Text style={styles.forgotText}>{translate("Quên mật khẩu?")}</Text>
                 </TouchableOpacity>
               </View>
 
@@ -848,7 +1116,7 @@ export default function App() {
                 {loading ? (
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.loginSubmitText}>Đăng nhập</Text>
+                  <Text style={styles.loginSubmitText}>{translate("Đăng nhập")}</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -861,7 +1129,7 @@ export default function App() {
                   handleLogin('0905123456', '123456');
                 }}
               >
-                <Text style={styles.demoChipText}>🏠 Cư dân A-1204</Text>
+                <Text style={styles.demoChipText}>{translate("🏠 Cư dân A-1204")}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.demoChip}
@@ -870,7 +1138,7 @@ export default function App() {
                   handleLogin('0356166863', '123456');
                 }}
               >
-                <Text style={styles.demoChipText}>👷 KTV Nam</Text>
+                <Text style={styles.demoChipText}>{translate("👷 KTV Nam")}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.demoChip}
@@ -879,7 +1147,7 @@ export default function App() {
                   setPhoneInput('myhanh.bmb@resifix.vn');
                 }}
               >
-                <Text style={styles.demoChipText}>💻 BMB Login</Text>
+                <Text style={styles.demoChipText}>{translate("💻 BMB Login")}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -919,7 +1187,7 @@ export default function App() {
 
     return (
       <SafeAreaView style={styles.screenBg}>
-        <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
+        <ThemedStatusBar barStyle="dark-content" />
         <View style={styles.mobileShell}>
           {toastMsg && (
             <View style={styles.toastBanner}>
@@ -935,9 +1203,9 @@ export default function App() {
             >
               <View style={styles.resHomeHeader}>
                 <View style={{ flex: 1, paddingRight: 8 }}>
-                  <Text style={styles.aptSmallLabel}>Thông tin căn hộ</Text>
+                  <Text style={styles.aptSmallLabel}>{translate("Thông tin căn hộ")}</Text>
                   <Text style={styles.aptBigTitle}>
-                    Căn hộ {user.apartmentCode || 'A-1204'} • {user.buildingBlock || 'Tòa S1'}
+                    {translate("Căn hộ ")}{user.apartmentCode || 'A-1204'} • {user.buildingBlock || 'Tòa S1'}
                   </Text>
                 </View>
                 <TouchableOpacity
@@ -952,24 +1220,22 @@ export default function App() {
               <View style={styles.ctaHeroCard}>
                 <View style={styles.ctaTitleRow}>
                   <Text style={styles.qrFrameIcon}>⛶</Text>
-                  <Text style={styles.ctaHeroTitle}>Phát hiện sự cố tòa nhà?</Text>
+                  <Text style={styles.ctaHeroTitle}>{translate("Phát hiện sự cố tòa nhà?")}</Text>
                 </View>
                 <Text style={styles.ctaHeroDesc}>
-                  Quét mã QR thiết bị, chụp ảnh hoặc đọc bằng giọng nói. Trợ lý AI sẽ tự động
-                  phân loại giúp bạn!
-                </Text>
+                  {translate("Quét mã QR thiết bị, chụp ảnh hoặc đọc bằng giọng nói. Trợ lý AI sẽ tự động phân loại giúp bạn!")}</Text>
                 <TouchableOpacity
                   style={styles.ctaPrimaryBtn}
                   onPress={() => setResScreen('CREATE_REPORT')}
                 >
-                  <Text style={styles.ctaPrimaryBtnText}>📷 + Báo cáo sự cố ngay</Text>
+                  <Text style={styles.ctaPrimaryBtnText}>{translate("📷 + Báo cáo sự cố ngay")}</Text>
                 </TouchableOpacity>
               </View>
 
               <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitleText}>Sự cố của tôi</Text>
+                <Text style={styles.sectionTitleText}>{translate("Sự cố của tôi")}</Text>
                 <TouchableOpacity onPress={() => setResScreen('HISTORY')}>
-                  <Text style={styles.seeHistoryLink}>Xem lịch sử &gt;</Text>
+                  <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
                 </TouchableOpacity>
               </View>
 
@@ -988,7 +1254,7 @@ export default function App() {
                       homeFilter === 'ALL' && styles.filterPillTextActive,
                     ]}
                   >
-                    Tất cả ({tickets.length})
+                    {translate("Tất cả (")}{tickets.length})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1004,7 +1270,7 @@ export default function App() {
                       homeFilter === 'PENDING' && styles.filterPillTextActive,
                     ]}
                   >
-                    Chờ duyệt ({pendingCount})
+                    {translate("Chờ duyệt (")}{pendingCount})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1020,7 +1286,7 @@ export default function App() {
                       homeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
                     ]}
                   >
-                    Đang sửa ({inProgressCount})
+                    {translate("Đang sửa (")}{inProgressCount})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1036,7 +1302,7 @@ export default function App() {
                       homeFilter === 'COMPLETED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Hoàn thành ({completedCount})
+                    {translate("Hoàn thành (")}{completedCount})
                   </Text>
                 </TouchableOpacity>
               </ScrollView>
@@ -1085,12 +1351,12 @@ export default function App() {
                           ]}
                         >
                           {isCompleted
-                            ? 'Hoàn thành'
+                            ? translate('Hoàn thành')
                             : isPending
-                              ? 'Chờ duyệt'
+                              ? translate('Chờ duyệt')
                               : isClosed
-                                ? 'Đã đóng'
-                                : 'Đang xử lý'}
+                                ? translate('Đã đóng')
+                                : translate('Đang xử lý')}
                         </Text>
                       </View>
                     </View>
@@ -1101,8 +1367,7 @@ export default function App() {
                     {isCompleted ? (
                       <View style={styles.completedActionBar}>
                         <Text style={styles.completedActionLabel}>
-                          📸 KTV đã gửi ảnh nghiệm thu
-                        </Text>
+                          {translate("📸 KTV đã gửi ảnh nghiệm thu")}</Text>
                         <TouchableOpacity
                           style={styles.resolvedGreenBtn}
                           onPress={() => {
@@ -1110,14 +1375,13 @@ export default function App() {
                             setResScreen('TICKET_DETAIL');
                           }}
                         >
-                          <Text style={styles.resolvedGreenBtnText}>Đã giải quyết</Text>
+                          <Text style={styles.resolvedGreenBtnText}>{translate("Đã giải quyết")}</Text>
                         </TouchableOpacity>
                       </View>
                     ) : (
                       <View style={styles.cardFooterGrayBar}>
                         <Text style={styles.cardFooterGrayText}>
-                          🛠️ KTV: {t.assignedTech?.fullName || 'Đặng Văn Nam'} • ⏱️ 15 phút trước
-                        </Text>
+                          {translate("🛠️ KTV: ")}{t.assignedTech?.fullName || 'Đặng Văn Nam'} {translate("• ⏱️ 15 phút trước")}</Text>
                       </View>
                     )}
                   </TouchableOpacity>
@@ -1137,37 +1401,38 @@ export default function App() {
                   <TouchableOpacity onPress={() => setResScreen('HOME')}>
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle}>Tạo báo cáo sự cố</Text>
+                  <Text style={styles.subScreenTitle}>{translate("Tạo báo cáo sự cố")}</Text>
                 </View>
 
-                <Text style={styles.stepTitle}>1. Vị trí & Thiết bị gặp sự cố *</Text>
+                <Text style={styles.stepTitle}>{translate("1. Vị trí & Thiết bị gặp sự cố *")}</Text>
                 <TouchableOpacity
                   style={styles.qrDashedBtn}
                   onPress={() => setQrModalVisible(true)}
                 >
                   <Text style={styles.qrDashedBtnText}>
-                    📷 Quét mã QR thiết bị để tự động điền
-                  </Text>
+                    {translate("📷 Quét mã QR thiết bị để tự động điền")}</Text>
                 </TouchableOpacity>
 
-                <QrScannerModal
-                  visible={qrModalVisible}
-                  onClose={() => setQrModalVisible(false)}
-                  onScannedCode={handleQrCodeDetected}
-                />
+                {qrModalVisible && (
+                  <QrScannerModal
+                    visible
+                    onClose={() => setQrModalVisible(false)}
+                    onScannedCode={handleQrCodeDetected}
+                  />
+                )}
 
                 {scannedAsset && (
                   <View style={styles.qrRecognizedBox}>
                     <Text style={styles.qrRecognizedTitle}>
-                      ✅ Đã nhận diện từ mã QR: {scannedAsset.assetName}
+                      {translate("✅ Đã nhận diện từ mã QR: ")}{scannedAsset.assetName}
                     </Text>
                     <Text style={styles.qrRecognizedSub}>
-                      Mã thiết bị: {scannedAsset.qrCode} • Vị trí: {scannedAsset.locationLabel}
+                      {translate("Mã thiết bị: ")}{scannedAsset.qrCode} {translate("• Vị trí: ")}{scannedAsset.locationLabel}
                     </Text>
                   </View>
                 )}
 
-                <Text style={styles.stepTitle}>2. Hình ảnh hiện trường (Tối đa 3 ảnh)</Text>
+                <Text style={styles.stepTitle}>{translate("2. Hình ảnh hiện trường (Tối đa 3 ảnh)")}</Text>
                 <View style={styles.photoGridRow}>
                   {reportPhotos.map((item, idx) => (
                     <View key={idx} style={styles.photoSlotCard}>
@@ -1200,26 +1465,26 @@ export default function App() {
                               url: uploadedUrl,
                             },
                           ]);
-                          showToast('📸 Đã đính kèm ảnh hiện trường thành công!');
+                          showToast(translate('📸 Đã đính kèm ảnh hiện trường thành công!'));
                         })
                       }
                     >
                       <Text style={styles.addPhotoPlus}>＋</Text>
                       <Text style={styles.addPhotoLabel}>
-                        + Thêm ảnh ({reportPhotos.length}/3)
+                        {translate("+ Thêm ảnh (")}{reportPhotos.length}/3)
                       </Text>
                     </TouchableOpacity>
                   )}
                 </View>
 
-                <Text style={styles.stepTitle}>3. Mô tả sự cố *</Text>
+                <Text style={styles.stepTitle}>{translate("3. Mô tả sự cố *")}</Text>
                 <View style={styles.descBoxContainer}>
                   <TextInput
                     style={styles.descTextArea}
                     multiline
                     value={reportDesc}
                     onChangeText={setReportDesc}
-                    placeholder="Nhập mô tả sự cố bằng tiếng Việt..."
+                    placeholder={translate("Nhập mô tả sự cố bằng tiếng Việt...")}
                   />
                   <View style={styles.descBottomBar}>
                     <Text
@@ -1228,8 +1493,7 @@ export default function App() {
                         reportDesc.trim().length < 10 && { color: '#DC2626' },
                       ]}
                     >
-                      {reportDesc.length} ký tự (Đạt chuẩn tối thiểu 10 ký tự)
-                    </Text>
+                      {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
                     <TouchableOpacity
                       style={styles.voicePillBtn}
                       onPress={() => {
@@ -1237,19 +1501,17 @@ export default function App() {
                         setReportDesc(
                           'Máy lạnh ở sảnh B tầng 1 bị chảy nước nhiều xuống sàn gây trơn trượt, có tiếng kêu to.'
                         );
-                        showToast('🎤 Đã nhận diện giọng nói tiếng Việt!');
+                        showToast(translate('🎤 Đã nhận diện giọng nói tiếng Việt!'));
                       }}
                     >
-                      <Text style={styles.voicePillText}>🎤 Nhấn để nói</Text>
+                      <Text style={styles.voicePillText}>{translate("🎤 Nhấn để nói")}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
 
                 <View style={styles.geminiInfoBox}>
                   <Text style={styles.geminiInfoText}>
-                    ✨ Bạn không cần chọn danh mục. Gemini AI sẽ tự động phân loại & đánh giá
-                    độ khẩn cấp giúp Ban quản lý!
-                  </Text>
+                    {translate("✨ Bạn không cần chọn danh mục. Gemini AI sẽ tự động phân loại & đánh giá độ khẩn cấp giúp Ban quản lý!")}</Text>
                 </View>
               </ScrollView>
 
@@ -1262,7 +1524,7 @@ export default function App() {
                   {loading ? (
                     <ActivityIndicator color="#FFF" />
                   ) : (
-                    <Text style={styles.loginSubmitText}>Gửi báo cáo sự cố</Text>
+                    <Text style={styles.loginSubmitText}>{translate("Gửi báo cáo sự cố")}</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -1282,22 +1544,22 @@ export default function App() {
                       <Text style={styles.backArrowText}>←</Text>
                     </TouchableOpacity>
                     <Text style={styles.subScreenTitle} numberOfLines={1}>
-                      Chi tiết {activeTicket.ticketCode}
+                      {translate("Chi tiết ")}{activeTicket.ticketCode}
                     </Text>
                   </View>
                   <View style={[styles.statusPill, { backgroundColor: '#D1FAE5' }]}>
                     <Text style={[styles.statusPillText, { color: '#059669' }]}>
                       {activeTicket.status === 'COMPLETED'
-                        ? 'Hoàn thành'
+                        ? translate('Hoàn thành')
                         : activeTicket.status === 'CLOSED'
-                          ? 'Đã đóng'
-                          : 'Đang xử lý'}
+                          ? translate('Đã đóng')
+                          : translate('Đang xử lý')}
                     </Text>
                   </View>
                 </View>
 
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>Tiến độ xử lý sự cố</Text>
+                  <Text style={styles.cardBlockTitle}>{translate("Tiến độ xử lý sự cố")}</Text>
                   <View style={styles.timelineRow}>
                     <View style={[styles.timelineDot, { backgroundColor: '#16A34A' }]} />
                     <Text style={[styles.timelineText, { color: '#15803D', fontWeight: '700' }]}>
@@ -1324,22 +1586,21 @@ export default function App() {
                     <View style={[styles.timelineDot, { backgroundColor: '#CBD5E1' }]} />
                     <Text style={styles.timelineText}>
                       09:30 - Đã tiếp nhận (Chờ duyệt - AI gợi ý:{' '}
-                      {CATEGORY_SHORT_VN[activeTicket.aiSuggestedCategory] || 'Điện - Nước'})
+                      {translate(CATEGORY_SHORT_VN[activeTicket.aiSuggestedCategory] || 'Điện - Nước')})
                     </Text>
                   </View>
                 </View>
 
                 <View style={styles.proofGreenBorderCard}>
                   <Text style={styles.cardBlockTitle}>
-                    📸 Bằng chứng khắc phục từ Kỹ thuật viên
-                  </Text>
+                    {translate("📸 Bằng chứng khắc phục từ Kỹ thuật viên")}</Text>
                   <View style={styles.proofCompareRow}>
                     <View style={styles.proofHalfCol}>
                       <View style={styles.proofBoxBefore}>
                         <Text style={{ fontSize: 26 }}>🖼️</Text>
                         <Text style={styles.proofPlaceholderText}>Đường ống rò rỉ</Text>
                       </View>
-                      <Text style={styles.proofLabelBefore}>Ảnh trước khi sửa</Text>
+                      <Text style={styles.proofLabelBefore}>{translate("Ảnh trước khi sửa")}</Text>
                     </View>
                     <View style={styles.proofHalfCol}>
                       <View style={styles.proofBoxAfter}>
@@ -1350,12 +1611,12 @@ export default function App() {
                         </View>
                         <Text style={styles.proofAfterSmallText}>Đường ống đã thay mới</Text>
                       </View>
-                      <Text style={styles.proofLabelAfter}>✅ Ảnh sau khi sửa</Text>
+                      <Text style={styles.proofLabelAfter}>{translate("✅ Ảnh sau khi sửa")}</Text>
                     </View>
                   </View>
                   <View style={styles.techNoteGrayBox}>
                     <Text style={styles.techNoteGrayText}>
-                      Ghi chú KTV:{' '}
+                      {translate("Ghi chú KTV:")}{' '}
                       {activeTicket.techRepairNote ||
                         'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.'}
                     </Text>
@@ -1364,8 +1625,7 @@ export default function App() {
 
                 <View style={styles.whiteSectionCard}>
                   <Text style={styles.cardBlockTitle}>
-                    Đánh giá chất lượng xử lý (Tùy chọn)
-                  </Text>
+                    {translate("Đánh giá chất lượng xử lý (Tùy chọn)")}</Text>
                   <View style={styles.starsRow}>
                     {[1, 2, 3, 4, 5].map((star) => (
                       <TouchableOpacity key={star} onPress={() => setRatingStars(star)}>
@@ -1377,7 +1637,7 @@ export default function App() {
                   </View>
                   <TextInput
                     style={styles.ratingInputBox}
-                    placeholder="Nhập nhận xét của bạn về kỹ thuật viên..."
+                    placeholder={translate("Nhập nhận xét của bạn về kỹ thuật viên...")}
                     placeholderTextColor="#94A3B8"
                     value={ratingComment}
                     onChangeText={setRatingComment}
@@ -1393,8 +1653,7 @@ export default function App() {
                     disabled={loading}
                   >
                     <Text style={styles.confirmCloseGreenText}>
-                      ✅ Xác nhận Đã giải quyết (Đóng sự cố)
-                    </Text>
+                      {translate("✅ Xác nhận Đã giải quyết (Đóng sự cố)")}</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -1411,14 +1670,14 @@ export default function App() {
                 <TouchableOpacity onPress={() => setResScreen('HOME')}>
                   <Text style={styles.backArrowText}>←</Text>
                 </TouchableOpacity>
-                <Text style={styles.subScreenTitle}>Thông báo & Hồ sơ</Text>
+                <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ")}</Text>
               </View>
 
               <View style={styles.whiteSectionCard}>
                 <View style={styles.cardTopRow}>
-                  <Text style={styles.sectionTitleText}>Thông báo</Text>
+                  <Text style={styles.sectionTitleText}>{translate("Thông báo")}</Text>
                   <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount || 2} chưa đọc</Text>
+                    <Text style={styles.unreadPillText}>{unreadCount || 2} {translate("chưa đọc")}</Text>
                   </View>
                 </View>
                 {(notifications.length > 0
@@ -1449,7 +1708,7 @@ export default function App() {
               </View>
 
               <View style={styles.whiteSectionCard}>
-                <Text style={styles.cardBlockTitle}>Hồ sơ cư dân</Text>
+                <Text style={styles.cardBlockTitle}>{translate("Hồ sơ cư dân")}</Text>
                 <View style={styles.profileAvatarWrapper}>
                   <View style={styles.profileAvatarCircle}>
                     <Text style={{ fontSize: 32, color: '#2563EB' }}>👤</Text>
@@ -1470,14 +1729,12 @@ export default function App() {
                   </View>
                   <Text style={styles.profileInfoValue}>{user.phone}</Text>
                 </View>
+                <PreferenceControls />
                 <TouchableOpacity
                   style={styles.logoutRedOutlineBtn}
-                  onPress={() => {
-                    setToken(null);
-                    setUser(null);
-                  }}
+                  onPress={handleLogout}
                 >
-                  <Text style={styles.logoutRedOutlineText}>↪ Đăng xuất tài khoản</Text>
+                  <Text style={styles.logoutRedOutlineText}>{translate("↪ Đăng xuất tài khoản")}</Text>
                 </TouchableOpacity>
               </View>
             </ScrollView>
@@ -1494,10 +1751,10 @@ export default function App() {
                   <TouchableOpacity onPress={() => setResScreen('HOME')}>
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle}>Lịch sử sự cố</Text>
+                  <Text style={styles.subScreenTitle}>{translate("Lịch sử sự cố")}</Text>
                 </View>
                 <View style={styles.totalCountBadge}>
-                  <Text style={styles.totalCountText}>Tổng: {tickets.length} sự cố</Text>
+                  <Text style={styles.totalCountText}>{translate("Tổng: ")}{tickets.length} {translate("sự cố")}</Text>
                 </View>
               </View>
 
@@ -1505,7 +1762,7 @@ export default function App() {
                 <Text style={{ marginRight: 8, color: '#64748B' }}>🔍</Text>
                 <TextInput
                   style={styles.searchBarInput}
-                  placeholder="Tìm mã Ticket (#RF-...) hoặc tên sự cố..."
+                  placeholder={translate("Tìm mã Ticket (#RF-...) hoặc tên sự cố...")}
                   placeholderTextColor="#94A3B8"
                   value={searchQuery}
                   onChangeText={setSearchQuery}
@@ -1530,7 +1787,7 @@ export default function App() {
                       historyFilter === 'ALL' && styles.filterPillTextActive,
                     ]}
                   >
-                    Tất cả ({tickets.length})
+                    {translate("Tất cả (")}{tickets.length})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1546,7 +1803,7 @@ export default function App() {
                       historyFilter === 'CLOSED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Đã đóng ({closedTickets.length})
+                    {translate("Đã đóng (")}{closedTickets.length})
                   </Text>
                 </TouchableOpacity>
               </ScrollView>
@@ -1564,14 +1821,14 @@ export default function App() {
                     <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
                     <View style={[styles.statusPill, { backgroundColor: '#F1F5F9' }]}>
                       <Text style={[styles.statusPillText, { color: '#64748B' }]}>
-                        {t.status === 'CLOSED' ? 'Đã đóng' : t.status}
+                        {t.status === 'CLOSED' ? translate('Đã đóng') : translate(t.status)}
                       </Text>
                     </View>
                   </View>
                   <Text style={styles.cardMainTitle}>{t.title}</Text>
                   <Text style={styles.cardLocationText}>
-                    📍 {t.locationNote} • Danh mục:{' '}
-                    {CATEGORY_SHORT_VN[t.finalCategory || t.aiSuggestedCategory] || 'Điện - Nước'}
+                    📍 {t.locationNote} {translate("• Danh mục:")}{' '}
+                    {translate(CATEGORY_SHORT_VN[t.finalCategory || t.aiSuggestedCategory] || 'Điện - Nước')}
                   </Text>
                   <View style={styles.historyFooterBar}>
                     <View>
@@ -1608,8 +1865,7 @@ export default function App() {
                       resScreen === 'HOME' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Trang chủ
-                  </Text>
+                    {translate("Trang chủ")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.figmaNavTab}
@@ -1622,8 +1878,7 @@ export default function App() {
                       resScreen === 'HISTORY' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Lịch sử
-                  </Text>
+                    {translate("Lịch sử")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.figmaNavTab}
@@ -1636,8 +1891,7 @@ export default function App() {
                       resScreen === 'NOTI_PROFILE' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Cá nhân
-                  </Text>
+                    {translate("Cá nhân")}</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -1680,7 +1934,7 @@ export default function App() {
 
     return (
       <SafeAreaView style={styles.screenBg}>
-        <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
+        <ThemedStatusBar barStyle="dark-content" />
         <View style={styles.mobileShell}>
           {toastMsg && (
             <View style={styles.toastBanner}>
@@ -1697,11 +1951,10 @@ export default function App() {
               <View style={styles.resHomeHeader}>
                 <View style={{ flex: 1, paddingRight: 10 }}>
                   <Text style={styles.aptSmallLabel}>
-                    {user.specialtyLabel || 'Kỹ thuật viên Điện - Nước'}
+                    {user.specialtyLabel || translate('Kỹ thuật viên Điện - Nước')}
                   </Text>
                   <Text style={styles.aptBigTitle}>
-                    {user.fullName} • Ca trực Sáng
-                  </Text>
+                    {user.fullName} {translate("• Ca trực Sáng")}</Text>
                 </View>
                 <TouchableOpacity
                   style={styles.bellCircleBtn}
@@ -1716,23 +1969,23 @@ export default function App() {
                 activeOpacity={0.85}
                 style={styles.techDutyCard}
                 onPress={handleToggleOnDuty}
+                disabled={dutyUpdating}
               >
                 <Text style={styles.techDutyTitle}>
-                  Trạng thái làm việc: {user.isOnDuty !== false ? '🟢' : '⚪'}{' '}
-                  {user.isOnDuty !== false
-                    ? 'Đang trong ca trực (On-duty)'
-                    : 'Ngoài ca trực (Off-duty)'}
+                  {dutyUpdating ? translate('Đang cập nhật trạng thái...') : translate("Trạng thái làm việc: ")}{!dutyUpdating && (user.isOnDuty !== false ? '🟢' : '⚪')}{' '}
+                  {!dutyUpdating && (user.isOnDuty !== false
+                    ? translate('Đang trong ca trực (On-duty)')
+                    : translate('Ngoài ca trực (Off-duty)'))}
                 </Text>
                 <Text style={styles.techDutySub}>
-                  Hôm nay bạn có {assignedCount + inProgressCount} sự cố cần xử lý và{' '}
-                  {completedCount} sự cố đã hoàn thành.
-                </Text>
+                  {translate("Hôm nay bạn có ")}{assignedCount + inProgressCount} {translate("sự cố cần xử lý và")}{' '}
+                  {completedCount} {translate("sự cố đã hoàn thành.")}</Text>
               </TouchableOpacity>
 
               <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitleText}>Công việc được giao</Text>
+                <Text style={styles.sectionTitleText}>{translate("Công việc được giao")}</Text>
                 <TouchableOpacity onPress={() => setTechScreen('HISTORY')}>
-                  <Text style={styles.seeHistoryLink}>Xem lịch sử &gt;</Text>
+                  <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
                 </TouchableOpacity>
               </View>
 
@@ -1754,7 +2007,7 @@ export default function App() {
                       techHomeFilter === 'ALL' && styles.filterPillTextActive,
                     ]}
                   >
-                    Tất cả ({tickets.length})
+                    {translate("Tất cả (")}{tickets.length})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1770,7 +2023,7 @@ export default function App() {
                       techHomeFilter === 'ASSIGNED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Chờ xử lý ({assignedCount})
+                    {translate("Chờ xử lý (")}{assignedCount})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1786,7 +2039,7 @@ export default function App() {
                       techHomeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
                     ]}
                   >
-                    Đang sửa ({inProgressCount})
+                    {translate("Đang sửa (")}{inProgressCount})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -1802,7 +2055,7 @@ export default function App() {
                       techHomeFilter === 'COMPLETED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Hoàn thành ({completedCount})
+                    {translate("Hoàn thành (")}{completedCount})
                   </Text>
                 </TouchableOpacity>
               </ScrollView>
@@ -1820,14 +2073,7 @@ export default function App() {
                       isAssigned && { borderColor: '#3B82F6', borderWidth: 1.5 },
                       isInProgress && { borderColor: '#818CF8', borderWidth: 1.5 },
                     ]}
-                    onPress={() => {
-                      setActiveTicket(t);
-                      setTechRepairNote(
-                        t.techRepairNote ||
-                        'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.'
-                      );
-                      setTechScreen('TASK_DETAIL');
-                    }}
+                    onPress={() => openTechnicianTask(t)}
                   >
                     <View style={styles.cardTopRow}>
                       <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
@@ -1852,18 +2098,17 @@ export default function App() {
                           ]}
                         >
                           {isAssigned
-                            ? 'Đã phân công'
+                            ? translate('Đã phân công')
                             : isInProgress
-                              ? 'Đang xử lý'
-                              : 'Hoàn thành'}
+                              ? translate('Đang xử lý')
+                              : translate('Hoàn thành')}
                         </Text>
                       </View>
                     </View>
 
                     {prio === 'HIGH' && (
                       <Text style={styles.urgentRedText}>
-                        🔥 Ưu tiên: Cao (Khẩn cấp)
-                      </Text>
+                        {translate("🔥 Ưu tiên: Cao (Khẩn cấp)")}</Text>
                     )}
 
                     <Text style={styles.cardMainTitle}>{t.title}</Text>
@@ -1874,18 +2119,21 @@ export default function App() {
                         <TouchableOpacity
                           style={styles.acceptJobBlueBtn}
                           onPress={() => handleTechAcknowledge(t)}
+                          disabled={loading}
                         >
-                          <Text style={styles.acceptJobBlueBtnText}>Nhận việc ngay</Text>
+                          {loading ? (
+                            <ActivityIndicator color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.acceptJobBlueBtnText}>{translate("Nhận việc ngay")}</Text>
+                          )}
                         </TouchableOpacity>
                         <Text style={styles.assignedTimeMeta}>
-                          Giao bởi BMB • 5 phút trước
-                        </Text>
+                          {translate("Giao bởi BMB • 5 phút trước")}</Text>
                       </View>
                     ) : (
                       <View style={styles.techInProgressBar}>
                         <Text style={styles.techInProgressText}>
-                          🛠️ Kỹ thuật viên: {user.fullName} • ⏱️ 15 phút trước
-                        </Text>
+                          {translate("🛠️ Kỹ thuật viên: ")}{user.fullName} {translate("• ⏱️ 15 phút trước")}</Text>
                       </View>
                     )}
                   </TouchableOpacity>
@@ -1906,7 +2154,7 @@ export default function App() {
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
                   <Text style={styles.subScreenTitle} numberOfLines={1}>
-                    Chi tiết sự cố {activeTicket.ticketCode}
+                    {translate("Chi tiết sự cố ")}{activeTicket.ticketCode}
                   </Text>
                 </View>
 
@@ -1916,10 +2164,10 @@ export default function App() {
                     <View style={[styles.statusPill, { backgroundColor: '#E0E7FF' }]}>
                       <Text style={[styles.statusPillText, { color: '#4F46E5' }]}>
                         {activeTicket.status === 'IN_PROGRESS'
-                          ? 'Đang xử lý'
+                          ? translate('Đang xử lý')
                           : activeTicket.status === 'ASSIGNED'
-                            ? 'Đã phân công'
-                            : 'Hoàn thành'}
+                            ? translate('Đã phân công')
+                            : translate('Hoàn thành')}
                       </Text>
                     </View>
                   </View>
@@ -1929,24 +2177,24 @@ export default function App() {
                 </View>
 
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>Thông tin kỹ thuật</Text>
+                  <Text style={styles.cardBlockTitle}>{translate("Thông tin kỹ thuật")}</Text>
                   <Text style={styles.techInfoLine}>
-                    📍 Vị trí: {activeTicket.locationNote || 'Căn hộ A-1204 (Tòa S1 - Tầng 12)'}
+                    {translate("📍 Vị trí: ")}{activeTicket.locationNote || 'Căn hộ A-1204 (Tòa S1 - Tầng 12)'}
                   </Text>
                   <Text style={styles.techInfoLine}>
-                    🔧 Mã thiết bị (QR):{' '}
+                    {translate("🔧 Mã thiết bị (QR):")}{' '}
                     {activeTicket.asset?.qrCode || 'WP-1204 - Đường ống bồn rửa'}
                   </Text>
                   <Text style={[styles.techInfoLine, { marginBottom: 0 }]}>
-                    ⚠️ Độ ưu tiên (BMB duyệt): Cao • Danh mục:{' '}
-                    {CATEGORY_SHORT_VN[
+                    {translate("⚠️ Độ ưu tiên (BMB duyệt): Cao • Danh mục:")}{' '}
+                    {translate(CATEGORY_SHORT_VN[
                       activeTicket.finalCategory || activeTicket.aiSuggestedCategory
-                    ] || 'Điện - Nước'}
+                    ] || 'Điện - Nước')}
                   </Text>
                 </View>
 
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>Mô tả của cư dân</Text>
+                  <Text style={styles.cardBlockTitle}>{translate("Mô tả của cư dân")}</Text>
                   <Text style={styles.residentDescGray}>
                     {activeTicket.description}
                   </Text>
@@ -1969,8 +2217,7 @@ export default function App() {
 
                 <View style={styles.proofGreenBorderCard}>
                   <Text style={styles.cardBlockTitle}>
-                    📸 Ảnh nghiệm thu sau khi sửa (Bắt buộc ít nhất 1 ảnh) *
-                  </Text>
+                    {translate("📸 Ảnh nghiệm thu sau khi sửa (Bắt buộc ít nhất 1 ảnh) *")}</Text>
                   <View style={styles.proofCompareRow}>
                     <View style={styles.techCapturedBox}>
                       {techProofPhotos[0] ? (
@@ -1985,26 +2232,26 @@ export default function App() {
                       onPress={() =>
                         handlePickOrCapturePhoto('repair_proof', (uploadedUrl) => {
                           setTechProofPhotos((prev) => [uploadedUrl, ...prev]);
-                          showToast('📸 Đã tải lên ảnh nghiệm thu sau sửa chữa!');
+                          showToast(translate('📸 Đã tải lên ảnh nghiệm thu sau sửa chữa!'));
                         })
                       }
                     >
                       <Text style={styles.techPlusIcon}>＋</Text>
                       <Text style={styles.techAddPhotoBlueText}>
-                        + Chụp ảnh hoàn thành ({techProofPhotos.length})
+                        {translate("+ Chụp ảnh hoàn thành (")}{techProofPhotos.length})
                       </Text>
                     </TouchableOpacity>
                   </View>
                 </View>
 
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>Ghi chú kết quả xử lý</Text>
+                  <Text style={styles.cardBlockTitle}>{translate("Ghi chú kết quả xử lý")}</Text>
                   <TextInput
                     style={styles.ratingInputBox}
                     multiline
                     value={techRepairNote}
                     onChangeText={setTechRepairNote}
-                    placeholder="Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ."
+                    placeholder={translate("Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.")}
                     placeholderTextColor="#94A3B8"
                   />
                 </View>
@@ -2021,8 +2268,7 @@ export default function App() {
                       <ActivityIndicator color="#FFF" />
                     ) : (
                       <Text style={styles.confirmCloseGreenText}>
-                        Hoàn thành & Gửi ảnh nghiệm thu
-                      </Text>
+                        {translate("Hoàn thành & Gửi ảnh nghiệm thu")}</Text>
                     )}
                   </TouchableOpacity>
                 </View>
@@ -2040,14 +2286,14 @@ export default function App() {
                 <TouchableOpacity onPress={() => setTechScreen('HOME')}>
                   <Text style={styles.backArrowText}>←</Text>
                 </TouchableOpacity>
-                <Text style={styles.subScreenTitle}>Thông báo & Hồ sơ KTV</Text>
+                <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ KTV")}</Text>
               </View>
 
               <View style={styles.whiteSectionCard}>
                 <View style={styles.cardTopRow}>
-                  <Text style={styles.sectionTitleText}>Thông báo công việc mới</Text>
+                  <Text style={styles.sectionTitleText}>{translate("Thông báo công việc mới")}</Text>
                   <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount || 2} chưa đọc</Text>
+                    <Text style={styles.unreadPillText}>{unreadCount || 2} {translate("chưa đọc")}</Text>
                   </View>
                 </View>
 
@@ -2073,7 +2319,7 @@ export default function App() {
               </View>
 
               <View style={styles.whiteSectionCard}>
-                <Text style={styles.cardBlockTitle}>Hồ sơ Kỹ thuật viên</Text>
+                <Text style={styles.cardBlockTitle}>{translate("Hồ sơ Kỹ thuật viên")}</Text>
                 <View style={styles.techProfileHeaderRow}>
                   <View style={styles.techAvatarCircle}>
                     <Text style={{ fontSize: 26, color: '#1D61E7' }}>👷</Text>
@@ -2082,8 +2328,7 @@ export default function App() {
                     <Text style={styles.profileNameText}>{user.fullName}</Text>
                     <View style={styles.specialtyPill}>
                       <Text style={styles.specialtyPillText}>
-                        Chuyên môn: Điện - Nước (Plumbing)
-                      </Text>
+                        {translate("Chuyên môn: Điện - Nước (Plumbing)")}</Text>
                     </View>
                   </View>
                 </View>
@@ -2091,23 +2336,19 @@ export default function App() {
                 <View style={styles.techDivider} />
 
                 <Text style={styles.techProfileLine}>
-                  📞 Số điện thoại: {user.phone || '0356 166 863'}
+                  {translate("📞 Số điện thoại: ")}{user.phone || '0356 166 863'}
                 </Text>
                 <Text style={styles.techProfileLine}>
-                  🕒 Ca trực hiện tại: Ca Sáng (07:00 - 15:00) • 🟢 On-duty
-                </Text>
+                  {translate("🕒 Ca trực hiện tại: Ca Sáng (07:00 - 15:00) • 🟢 On-duty")}</Text>
                 <Text style={styles.techProfileLine}>
-                  📊 Hiệu suất tháng 10: Đã hoàn thành 24 sự cố (Đánh giá TB: 4.9 ⭐)
-                </Text>
+                  {translate("📊 Hiệu suất tháng 10: Đã hoàn thành 24 sự cố (Đánh giá TB: 4.9 ⭐)")}</Text>
 
+                <PreferenceControls />
                 <TouchableOpacity
                   style={styles.logoutRedOutlineBtn}
-                  onPress={() => {
-                    setToken(null);
-                    setUser(null);
-                  }}
+                onPress={handleLogout}
                 >
-                  <Text style={styles.logoutRedOutlineText}>Đăng xuất tài khoản</Text>
+                  <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
                 </TouchableOpacity>
               </View>
             </ScrollView>
@@ -2120,21 +2361,19 @@ export default function App() {
               showsVerticalScrollIndicator={false}
             >
               <Text style={[styles.aptBigTitle, { marginTop: 4 }]}>
-                Lịch sử công việc đã hoàn thành
-              </Text>
+                {translate("Lịch sử công việc đã hoàn thành")}</Text>
               <View
                 style={[styles.unreadPillBadge, { alignSelf: 'flex-start', marginVertical: 10 }]}
               >
                 <Text style={styles.unreadPillText}>
-                  Tháng 10: {tickets.length || 24} việc
-                </Text>
+                  {translate("Tháng 10: ")}{tickets.length || 24} {translate("việc")}</Text>
               </View>
 
               <View style={styles.searchBarBox}>
                 <Text style={{ marginRight: 8, color: '#64748B' }}>🔍</Text>
                 <TextInput
                   style={styles.searchBarInput}
-                  placeholder="Tìm mã Ticket (#RF-...) hoặc mã thiết bị (WP-...)..."
+                  placeholder={translate("Tìm mã Ticket (#RF-...) hoặc mã thiết bị (WP-...)...")}
                   placeholderTextColor="#94A3B8"
                   value={searchQuery}
                   onChangeText={setSearchQuery}
@@ -2156,7 +2395,7 @@ export default function App() {
                       techHistoryFilter === 'ALL' && styles.filterPillTextActive,
                     ]}
                   >
-                    Tất cả ({tickets.length})
+                    {translate("Tất cả (")}{tickets.length})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -2173,7 +2412,7 @@ export default function App() {
                       techHistoryFilter === 'CLOSED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Đã đóng ({closedCount})
+                    {translate("Đã đóng (")}{closedCount})
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -2190,7 +2429,7 @@ export default function App() {
                       techHistoryFilter === 'COMPLETED' && styles.filterPillTextActive,
                     ]}
                   >
-                    Chờ cư dân nghiệm thu ({waitingResidentCount})
+                    {translate("Chờ cư dân nghiệm thu (")}{waitingResidentCount})
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -2201,18 +2440,14 @@ export default function App() {
                   <TouchableOpacity
                     key={t.id}
                     style={styles.resTicketCard}
-                    onPress={() => {
-                      setActiveTicket(t);
-                      setTechScreen('TASK_DETAIL');
-                    }}
+                    onPress={() => openTechnicianTask(t)}
                   >
                     <View style={styles.cardTopRow}>
                       <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
                       {!isWaitingAccept && (
                         <View style={[styles.statusPill, { backgroundColor: '#E2E8F0' }]}>
                           <Text style={[styles.statusPillText, { color: '#475569' }]}>
-                            Đã đóng
-                          </Text>
+                            {translate("Đã đóng")}</Text>
                         </View>
                       )}
                     </View>
@@ -2220,8 +2455,7 @@ export default function App() {
                     {isWaitingAccept && (
                       <View style={styles.waitingResidentBanner}>
                         <Text style={styles.waitingResidentBannerText}>
-                          Hoàn thành (Chờ cư dân xác nhận)
-                        </Text>
+                          {translate("Hoàn thành (Chờ cư dân xác nhận)")}</Text>
                       </View>
                     )}
 
@@ -2231,8 +2465,7 @@ export default function App() {
                     {isWaitingAccept ? (
                       <View style={styles.sentPhotoBlueBar}>
                         <Text style={styles.sentPhotoBlueText}>
-                          📸 Đã gửi 2 ảnh nghiệm thu lúc 08:40 hôm nay
-                        </Text>
+                          {translate("📸 Đã gửi 2 ảnh nghiệm thu lúc 08:40 hôm nay")}</Text>
                       </View>
                     ) : (
                       <View style={styles.closedResidentGreenBar}>
@@ -2263,8 +2496,7 @@ export default function App() {
                       techScreen === 'HOME' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Trang chủ
-                  </Text>
+                    {translate("Trang chủ")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.figmaNavTab}
@@ -2277,8 +2509,7 @@ export default function App() {
                       techScreen === 'HISTORY' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Lịch sử
-                  </Text>
+                    {translate("Lịch sử")}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.figmaNavTab}
@@ -2291,8 +2522,7 @@ export default function App() {
                       techScreen === 'NOTI_PROFILE' && styles.figmaNavLabelActive,
                     ]}
                   >
-                    Hồ sơ
-                  </Text>
+                    {translate("Hồ sơ")}</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -2322,6 +2552,20 @@ export default function App() {
   });
 
   const pendingTicketsForRadio = tickets.filter((t) => t.status === 'PENDING');
+  const isUrgentNotification = (notification: any) =>
+    notification.type === 'NEW_INCIDENT_AI' ||
+    notification.type === 'AI_TIMEOUT_ALERT' ||
+    notification.ticket?.finalPriority === 'HIGH';
+  const isTechnicianNotification = (notification: any) =>
+    notification.type === 'TASK_ASSIGNED' || notification.type === 'STATUS_UPDATED';
+  const filteredBmbNotifications = notifications.filter((notification) => {
+    if (bmbNotiFilter === 'UNREAD') return !notification.isRead;
+    if (bmbNotiFilter === 'URGENT') return isUrgentNotification(notification);
+    if (bmbNotiFilter === 'TECH') return isTechnicianNotification(notification);
+    return true;
+  });
+  const urgentNotificationCount = notifications.filter(isUrgentNotification).length;
+  const technicianNotificationCount = notifications.filter(isTechnicianNotification).length;
 
   return (
     <SafeAreaView style={styles.bmbWebRoot}>
@@ -2330,14 +2574,18 @@ export default function App() {
         {/* CỘT 1: SIDEBAR TRÁI CỐ ĐỊNH CHUẨN FIGMA BMB 01, 02, 03               */}
         {/* ==================================================================== */}
         <View style={styles.bmbSidebar}>
-          <View>
+          <ScrollView
+            style={styles.bmbSidebarNavigation}
+            contentContainerStyle={{ paddingBottom: 8 }}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={styles.bmbSidebarBrandRow}>
               <Text style={{ fontSize: 22, marginRight: 8 }}>🏢</Text>
               <Text style={styles.bmbSidebarLogoText}>ResiFix BMB</Text>
             </View>
-            <Text style={styles.bmbSidebarSubText}>Hệ thống Quản lý Tòa nhà</Text>
+            <Text style={styles.bmbSidebarSubText}>{translate("Hệ thống Quản lý Tòa nhà")}</Text>
 
-            <Text style={styles.bmbWorkspaceHeading}>KHÔNG GIAN QUẢN LÝ</Text>
+            <Text style={styles.bmbWorkspaceHeading}>{translate("KHÔNG GIAN QUẢN LÝ")}</Text>
 
             <TouchableOpacity
               style={[
@@ -2352,8 +2600,7 @@ export default function App() {
                   bmbNavTab === 'TICKETS' && styles.bmbMenuBtnTextActive,
                 ]}
               >
-                📋 Quản lý sự cố (Tickets)
-              </Text>
+                {translate("📋 Quản lý sự cố (Tickets)")}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2369,8 +2616,7 @@ export default function App() {
                   bmbNavTab === 'TECHNICIANS' && styles.bmbMenuBtnTextActive,
                 ]}
               >
-                👷 Kỹ thuật viên ca trực
-              </Text>
+                {translate("👷 Kỹ thuật viên ca trực")}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2386,22 +2632,21 @@ export default function App() {
                   bmbNavTab === 'NOTIFICATIONS' && styles.bmbMenuBtnTextActive,
                 ]}
               >
-                🔔 Thông báo hệ thống
-              </Text>
+                {translate("🔔 Thông báo hệ thống")}</Text>
               <View style={styles.bmbSidebarNewRedTag}>
                 <Text style={styles.bmbSidebarNewRedText}>
-                  0{unreadCount || 4} mới
-                </Text>
+                  {String(unreadCount).padStart(2, '0')} {translate("mới")}</Text>
               </View>
             </TouchableOpacity>
-          </View>
+          </ScrollView>
 
           {/* Footer Sidebar: Tòa nhà đang quản lý + BMB: Cầm Dương Mỹ Hạnh + Đăng xuất */}
-          <View>
+          <View style={styles.bmbSidebarFooter}>
+            <PreferenceControls compact />
             <View style={styles.bmbBuildingStatusBox}>
-              <Text style={styles.bmbBuildingSmallLabel}>TÒA NHÀ ĐANG QUẢN LÝ</Text>
+              <Text style={styles.bmbBuildingSmallLabel}>{translate("TÒA NHÀ ĐANG QUẢN LÝ")}</Text>
               <Text style={styles.bmbBuildingName}>ResiFix Residence</Text>
-              <Text style={styles.bmbBuildingOnline}>• Hệ thống đang hoạt động</Text>
+              <Text style={styles.bmbBuildingOnline}>{translate("• Hệ thống đang hoạt động")}</Text>
             </View>
 
             <View style={styles.bmbAdminFooter}>
@@ -2410,11 +2655,10 @@ export default function App() {
               </Text>
               <TouchableOpacity
                 onPress={() => {
-                  setToken(null);
-                  setUser(null);
+                  handleLogout();
                 }}
               >
-                <Text style={styles.bmbSidebarLogoutText}>↪ Đăng xuất</Text>
+                <Text style={styles.bmbSidebarLogoutText}>{translate("↪ Đăng xuất")}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2438,10 +2682,9 @@ export default function App() {
 
               <View style={styles.cardTopRow}>
                 <View>
-                  <Text style={styles.bmbPageTitle}>Danh sách Sự cố Tòa nhà</Text>
+                  <Text style={styles.bmbPageTitle}>{translate("Danh sách Sự cố Tòa nhà")}</Text>
                   <Text style={styles.bmbPageSubtitle}>
-                    Theo dõi, phê duyệt và điều phối xử lý sự cố
-                  </Text>
+                    {translate("Theo dõi, phê duyệt và điều phối xử lý sự cố")}</Text>
                 </View>
                 <Text style={styles.bmbDateLabel}>30/10/2026</Text>
               </View>
@@ -2449,7 +2692,7 @@ export default function App() {
               {/* 4 Thẻ KPI lớn chuẩn Figma 01 BMB */}
               <View style={styles.bmbKpiRow}>
                 <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>Chờ duyệt AI</Text>
+                  <Text style={styles.bmbKpiLabel}>{translate("Chờ duyệt AI")}</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#EA580C' }]}>
                       0{bmbPendingCount}
@@ -2459,7 +2702,7 @@ export default function App() {
                 </View>
 
                 <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>Đã phân công</Text>
+                  <Text style={styles.bmbKpiLabel}>{translate("Đã phân công")}</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>
                       0{bmbAssignedCount}
@@ -2469,7 +2712,7 @@ export default function App() {
                 </View>
 
                 <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>Đang xử lý</Text>
+                  <Text style={styles.bmbKpiLabel}>{translate("Đang xử lý")}</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#4F46E5' }]}>
                       0{bmbInProgressCount}
@@ -2479,7 +2722,7 @@ export default function App() {
                 </View>
 
                 <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>Hoàn thành/Đóng</Text>
+                  <Text style={styles.bmbKpiLabel}>{translate("Hoàn thành/Đóng")}</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#16A34A' }]}>
                       {bmbCompletedCount + bmbClosedCount}
@@ -2494,7 +2737,7 @@ export default function App() {
                 <Text style={{ marginRight: 8, color: '#64748B' }}>🔍</Text>
                 <TextInput
                   style={styles.searchBarInput}
-                  placeholder="Tìm mã sự cố, căn hộ hoặc thiết bị..."
+                  placeholder={translate("Tìm mã sự cố, căn hộ hoặc thiết bị...")}
                   placeholderTextColor="#94A3B8"
                   value={searchQuery}
                   onChangeText={setSearchQuery}
@@ -2504,28 +2747,28 @@ export default function App() {
               {/* Hàng 6 viên thuốc lọc trạng thái chuẩn Figma 01 BMB */}
               <View style={styles.chipWrapRow}>
                 {[
-                  { key: 'ALL', label: `Tất cả (${tickets.length})`, dot: '' },
+                    { key: 'ALL', label: `${translate('Tất cả')} (${tickets.length})`, dot: '' },
                   {
                     key: 'PENDING',
-                    label: `Chờ duyệt AI (0${bmbPendingCount})`,
+                    label: `${translate('Chờ duyệt AI (')}0${bmbPendingCount})`,
                     dot: '🟠 ',
                   },
                   {
                     key: 'ASSIGNED',
-                    label: `Đã phân công (0${bmbAssignedCount})`,
+                    label: `${translate('Đã phân công')} (0${bmbAssignedCount})`,
                     dot: '🔵 ',
                   },
                   {
                     key: 'IN_PROGRESS',
-                    label: `Đang xử lý (0${bmbInProgressCount})`,
+                    label: `${translate('Đang xử lý')} (0${bmbInProgressCount})`,
                     dot: '🟣 ',
                   },
                   {
                     key: 'COMPLETED',
-                    label: `Hoàn thành (0${bmbCompletedCount})`,
+                    label: `${translate('Hoàn thành')} (0${bmbCompletedCount})`,
                     dot: '🟢 ',
                   },
-                  { key: 'CLOSED', label: `Đã đóng (${bmbClosedCount})`, dot: '⚫ ' },
+                  { key: 'CLOSED', label: `${translate('Đã đóng (')}${bmbClosedCount})`, dot: '⚫ ' },
                 ].map((tab: any) => (
                   <TouchableOpacity
                     key={tab.key}
@@ -2550,9 +2793,9 @@ export default function App() {
 
               <View style={[styles.cardTopRow, { marginVertical: 8 }]}>
                 <Text style={{ fontWeight: '800', color: '#0F172A', fontSize: 13.5 }}>
-                  Tất cả sự cố ({filteredBmbTickets.length})
+                  {translate("Tất cả sự cố (")}{filteredBmbTickets.length})
                 </Text>
-                <Text style={{ color: '#64748B', fontSize: 12.5 }}>Mới nhất trước ↓</Text>
+                <Text style={{ color: '#64748B', fontSize: 12.5 }}>{translate("Mới nhất trước ↓")}</Text>
               </View>
 
               {/* Danh sách Thẻ Sự cố */}
@@ -2585,7 +2828,7 @@ export default function App() {
                           {t.ticketCode}
                         </Text>
                         {isHigh && (
-                          <Text style={styles.bmbUrgentInlineDot}> ● Khẩn cấp</Text>
+                          <Text style={styles.bmbUrgentInlineDot}> {translate("● Khẩn cấp")}</Text>
                         )}
                       </View>
                       <View
@@ -2609,12 +2852,12 @@ export default function App() {
                           ]}
                         >
                           {isPending
-                            ? 'Chờ duyệt'
+                            ? translate('Chờ duyệt')
                             : isAssigned
-                              ? 'Đã phân công'
+                              ? translate('Đã phân công')
                               : t.status === 'IN_PROGRESS'
-                                ? 'Đang xử lý'
-                                : 'Đã đóng'}
+                                ? translate('Đang xử lý')
+                                : translate('Đã đóng')}
                         </Text>
                       </View>
                     </View>
@@ -2626,22 +2869,20 @@ export default function App() {
                       {isFallbackWarning && isPending ? (
                         <View style={styles.bmbAiTimeoutTag}>
                           <Text style={styles.bmbAiTimeoutText}>
-                            ⚠️ AI quá thời gian chờ - Vui lòng phân loại thủ công (US-19)
-                          </Text>
+                            {translate("⚠️ AI quá thời gian chờ - Vui lòng phân loại thủ công (US-19)")}</Text>
                         </View>
                       ) : (
                         <View style={styles.bmbAiPurpleMiniTag}>
                           <Text style={styles.bmbAiPurpleMiniText}>
-                            ✨ Gemini gợi ý:{' '}
-                            {CATEGORY_SHORT_VN[
+                            {translate("✨ Gemini gợi ý:")}{' '}
+                            {translate(CATEGORY_SHORT_VN[
                               t.finalCategory || t.aiSuggestedCategory
-                            ] || 'Điện - Nước'}
+                            ] || 'Điện - Nước')}
                           </Text>
                         </View>
                       )}
                       <Text style={{ fontSize: 11.5, color: '#64748B' }}>
-                        08:42 • Hôm nay
-                      </Text>
+                        {translate("08:42 • Hôm nay")}</Text>
                     </View>
                   </TouchableOpacity>
                 );
@@ -2650,8 +2891,7 @@ export default function App() {
               {/* Thanh phân trang dưới đáy chuẩn Figma 01 BMB */}
               <View style={[styles.cardTopRow, { marginTop: 8, paddingBottom: 24 }]}>
                 <Text style={{ fontSize: 12, color: '#64748B' }}>
-                  Hiển thị {filteredBmbTickets.length} trong tổng số {tickets.length} sự cố
-                </Text>
+                  {translate("Hiển thị ")}{filteredBmbTickets.length} {translate("trong tổng số ")}{tickets.length} {translate("sự cố")}</Text>
                 <View style={styles.rowCenter}>
                   <View style={styles.pageNumActive}>
                     <Text style={{ color: '#1D61E7', fontWeight: '800', fontSize: 12 }}>
@@ -2674,7 +2914,7 @@ export default function App() {
                 <View>
                   <View style={styles.cardTopRow}>
                     <Text style={styles.bmbInspectorTitle}>
-                      Chi tiết sự cố {bmbSelectedTicket.ticketCode}
+                      {translate("Chi tiết sự cố ")}{bmbSelectedTicket.ticketCode}
                     </Text>
                     <Text style={{ fontSize: 16, color: '#64748B' }}>✕</Text>
                   </View>
@@ -2683,24 +2923,22 @@ export default function App() {
                     <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
                       <Text style={[styles.statusPillText, { color: '#D97706' }]}>
                         {bmbSelectedTicket.status === 'PENDING'
-                          ? 'Chờ duyệt'
-                          : bmbSelectedTicket.status}
+                          ? translate('Chờ duyệt')
+                          : translate(bmbSelectedTicket.status)}
                       </Text>
                     </View>
                     <Text style={{ fontSize: 12, color: '#64748B' }}>
-                      Tiếp nhận lúc 08:42 hôm nay
-                    </Text>
+                      {translate("Tiếp nhận lúc 08:42 hôm nay")}</Text>
                   </View>
 
                   <Text style={styles.bmbSmallSectionHead}>
-                    THÔNG TIN CƯ DÂN PHẢN ÁNH
-                  </Text>
+                    {translate("THÔNG TIN CƯ DÂN PHẢN ÁNH")}</Text>
                   <View style={[styles.cardTopRow, { marginTop: 6 }]}>
                     <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#0F172A', flex: 1 }}>
                       📍 {bmbSelectedTicket.locationNote}
                     </Text>
                     <View style={styles.qrVerifiedPill}>
-                      <Text style={styles.qrVerifiedPillText}>📷 Đã xác thực qua QR</Text>
+                      <Text style={styles.qrVerifiedPillText}>{translate("📷 Đã xác thực qua QR")}</Text>
                     </View>
                   </View>
 
@@ -2716,28 +2954,25 @@ export default function App() {
                       <Text style={{ fontSize: 18 }}>🖼️</Text>
                     </View>
                     <Text style={{ fontSize: 12, color: '#64748B', marginLeft: 6 }}>
-                      2 ảnh đính kèm
-                    </Text>
+                      {translate("2 ảnh đính kèm")}</Text>
                   </View>
 
                   {/* HỘP VIỀN TÍM: PHÂN TÍCH & GỢI Ý TỪ GEMINI FLASH AI (TRỢ LÝ QUYẾT ĐỊNH) */}
                   <View style={styles.bmbGeminiPurpleCard}>
                     <View style={styles.cardTopRow}>
                       <Text style={styles.bmbGeminiCardTitle}>
-                        ✨ Phân tích & Gợi ý từ Gemini Flash{'\n'}AI (Trợ lý quyết định)
-                      </Text>
+                        {translate("✨ Phân tích & Gợi ý từ Gemini Flash")}{'\n'}{translate("AI (Trợ lý quyết định)")}</Text>
                       <View style={styles.bmbLatencyGreenPill}>
                         <Text style={styles.bmbLatencyGreenText}>
-                          ⚡ 1.2s • JSON Hợp lệ
-                        </Text>
+                          {translate("⚡ 1.2s • JSON Hợp lệ")}</Text>
                       </View>
                     </View>
 
                     <Text style={styles.bmbAiSummaryBullet}>
-                      • Tóm tắt AI: {bmbSelectedTicket.aiSummary || bmbSelectedTicket.title}
+                      {translate("• Tóm tắt AI: ")}{bmbSelectedTicket.aiSummary || bmbSelectedTicket.title}
                     </Text>
 
-                    <Text style={styles.fieldLabel}>Danh mục sự cố</Text>
+                    <Text style={styles.fieldLabel}>{translate("Danh mục sự cố")}</Text>
                     <TouchableOpacity
                       style={styles.bmbDropdownBox}
                       onPress={() => {
@@ -2748,12 +2983,12 @@ export default function App() {
                       }}
                     >
                       <Text style={styles.bmbDropdownValue}>
-                        🔧 {CATEGORY_VN[bmbCategory] || 'Hệ thống Điện - Nước'}
+                        🔧 {translate(CATEGORY_VN[bmbCategory] || 'Hệ thống Điện - Nước')}
                       </Text>
                       <Text style={{ color: '#64748B' }}>⌄</Text>
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>Mức độ ưu tiên</Text>
+                    <Text style={styles.fieldLabel}>{translate("Mức độ ưu tiên")}</Text>
                     <TouchableOpacity
                       style={[
                         styles.bmbDropdownBox,
@@ -2775,21 +3010,18 @@ export default function App() {
                           bmbPriority === 'HIGH' && { color: '#DC2626', fontWeight: '800' },
                         ]}
                       >
-                        {PRIORITY_VN[bmbPriority]}
+                        {translate(PRIORITY_VN[bmbPriority])}
                       </Text>
                       <Text style={{ color: '#DC2626' }}>⌄</Text>
                     </TouchableOpacity>
 
                     <Text style={styles.bmbRiskR1Hint}>
-                      💡 BMB có toàn quyền giữ nguyên hoặc chỉnh sửa gợi ý của AI trước khi
-                      duyệt (Risk R1).
-                    </Text>
+                      {translate("💡 BMB có toàn quyền giữ nguyên hoặc chỉnh sửa gợi ý của AI trước khi duyệt (Risk R1).")}</Text>
                   </View>
 
                   {/* Phân công Kỹ thuật viên đang trực */}
                   <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
-                    👷 Phân công Kỹ thuật viên đang trực
-                  </Text>
+                    {translate("👷 Phân công Kỹ thuật viên đang trực")}</Text>
                   <TouchableOpacity
                     style={styles.bmbDropdownBox}
                     onPress={() => {
@@ -2804,18 +3036,15 @@ export default function App() {
                       🟢{' '}
                       {technicians.find((x) => x.id === bmbTechId)?.fullName ||
                         'Đặng Văn Nam'}{' '}
-                      (Ca sáng - Đang xử lý: 1)
-                    </Text>
+                      {translate("(Ca sáng - Đang xử lý: 1)")}</Text>
                     <Text style={{ color: '#64748B' }}>⌄</Text>
                   </TouchableOpacity>
                   <Text style={{ fontSize: 11.5, color: '#64748B', marginTop: 6 }}>
-                    Ca trực 07:00–15:00 • Chuyên môn Điện - Nước
-                  </Text>
+                    {translate("Ca trực 07:00–15:00 • Chuyên môn Điện - Nước")}</Text>
 
                   <View style={styles.techDivider} />
                   <Text style={{ fontSize: 11.5, color: '#64748B', marginBottom: 10 }}>
-                    Bạn có thể điều chỉnh gợi ý AI trước khi giao việc.
-                  </Text>
+                    {translate("Bạn có thể điều chỉnh gợi ý AI trước khi giao việc.")}</Text>
 
                   <TouchableOpacity
                     style={styles.bmbWebLoginBtn}
@@ -2823,8 +3052,7 @@ export default function App() {
                     disabled={loading}
                   >
                     <Text style={styles.bmbWebLoginBtnText}>
-                      ✅ Xác nhận Phân loại & Giao việc ngay
-                    </Text>
+                      {translate("✅ Xác nhận Phân loại & Giao việc ngay")}</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -2842,65 +3070,40 @@ export default function App() {
               style={styles.bmbCenterColumn}
               showsVerticalScrollIndicator={false}
             >
+              {toastMsg && (
+                <View style={[styles.toastBanner, { marginHorizontal: 0 }]}>
+                  <Text style={styles.toastText}>{toastMsg}</Text>
+                </View>
+              )}
               <Text style={styles.bmbPageTitle}>
-                Danh sách Kỹ thuật viên & Tải công việc (Workload)
-              </Text>
+                {translate("Danh sách Kỹ thuật viên & Tải công việc (Workload)")}</Text>
               <Text style={styles.bmbPageSubtitle}>
-                Chọn KTV để giao việc mới hoặc kiểm tra tiến độ các việc đang xử lý (FR06)
-              </Text>
+                {translate("Chọn KTV để giao việc mới hoặc kiểm tra tiến độ các việc đang xử lý (FR06)")}</Text>
+
+              <TouchableOpacity style={styles.technicianAddButton} onPress={openCreateTechnician}>
+                <Text style={styles.technicianAddButtonText}>＋ {translate('Thêm kỹ thuật viên')}</Text>
+              </TouchableOpacity>
 
               <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
                 <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>🟢 Đang trực: 04 KTV</Text>
+                  <Text style={styles.bmbStatPillText}>{translate("🟢 Đang trực: 04 KTV")}</Text>
                 </View>
                 <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>🛠️ Đang xử lý: 05 việc</Text>
+                  <Text style={styles.bmbStatPillText}>{translate("🛠️ Đang xử lý: 05 việc")}</Text>
                 </View>
                 <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>✅ Sẵn sàng: 03 KTV</Text>
+                  <Text style={styles.bmbStatPillText}>{translate("✅ Sẵn sàng: 03 KTV")}</Text>
                 </View>
               </View>
 
-              {(technicians.length > 0
-                ? technicians
-                : [
-                  {
-                    id: 'tech-1',
-                    fullName: 'Đặng Văn Nam',
-                    phone: '0356 166 863',
-                    specialtyLabel: 'Điện - Nước (Plumbing)',
-                    isOnDuty: true,
-                    workloadCount: 1,
-                  },
-                  {
-                    id: 'tech-2',
-                    fullName: 'Đặng Thanh Nguyên',
-                    phone: '0943 792 466',
-                    specialtyLabel: 'Thang máy & Cơ khí',
-                    isOnDuty: true,
-                    workloadCount: 3,
-                  },
-                  {
-                    id: 'tech-3',
-                    fullName: 'Đặng Văn Tùng',
-                    phone: '0969 595 478',
-                    specialtyLabel: 'Điện & Chiếu sáng',
-                    isOnDuty: true,
-                    workloadCount: 0,
-                  },
-                  {
-                    id: 'tech-4',
-                    fullName: 'Đặng Thanh Quyết',
-                    phone: '0913 402 803',
-                    specialtyLabel: 'An ninh & Thẻ từ',
-                    isOnDuty: false,
-                    workloadCount: 0,
-                  },
-                ]
-              ).map((tech: any, idx: number) => {
-                const activeJobsCount =
-                  tech.assignedTickets?.length ??
-                  (idx === 0 ? 1 : idx === 1 ? 3 : 0);
+              {technicians.length === 0 ? (
+                <View style={styles.technicianEmptyState}>
+                  <Text style={styles.technicianEmptyText}>
+                    {translate('Chưa có kỹ thuật viên đang hoạt động.')}
+                  </Text>
+                </View>
+              ) : technicians.map((tech: any) => {
+                const activeJobsCount = tech.assignedTickets?.length ?? 0;
                 const isHighLoad = activeJobsCount >= 3;
                 const isAssignSelected = bmbAssignTargetTech?.id === tech.id;
                 const isViewingSelected = bmbViewingWorkloadTech?.id === tech.id;
@@ -2946,8 +3149,8 @@ export default function App() {
                             }}
                           >
                             {tech.isOnDuty
-                              ? '🟢 Đang trực (Ca Sáng)'
-                              : '⚪ Ngoài ca trực (Ca Chiều)'}
+                              ? translate('🟢 Đang trực (Ca Sáng)')
+                              : translate('⚪ Ngoài ca trực (Ca Chiều)')}
                           </Text>
                         </View>
                       </View>
@@ -2956,7 +3159,7 @@ export default function App() {
                     {tech.isOnDuty && (
                       <>
                         <Text style={[styles.cardLocationText, { marginTop: 10 }]}>
-                          🔧 Chuyên môn: {tech.specialtyLabel}
+                          {translate("🔧 Chuyên môn: ")}{tech.specialtyLabel}
                         </Text>
                         <Text
                           style={{
@@ -2967,10 +3170,10 @@ export default function App() {
                           }}
                         >
                           {activeJobsCount === 0
-                            ? '0/4 việc (Đang rảnh)'
+                            ? translate('0/4 việc (Đang rảnh)')
                             : isHighLoad
-                              ? `Đang xử lý: ${activeJobsCount}/4 việc (Tải cao - Màu cam #F59E0B)`
-                              : `Đang xử lý: ${activeJobsCount}/4 việc (Tải thấp)`}
+                              ? translate(`Đang xử lý: ${activeJobsCount}/4 việc (Tải cao - Màu cam #F59E0B)`)
+                              : translate(`Đang xử lý: ${activeJobsCount}/4 việc (Tải thấp)`)}
                         </Text>
 
                         {/* Thanh Progress Bar tải công việc */}
@@ -3004,8 +3207,8 @@ export default function App() {
                               ]}
                             >
                               {isAssignSelected
-                                ? '[+ Giao việc mới đang chọn]'
-                                : '[+ Giao việc mới]'}
+                                ? translate('[+ Giao việc mới đang chọn]')
+                                : translate('[+ Giao việc mới]')}
                             </Text>
                           </TouchableOpacity>
 
@@ -3024,14 +3227,33 @@ export default function App() {
                                 ]}
                               >
                                 {isViewingSelected
-                                  ? `[👁️ Đang xem ${activeJobsCount} việc đang làm →]`
-                                  : `[Xem ${activeJobsCount} việc đang làm]`}
+                                  ? translate(`[👁️ Đang xem ${activeJobsCount} việc đang làm →]`)
+                                  : translate(`[Xem ${activeJobsCount} việc đang làm]`)}
                               </Text>
                             </TouchableOpacity>
                           )}
                         </View>
                       </>
                     )}
+
+                    <View style={styles.technicianActions}>
+                      <TouchableOpacity
+                        style={styles.technicianEditButton}
+                        onPress={() => openEditTechnician(tech)}
+                      >
+                        <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.technicianDeleteButton}
+                        onPress={() => {
+                          setSelectedTechnician(tech);
+                          setTechnicianFormError(null);
+                          setTechnicianDialogMode('delete');
+                        }}
+                      >
+                        <Text style={styles.technicianDeleteButtonText}>{translate('Xóa')}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 );
               })}
@@ -3045,18 +3267,15 @@ export default function App() {
               {/* Khối trên: Giao việc mới cho KTV */}
               <View style={styles.bmbBlueOutlinePanel}>
                 <Text style={styles.bmbPanelBlueTitle}>
-                  ＋ Giao việc mới cho KTV:{' '}
+                  {translate("＋ Giao việc mới cho KTV:")}{' '}
                   {bmbAssignTargetTech?.fullName || 'Đặng Văn Nam'}
                 </Text>
                 <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 12 }}>
-                  Chuyên môn:{' '}
-                  {bmbAssignTargetTech?.specialtyLabel || 'Điện - Nước'} • Đang trực Ca
-                  Sáng
-                </Text>
+                  {translate("Chuyên môn:")}{' '}
+                  {bmbAssignTargetTech?.specialtyLabel || translate('Điện - Nước')} {translate("• Đang trực Ca Sáng")}</Text>
 
                 <Text style={styles.fieldLabel}>
-                  Chọn sự cố đang chờ phân công (Phù hợp chuyên môn):
-                </Text>
+                  {translate("Chọn sự cố đang chờ phân công (Phù hợp chuyên môn):")}</Text>
 
                 {(pendingTicketsForRadio.length > 0
                   ? pendingTicketsForRadio.slice(0, 2)
@@ -3080,11 +3299,11 @@ export default function App() {
                           {pt.ticketCode}
                         </Text>
                         <View style={styles.bmbMiniOrangeBadge}>
-                          <Text style={styles.bmbMiniOrangeText}>🔥 Ưu tiên: Cao</Text>
+                          <Text style={styles.bmbMiniOrangeText}>{translate("🔥 Ưu tiên: Cao")}</Text>
                         </View>
                         <View style={styles.bmbMiniPurpleBadge}>
                           <Text style={styles.bmbMiniPurpleText}>
-                            ✨ AI: {CATEGORY_SHORT_VN[pt.aiSuggestedCategory] || 'Điện - Nước'}
+                            ✨ AI: {translate(CATEGORY_SHORT_VN[pt.aiSuggestedCategory] || 'Điện - Nước')}
                           </Text>
                         </View>
                       </View>
@@ -3095,12 +3314,12 @@ export default function App() {
                   );
                 })}
 
-                <Text style={styles.fieldLabel}>Ghi chú điều phối cho KTV (Tùy chọn):</Text>
+                <Text style={styles.fieldLabel}>{translate("Ghi chú điều phối cho KTV (Tùy chọn):")}</Text>
                 <TextInput
                   style={styles.bmbWebInput}
                   value={bmbNote}
                   onChangeText={setBmbNote}
-                  placeholder="Mang theo ống nối chữ T..."
+                  placeholder={translate("Mang theo ống nối chữ T...")}
                   placeholderTextColor="#94A3B8"
                 />
 
@@ -3114,17 +3333,15 @@ export default function App() {
                   }
                 >
                   <Text style={styles.bmbWebLoginBtnText}>
-                    ✅ Xác nhận Giao việc & Gửi thông báo FCM
-                  </Text>
+                    {translate("✅ Xác nhận Giao việc & Gửi thông báo FCM")}</Text>
                 </TouchableOpacity>
               </View>
 
               {/* Khối dưới: Việc đang làm của KTV */}
               <View style={[styles.bmbBlueOutlinePanel, { borderColor: '#6366F1', marginTop: 14 }]}>
                 <Text style={[styles.bmbPanelBlueTitle, { color: '#4338CA' }]}>
-                  👁️ Việc đang làm của KTV:{' '}
-                  {bmbViewingWorkloadTech?.fullName || 'Đặng Thanh Nguyên'} (03 việc)
-                </Text>
+                  {translate("👁️ Việc đang làm của KTV:")}{' '}
+                  {bmbViewingWorkloadTech?.fullName || 'Đặng Thanh Nguyên'} {translate("(03 việc)")}</Text>
 
                 <View style={styles.bmbActiveJobItem}>
                   <Text style={{ fontWeight: '800', fontSize: 13, color: '#0F172A' }}>
@@ -3176,25 +3393,26 @@ export default function App() {
               <View style={styles.cardTopRow}>
                 <View>
                   <Text style={styles.bmbPageTitle}>
-                    Trung tâm Thông báo & Nhật ký Hệ thống
-                  </Text>
+                    {translate("Trung tâm Thông báo & Nhật ký Hệ thống")}</Text>
                   <Text style={styles.bmbPageSubtitle}>
-                    Cập nhật thời gian thực qua Firebase FCM & Gemini AI (FR08, US-36)
-                  </Text>
+                    {translate("Cập nhật thời gian thực qua Firebase FCM & Gemini AI (FR08, US-36)")}</Text>
                 </View>
-                <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
+                <TouchableOpacity
+                  onPress={handleMarkAllNotificationsRead}
+                  disabled={unreadCount === 0}
+                  style={{ opacity: unreadCount === 0 ? 0.5 : 1 }}
+                >
                   <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 13 }}>
-                    ✓ Đánh dấu tất cả đã đọc
-                  </Text>
+                    {translate("✓ Đánh dấu tất cả đã đọc")}</Text>
                 </TouchableOpacity>
               </View>
 
               <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
                 {[
-                  { key: 'ALL', label: 'Tất cả (15)' },
-                  { key: 'UNREAD', label: '🔴 Chưa đọc (04)' },
-                  { key: 'URGENT', label: '🟣 Sự cố khẩn cấp & AI (05)' },
-                  { key: 'TECH', label: '🟢 Cập nhật từ KTV (06)' },
+                  { key: 'ALL', label: `${translate('Tất cả')} (${notifications.length})` },
+                  { key: 'UNREAD', label: `${translate('🔴 Chưa đọc')} (${unreadCount})` },
+                  { key: 'URGENT', label: `${translate('🟣 Sự cố khẩn cấp & AI')} (${urgentNotificationCount})` },
+                  { key: 'TECH', label: `${translate('🟢 Cập nhật từ KTV')} (${technicianNotificationCount})` },
                 ].map((tab: any) => (
                   <TouchableOpacity
                     key={tab.key}
@@ -3216,103 +3434,36 @@ export default function App() {
                 ))}
               </View>
 
-              {/* Thẻ 1: Sự cố mới khẩn cấp */}
-              <View style={styles.bmbAlertRedCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#DC2626' }}>
-                    🔥 SỰ CỐ MỚI KHẨN CẤP • Vừa xong
-                  </Text>
-                  <View style={styles.blueUnreadDot} />
-                </View>
-                <Text style={styles.cardMainTitle}>
-                  Cư dân Căn hộ A-1204 vừa gửi báo cáo sự cố #RF-2026-014 (Kèm 2 ảnh & giọng
-                  nói)
-                </Text>
-                <View style={styles.bmbAiPurpleMiniTag}>
-                  <Text style={styles.bmbAiPurpleMiniText}>
-                    ✨ Gemini Flash AI đã phân tích (1.2s): Gợi ý danh mục [Điện - Nước] • Mức
-                    độ ưu tiên [Cao - Khẩn cấp]
+              {filteredBmbNotifications.length === 0 ? (
+                <View style={styles.technicianEmptyState}>
+                  <Text style={styles.technicianEmptyText}>
+                    {translate('Không có thông báo phù hợp.')}
                   </Text>
                 </View>
+              ) : filteredBmbNotifications.map((notification) => (
                 <TouchableOpacity
-                  style={{ alignSelf: 'flex-end', marginTop: 8 }}
-                  onPress={() => setBmbNavTab('TICKETS')}
+                  key={notification.id}
+                  style={[
+                    styles.resTicketCard,
+                    !notification.isRead && { borderColor: '#60A5FA', borderWidth: 1.5 },
+                  ]}
+                  onPress={() => handleOpenBmbNotification(notification)}
                 >
-                  <Text style={{ color: '#1D61E7', fontWeight: '800', fontSize: 13 }}>
-                    Duyệt & Giao việc ngay →
+                  <View style={styles.cardTopRow}>
+                    <Text style={styles.cardMainTitle}>{notification.title}</Text>
+                    {!notification.isRead && <View style={styles.blueUnreadDot} />}
+                  </View>
+                  <Text style={styles.cardLocationText}>{notification.message}</Text>
+                  {notification.ticket?.ticketCode && (
+                    <Text style={styles.cardLocationText}>
+                      {translate('Sự cố liên quan:')} {notification.ticket.ticketCode}
+                    </Text>
+                  )}
+                  <Text style={styles.techInfoLine}>
+                    {new Date(notification.createdAt).toLocaleString()}
                   </Text>
                 </TouchableOpacity>
-              </View>
-
-              {/* Thẻ 2: Cảnh báo trợ lý AI (US-19) */}
-              <View style={styles.bmbAlertOrangeCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#D97706' }}>
-                    ⚠️ CẢNH BÁO TRỢ LÝ AI (US-19) • 5 phút trước
-                  </Text>
-                  <View style={styles.blueUnreadDot} />
-                </View>
-                <Text style={styles.cardMainTitle}>
-                  Sự cố #RF-2026-013 (Đèn hành lang tầng 8) vượt thời gian chờ phản hồi từ
-                  Gemini API (&gt;4s)
-                </Text>
-                <Text style={styles.cardLocationText}>
-                  Hệ thống đã tự động chuyển sang chế độ Phân loại thủ công (Manual Review) để
-                  không làm gián đoạn luồng xử lý.
-                </Text>
-                <TouchableOpacity
-                  style={styles.bmbManualReviewOutlineBtn}
-                  onPress={() => setBmbNavTab('TICKETS')}
-                >
-                  <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 12.5 }}>
-                    Phân loại thủ công →
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Thẻ 3: KTV đã gửi ảnh nghiệm thu */}
-              <View style={styles.resTicketCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#059669' }}>
-                    📸 KTV ĐÃ GỬI ẢNH NGHIỆM THU • 12 phút trước
-                  </Text>
-                  <View style={styles.blueUnreadDot} />
-                </View>
-                <Text style={styles.cardMainTitle}>
-                  KTV Đặng Văn Nam đã hoàn thành sửa chữa sự cố #RF-2026-012 và tải lên 2 ảnh
-                  nghiệm thu (Đã xác thực QR tại chỗ)
-                </Text>
-                <Text style={styles.cardLocationText}>
-                  Hệ thống đã gửi thông báo đẩy (FCM) nhắc cư dân xác nhận Đã giải quyết
-                  (FR08, FR09).
-                </Text>
-              </View>
-
-              {/* Thẻ 4: KTV đã nhận việc */}
-              <View style={styles.resTicketCard}>
-                <Text
-                  style={{ fontSize: 12, fontWeight: '800', color: '#2563EB', marginBottom: 4 }}
-                >
-                  🛠️ KTV ĐÃ NHẬN VIỆC • 25 phút trước
-                </Text>
-                <Text style={styles.cardMainTitle}>
-                  KTV Đặng Thanh Nguyên đã xác nhận nhận việc #RF-2026-011 (Chuyển trạng thái:
-                  Assigned → In Progress).
-                </Text>
-              </View>
-
-              {/* Thẻ 5: Đã đóng sự cố */}
-              <View style={styles.resTicketCard}>
-                <Text
-                  style={{ fontSize: 12, fontWeight: '800', color: '#475569', marginBottom: 4 }}
-                >
-                  ✅ ĐÃ ĐÓNG SỰ CỐ • 1 giờ trước
-                </Text>
-                <Text style={styles.cardMainTitle}>
-                  Cư dân Căn hộ B-0802 đã nghiệm thu ảnh và đóng sự cố #RF-2026-008 (Đánh giá
-                  chất lượng: ⭐⭐⭐⭐⭐ 5.0).
-                </Text>
-              </View>
+              ))}
             </ScrollView>
 
             {/* CỘT PHẢI: TRẠNG THÁI DỊCH VỤ ĐÁM MÂY (CLOUD STATUS - FIGMA 03 BMB) */}
@@ -3321,27 +3472,21 @@ export default function App() {
               showsVerticalScrollIndicator={false}
             >
               <Text style={styles.bmbInspectorTitle}>
-                Trạng thái Dịch vụ Đám mây (Cloud Status)
-              </Text>
+                {translate("Trạng thái Dịch vụ Đám mây (Cloud Status)")}</Text>
 
               <View style={[styles.qrRecognizedBox, { marginTop: 12 }]}>
                 <Text style={styles.qrRecognizedTitle}>
-                  🤖 Google Gemini Flash API: Hoạt động tốt • Độ trễ TB: 1.4s (&lt;4s NFR01)
-                </Text>
+                  {translate("🤖 Google Gemini Flash API: Hoạt động tốt • Độ trễ TB: 1.4s (<4s NFR01)")}</Text>
               </View>
 
               <View style={styles.qrRecognizedBox}>
                 <Text style={styles.qrRecognizedTitle}>
-                  🔔 Firebase Cloud Messaging (FCM): Kênh ưu tiên cao (High-Priority) đang bật
-                  (99.8% gửi thành công)
-                </Text>
+                  {translate("🔔 Firebase Cloud Messaging (FCM): Kênh ưu tiên cao (High-Priority) đang bật (99.8% gửi thành công)")}</Text>
               </View>
 
               <View style={styles.bmbCloudStorageBox}>
                 <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
-                  ☁️ Cloudinary Media Storage: Đã dùng 1.2 GB / 25 GB Free Tier (Tối ưu ảnh tự
-                  động)
-                </Text>
+                  {translate("☁️ Cloudinary Media Storage: Đã dùng 1.2 GB / 25 GB Free Tier (Tối ưu ảnh tự động)")}</Text>
                 <View style={[styles.workloadTrack, { marginTop: 8 }]}>
                   <View
                     style={[
@@ -3353,18 +3498,185 @@ export default function App() {
               </View>
 
               <View style={styles.techDivider} />
-              <Text style={styles.cardBlockTitle}>Tóm tắt vận hành ca sáng</Text>
+              <Text style={styles.cardBlockTitle}>{translate("Tóm tắt vận hành ca sáng")}</Text>
               <Text style={styles.techInfoLine}>
-                • Tổng thông báo phát sinh hôm nay: <Text style={{ fontWeight: '800' }}>42 lượt</Text>
+                {translate("• Tổng thông báo phát sinh hôm nay: ")}<Text style={{ fontWeight: '800' }}>{translate("42 lượt")}</Text>
               </Text>
               <Text style={styles.techInfoLine}>
-                • Thời gian phản hồi điều phối TB của BMB:{' '}
-                <Text style={{ fontWeight: '800' }}>3.5 phút</Text>
+                {translate("• Thời gian phản hồi điều phối TB của BMB:")}{' '}
+                <Text style={{ fontWeight: '800' }}>{translate("3.5 phút")}</Text>
               </Text>
             </ScrollView>
           </View>
         )}
       </View>
+      <Modal
+        visible={technicianDialogMode !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={closeTechnicianDialog}
+      >
+        <View style={styles.technicianModalOverlay}>
+          <View style={styles.technicianModalCard}>
+            {technicianDialogMode === 'delete' ? (
+              <>
+                <Text style={styles.technicianModalTitle}>{translate('Xóa kỹ thuật viên')}</Text>
+                <Text style={styles.technicianModalDescription}>
+                  {translate('Bạn có chắc muốn vô hiệu hóa')} {selectedTechnician?.fullName}?
+                </Text>
+                <Text style={styles.technicianModalHint}>
+                  {translate('Tài khoản sẽ bị vô hiệu hóa; lịch sử công việc vẫn được giữ lại.')}
+                </Text>
+                {technicianFormError && (
+                  <Text style={styles.technicianFormError}>{technicianFormError}</Text>
+                )}
+                <View style={styles.technicianModalActions}>
+                  <TouchableOpacity
+                    style={styles.technicianCancelButton}
+                    onPress={closeTechnicianDialog}
+                    disabled={technicianFormBusy}
+                  >
+                    <Text style={styles.technicianCancelButtonText}>{translate('Hủy')}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.technicianConfirmDeleteButton, technicianFormBusy && styles.technicianDisabledButton]}
+                    onPress={deleteTechnician}
+                    disabled={technicianFormBusy}
+                  >
+                    <Text style={styles.technicianConfirmDeleteText}>
+                      {technicianFormBusy ? translate('Đang xử lý...') : translate('Vô hiệu hóa')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.technicianModalTitle}>
+                  {translate(technicianDialogMode === 'edit' ? 'Sửa kỹ thuật viên' : 'Thêm kỹ thuật viên')}
+                </Text>
+                <ScrollView
+                  style={styles.technicianFormScroll}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  <Text style={styles.technicianFieldLabel}>{translate('Họ và tên')}</Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={technicianForm.fullName}
+                    onChangeText={(fullName) => setTechnicianForm((current) => ({ ...current, fullName }))}
+                    placeholder={translate('Nhập họ và tên')}
+                    placeholderTextColor="#94A3B8"
+                    autoCapitalize="words"
+                  />
+
+                  <Text style={styles.technicianFieldLabel}>{translate('Số điện thoại')}</Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={technicianForm.phone}
+                    onChangeText={(phone) => setTechnicianForm((current) => ({ ...current, phone }))}
+                    placeholder={translate('Nhập số điện thoại')}
+                    placeholderTextColor="#94A3B8"
+                    keyboardType="phone-pad"
+                  />
+
+                  <Text style={styles.technicianFieldLabel}>{translate('Email (tùy chọn)')}</Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={technicianForm.email}
+                    onChangeText={(email) => setTechnicianForm((current) => ({ ...current, email }))}
+                    placeholder="email@example.com"
+                    placeholderTextColor="#94A3B8"
+                    keyboardType="email-address"
+                    autoCapitalize="none"
+                  />
+
+                  <Text style={styles.technicianFieldLabel}>
+                    {translate(technicianDialogMode === 'edit' ? 'Mật khẩu mới (để trống nếu không đổi)' : 'Mật khẩu ban đầu')}
+                  </Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={technicianForm.password}
+                    onChangeText={(password) => setTechnicianForm((current) => ({ ...current, password }))}
+                    placeholder={translate(technicianDialogMode === 'edit' ? 'Để trống nếu giữ nguyên mật khẩu' : 'Ít nhất 6 ký tự')}
+                    placeholderTextColor="#94A3B8"
+                    secureTextEntry
+                    autoCapitalize="none"
+                  />
+
+                  <Text style={styles.technicianFieldLabel}>{translate('Chuyên môn')}</Text>
+                  <View style={styles.technicianSpecialtyChoices}>
+                    {CATEGORIES_LIST.map((specialty) => (
+                      <TouchableOpacity
+                        key={specialty}
+                        style={[
+                          styles.technicianSpecialtyChoice,
+                          technicianForm.specialty === specialty && styles.technicianSpecialtyChoiceActive,
+                        ]}
+                        onPress={() => setTechnicianForm((current) => ({ ...current, specialty }))}
+                      >
+                        <Text
+                          style={[
+                            styles.technicianSpecialtyChoiceText,
+                            technicianForm.specialty === specialty && styles.technicianSpecialtyChoiceTextActive,
+                          ]}
+                        >
+                          {translate(CATEGORY_VN[specialty] || 'Hạng mục khác')}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <Text style={styles.technicianFieldLabel}>{translate('Ca trực')}</Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={technicianForm.shiftName}
+                    onChangeText={(shiftName) => setTechnicianForm((current) => ({ ...current, shiftName }))}
+                    placeholder={translate('Ví dụ: Ca sáng 07:00 - 15:00')}
+                    placeholderTextColor="#94A3B8"
+                  />
+
+                  <TouchableOpacity
+                    style={styles.technicianDutyToggle}
+                    onPress={() => setTechnicianForm((current) => ({ ...current, isOnDuty: !current.isOnDuty }))}
+                  >
+                    <View style={[
+                      styles.technicianDutyIndicator,
+                      technicianForm.isOnDuty && styles.technicianDutyIndicatorActive,
+                    ]} />
+                    <Text style={styles.technicianDutyText}>
+                      {translate(technicianForm.isOnDuty ? 'Đang trực' : 'Ngoài ca trực')}
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+
+                {technicianFormError && (
+                  <Text style={styles.technicianFormError}>{technicianFormError}</Text>
+                )}
+                <View style={styles.technicianModalActions}>
+                  <TouchableOpacity
+                    style={styles.technicianCancelButton}
+                    onPress={closeTechnicianDialog}
+                    disabled={technicianFormBusy}
+                  >
+                    <Text style={styles.technicianCancelButtonText}>{translate('Hủy')}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.technicianSaveButton, technicianFormBusy && styles.technicianDisabledButton]}
+                    onPress={saveTechnician}
+                    disabled={technicianFormBusy}
+                  >
+                    <Text style={styles.technicianSaveButtonText}>
+                      {technicianFormBusy
+                        ? translate('Đang xử lý...')
+                        : translate(technicianDialogMode === 'edit' ? 'Cập nhật' : 'Tạo tài khoản')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -3456,12 +3768,15 @@ const styles = StyleSheet.create({
   },
   bmbSidebar: {
     width: Platform.OS === 'web' ? 235 : '100%',
+    minHeight: 0,
     backgroundColor: '#FFFFFF',
     borderRightWidth: 1,
     borderRightColor: '#E2E8F0',
     padding: 18,
     justifyContent: 'space-between',
   },
+  bmbSidebarNavigation: { flex: 1, minHeight: 0 },
+  bmbSidebarFooter: { flexShrink: 0 },
   bmbSidebarBrandRow: { flexDirection: 'row', alignItems: 'center' },
   bmbSidebarLogoText: { fontSize: 20, fontWeight: '800', color: '#1D61E7' },
   bmbSidebarSubText: { fontSize: 12, color: '#64748B', marginTop: 2, marginBottom: 22 },
@@ -3503,6 +3818,132 @@ const styles = StyleSheet.create({
   bmbAdminFooter: { borderTopWidth: 1, borderTopColor: '#E2E8F0', paddingTop: 12 },
   bmbAdminNameText: { fontSize: 12.5, fontWeight: '700', color: '#0F172A', marginBottom: 8 },
   bmbSidebarLogoutText: { fontSize: 13, fontWeight: '700', color: '#DC2626' },
+
+  technicianAddButton: {
+    alignSelf: 'flex-end',
+    marginTop: 12,
+    marginBottom: 8,
+    backgroundColor: '#1D61E7',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  technicianAddButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  technicianActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 14,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  technicianEditButton: {
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#EFF6FF',
+  },
+  technicianEditButtonText: { color: '#1D61E7', fontSize: 12, fontWeight: '700' },
+  technicianDeleteButton: {
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#FEF2F2',
+  },
+  technicianDeleteButtonText: { color: '#DC2626', fontSize: 12, fontWeight: '700' },
+  technicianEmptyState: {
+    marginTop: 18,
+    padding: 22,
+    alignItems: 'center',
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  technicianEmptyText: { color: '#64748B', fontSize: 14 },
+  technicianModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  technicianModalCard: {
+    width: 520,
+    maxWidth: '100%',
+    maxHeight: '92%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 20,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  technicianModalTitle: { fontSize: 20, fontWeight: '800', color: '#0F172A', marginBottom: 6 },
+  technicianModalDescription: { color: '#334155', fontSize: 14, lineHeight: 21, marginTop: 8 },
+  technicianModalHint: { color: '#64748B', fontSize: 13, lineHeight: 19, marginTop: 8 },
+  technicianFormScroll: { flexShrink: 1, minHeight: 0, maxHeight: 520, marginTop: 4 },
+  technicianFieldLabel: { color: '#334155', fontSize: 12.5, fontWeight: '700', marginTop: 12, marginBottom: 6 },
+  technicianFormInput: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#FFFFFF',
+    color: '#0F172A',
+    fontSize: 14,
+  },
+  technicianSpecialtyChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+  technicianSpecialtyChoice: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  technicianSpecialtyChoiceActive: { backgroundColor: '#EFF6FF', borderColor: '#2563EB' },
+  technicianSpecialtyChoiceText: { color: '#475569', fontSize: 11.5, fontWeight: '600' },
+  technicianSpecialtyChoiceTextActive: { color: '#1D61E7', fontWeight: '800' },
+  technicianDutyToggle: { flexDirection: 'row', alignItems: 'center', marginTop: 16, marginBottom: 8 },
+  technicianDutyIndicator: { width: 12, height: 12, borderRadius: 6, marginRight: 8, backgroundColor: '#94A3B8' },
+  technicianDutyIndicatorActive: { backgroundColor: '#16A34A' },
+  technicianDutyText: { color: '#334155', fontSize: 13, fontWeight: '700' },
+  technicianFormError: { color: '#B91C1C', fontSize: 12.5, lineHeight: 18, marginTop: 12 },
+  technicianModalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 9, marginTop: 16 },
+  technicianCancelButton: {
+    minWidth: 90,
+    alignItems: 'center',
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    borderRadius: 9,
+    backgroundColor: '#F1F5F9',
+  },
+  technicianCancelButtonText: { color: '#334155', fontSize: 13, fontWeight: '700' },
+  technicianSaveButton: {
+    minWidth: 112,
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 9,
+    backgroundColor: '#1D61E7',
+  },
+  technicianSaveButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  technicianConfirmDeleteButton: {
+    minWidth: 112,
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 9,
+    backgroundColor: '#DC2626',
+  },
+  technicianConfirmDeleteText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  technicianDisabledButton: { opacity: 0.55 },
 
   bmbContentTwoCols: {
     flex: 1,
