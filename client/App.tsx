@@ -26,7 +26,7 @@ const getApiBaseUrl = () => {
     // Trên trình duyệt máy tính: Luôn gọi thẳng vào cổng 5000 nội bộ của máy tính
     return 'http://localhost:5000/api';
   }
-  return 'https://silver-guests-wink.loca.lt/api'; // Trên điện thoại: Gọi qua LocalTunnel (hoặc ngrok) để truy cập cổng 5000 của máy tính
+  return 'https://fast-games-eat.loca.lt/api';
 };
 
 const API_BASE_URL = getApiBaseUrl();
@@ -57,6 +57,133 @@ const PRIORITY_VN: Record<string, string> = {
 
 const CATEGORIES_LIST = ['PLUMBING', 'ELECTRICAL', 'ELEVATOR', 'HVAC', 'ACCESS_SECURITY', 'OTHER'];
 const PRIORITIES_LIST = ['HIGH', 'MEDIUM', 'LOW'];
+
+
+// ============================================================================
+// RESIFIX FIGMA DESIGN SYSTEM -- Android + React Native Web, không thêm thư viện
+// Các biểu tượng được vẽ bằng View/Text thay vì emoji có màu khác nhau trên máy.
+// ============================================================================
+const UI = {
+  primary: '#2563EB',
+  primaryLight: '#EFF6FF',
+  aiPurple: '#7C3AED',
+  background: '#F8FAFC',
+  text: '#0F172A',
+  muted: '#64748B',
+  border: '#E2E8F0',
+  success: '#10B981',
+} as const;
+
+// Đặt true khi nhóm cần nút demo đăng nhập nhanh, false để màn hình đúng Figma.
+const SHOW_DEMO_SHORTCUTS = false;
+
+function ResiFixLogoMark({ size = 68 }: { size?: number }) {
+  const stroke = Math.max(1.25, size * 0.033);
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size * 0.2,
+        backgroundColor: UI.primary,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <View
+        style={{
+          width: size * 0.45,
+          height: size * 0.58,
+          borderWidth: stroke,
+          borderColor: '#FFFFFF',
+          borderRadius: size * 0.04,
+          justifyContent: 'space-around',
+          padding: size * 0.065,
+          marginRight: size * 0.08,
+        }}
+      >
+        {[0, 1, 2].map((i) => (
+          <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            <View style={{ width: size * 0.055, height: size * 0.055, backgroundColor: '#FFFFFF', borderRadius: 1 }} />
+            <View style={{ width: size * 0.055, height: size * 0.055, backgroundColor: '#FFFFFF', borderRadius: 1 }} />
+          </View>
+        ))}
+      </View>
+      <View
+        style={{
+          position: 'absolute',
+          right: size * 0.20,
+          bottom: size * 0.18,
+          width: size * 0.09,
+          height: size * 0.34,
+          borderWidth: stroke,
+          borderColor: '#FFFFFF',
+          borderRadius: size * 0.04,
+          transform: [{ rotate: '35deg' }],
+          backgroundColor: UI.primary,
+        }}
+      />
+    </View>
+  );
+}
+
+type ResiFixLineIcon = 'home' | 'history' | 'profile' | 'bell';
+function OutlineIcon({
+  name,
+  size = 22,
+  active = false,
+  color,
+}: {
+  name: ResiFixLineIcon;
+  size?: number;
+  active?: boolean;
+  color?: string;
+}) {
+  const c = color || (active ? UI.primary : UI.muted);
+  const line = Math.max(1.7, size * 0.085);
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {name === 'home' && (
+        <>
+          <View style={{
+            position: 'absolute', width: size * 0.52, height: size * 0.51,
+            bottom: size * 0.12, borderColor: c, borderWidth: line,
+            borderTopWidth: 0, borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
+          }} />
+          <View style={{
+            position: 'absolute', width: size * 0.51, height: size * 0.51,
+            left: size * 0.245, top: size * 0.17, transform: [{ rotate: '45deg' }],
+            borderColor: c, borderTopWidth: line, borderLeftWidth: line, borderTopLeftRadius: 2,
+          }} />
+          <View style={{
+            position: 'absolute', bottom: size * 0.12, width: size * 0.17,
+            height: size * 0.29, borderWidth: line * 0.85, borderBottomWidth: 0, borderColor: c,
+          }} />
+        </>
+      )}
+      {name === 'history' && (
+        <>
+          <View style={{ width: size * 0.73, height: size * 0.73, borderRadius: size, borderWidth: line, borderColor: c }} />
+          <View style={{ position: 'absolute', left: size * 0.48, top: size * 0.27, width: line, height: size * 0.27, backgroundColor: c, borderRadius: 2 }} />
+          <View style={{ position: 'absolute', left: size * 0.48, top: size * 0.51, width: size * 0.21, height: line, backgroundColor: c, borderRadius: 2 }} />
+        </>
+      )}
+      {name === 'profile' && (
+        <>
+          <View style={{ position: 'absolute', top: size * 0.09, width: size * 0.37, height: size * 0.37, borderRadius: size, borderWidth: line, borderColor: c }} />
+          <View style={{ position: 'absolute', bottom: size * 0.09, width: size * 0.74, height: size * 0.35, borderTopLeftRadius: size, borderTopRightRadius: size, borderWidth: line, borderBottomWidth: 0, borderColor: c }} />
+        </>
+      )}
+      {name === 'bell' && (
+        <>
+          <View style={{ position: 'absolute', top: size * 0.15, width: size * 0.60, height: size * 0.59, borderTopLeftRadius: size, borderTopRightRadius: size, borderBottomLeftRadius: size * 0.08, borderBottomRightRadius: size * 0.08, borderWidth: line, borderColor: c }} />
+          <View style={{ position: 'absolute', bottom: size * 0.16, width: size * 0.81, height: line, borderRadius: line, backgroundColor: c }} />
+          <View style={{ position: 'absolute', bottom: size * 0.045, width: size * 0.16, height: size * 0.10, borderBottomLeftRadius: size, borderBottomRightRadius: size, backgroundColor: c }} />
+        </>
+      )}
+    </View>
+  );
+}
 
 export default function App() {
   // 1. State Xác thực & Chuyển đổi giao diện Login Web / Mobile (FR01)
@@ -676,7 +803,7 @@ export default function App() {
             {/* Cột trái màu xanh dương đậm */}
             <View style={styles.bmbLoginLeftBlue}>
               <View style={styles.rowCenter}>
-                <Text style={{ fontSize: 24, marginRight: 8 }}>🏢</Text>
+                <View style={{ marginRight: 9 }}><ResiFixLogoMark size={27} /></View>
                 <Text style={styles.bmbLoginBrandText}>ResiFix BMB</Text>
               </View>
               <Text style={styles.bmbLoginHeroTitle}>
@@ -736,7 +863,7 @@ export default function App() {
               </TouchableOpacity>
 
               {/* Thanh chuyển nhanh sang giao diện Mobile App để tiện Demo trên cùng 1 máy */}
-              <View style={[styles.demoSwitchRow, { marginTop: 22 }]}>
+              {SHOW_DEMO_SHORTCUTS && <View style={[styles.demoSwitchRow, { marginTop: 22 }]}>
                 <TouchableOpacity
                   style={styles.demoChip}
                   onPress={() => {
@@ -755,7 +882,7 @@ export default function App() {
                 >
                   <Text style={styles.demoChipText}>⚡ Vào nhanh BMB Dashboard</Text>
                 </TouchableOpacity>
-              </View>
+              </View>}
             </View>
           </View>
         </SafeAreaView>
@@ -769,9 +896,7 @@ export default function App() {
         <ScrollView contentContainerStyle={styles.loginScroll}>
           <View style={styles.mobileFrame}>
             <View style={styles.brandCenter}>
-              <View style={styles.appIconBox}>
-                <Text style={styles.appIconSymbol}>🏢🔧</Text>
-              </View>
+              <ResiFixLogoMark size={68} />
               <Text style={styles.brandTitle}>ResiFix</Text>
               <Text style={styles.brandSub}>
                 Hệ thống Quản lý & Khắc phục Sự cố Tòa nhà
@@ -853,7 +978,7 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.demoSwitchRow}>
+            {SHOW_DEMO_SHORTCUTS && <View style={styles.demoSwitchRow}>
               <TouchableOpacity
                 style={styles.demoChip}
                 onPress={() => {
@@ -881,7 +1006,7 @@ export default function App() {
               >
                 <Text style={styles.demoChipText}>💻 BMB Login</Text>
               </TouchableOpacity>
-            </View>
+            </View>}
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -889,7 +1014,7 @@ export default function App() {
   }
 
   // ============================================================================
-  // PHÂN HỆ 1: CƯ DÂN (RESIDENT) — KHỚP 100% 6 MÀN HÌNH FIGMA CƯ DÂN
+  // PHÂN HỆ 1: CƯ DÂN (RESIDENT) — BÁM BỐ CỤC 6 MÀN HÌNH FIGMA CƯ DÂN
   // ============================================================================
   if (user.role === 'RESIDENT') {
     const pendingCount = tickets.filter((t) => t.status === 'PENDING').length;
@@ -944,7 +1069,7 @@ export default function App() {
                   style={styles.bellCircleBtn}
                   onPress={() => setResScreen('NOTI_PROFILE')}
                 >
-                  <Text style={{ fontSize: 20 }}>🔔</Text>
+                  <OutlineIcon name="bell" size={21} color="#0F172A" />
                   {unreadCount > 0 && <View style={styles.bellRedDot} />}
                 </TouchableOpacity>
               </View>
@@ -1418,7 +1543,7 @@ export default function App() {
                 <View style={styles.cardTopRow}>
                   <Text style={styles.sectionTitleText}>Thông báo</Text>
                   <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount || 2} chưa đọc</Text>
+                    <Text style={styles.unreadPillText}>{unreadCount} chưa đọc</Text>
                   </View>
                 </View>
                 {(notifications.length > 0
@@ -1601,7 +1726,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setResScreen('HOME')}
                 >
-                  <Text style={{ fontSize: 18 }}>🏠</Text>
+                  <OutlineIcon name="home" size={21} active={resScreen === 'HOME'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -1615,7 +1740,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setResScreen('HISTORY')}
                 >
-                  <Text style={{ fontSize: 18 }}>🕒</Text>
+                  <OutlineIcon name="history" size={21} active={resScreen === 'HISTORY'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -1629,7 +1754,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setResScreen('NOTI_PROFILE')}
                 >
-                  <Text style={{ fontSize: 18 }}>👤</Text>
+                  <OutlineIcon name="profile" size={21} active={resScreen === 'NOTI_PROFILE'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -1647,7 +1772,7 @@ export default function App() {
   }
 
   // ============================================================================
-  // PHÂN HỆ 2: KỸ THUẬT VIÊN (TECHNICIAN) — KHỚP 100% 5 MÀN HÌNH FIGMA KTV
+  // PHÂN HỆ 2: KỸ THUẬT VIÊN (TECHNICIAN) — BÁM BỐ CỤC 5 MÀN HÌNH FIGMA KTV
   // ============================================================================
   if (user.role === 'TECHNICIAN') {
     const assignedCount = tickets.filter((t) => t.status === 'ASSIGNED').length;
@@ -1707,7 +1832,7 @@ export default function App() {
                   style={styles.bellCircleBtn}
                   onPress={() => setTechScreen('NOTI_PROFILE')}
                 >
-                  <Text style={{ fontSize: 20 }}>🔔</Text>
+                  <OutlineIcon name="bell" size={21} color="#0F172A" />
                   <View style={styles.bellRedDot} />
                 </TouchableOpacity>
               </View>
@@ -1845,7 +1970,7 @@ export default function App() {
                           style={[
                             styles.statusPillText,
                             isAssigned
-                              ? { color: '#1D61E7' }
+                              ? { color: '#2563EB' }
                               : isInProgress
                                 ? { color: '#4F46E5' }
                                 : { color: '#059669' },
@@ -2047,7 +2172,7 @@ export default function App() {
                 <View style={styles.cardTopRow}>
                   <Text style={styles.sectionTitleText}>Thông báo công việc mới</Text>
                   <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount || 2} chưa đọc</Text>
+                    <Text style={styles.unreadPillText}>{unreadCount} chưa đọc</Text>
                   </View>
                 </View>
 
@@ -2076,7 +2201,7 @@ export default function App() {
                 <Text style={styles.cardBlockTitle}>Hồ sơ Kỹ thuật viên</Text>
                 <View style={styles.techProfileHeaderRow}>
                   <View style={styles.techAvatarCircle}>
-                    <Text style={{ fontSize: 26, color: '#1D61E7' }}>👷</Text>
+                    <Text style={{ fontSize: 26, color: '#2563EB' }}>👷</Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.profileNameText}>{user.fullName}</Text>
@@ -2256,7 +2381,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setTechScreen('HOME')}
                 >
-                  <Text style={{ fontSize: 18 }}>🏠</Text>
+                  <OutlineIcon name="home" size={21} active={techScreen === 'HOME'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -2270,7 +2395,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setTechScreen('HISTORY')}
                 >
-                  <Text style={{ fontSize: 18 }}>🕒</Text>
+                  <OutlineIcon name="history" size={21} active={techScreen === 'HISTORY'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -2284,7 +2409,7 @@ export default function App() {
                   style={styles.figmaNavTab}
                   onPress={() => setTechScreen('NOTI_PROFILE')}
                 >
-                  <Text style={{ fontSize: 18 }}>👤</Text>
+                  <OutlineIcon name="profile" size={21} active={techScreen === 'NOTI_PROFILE'} />
                   <Text
                     style={[
                       styles.figmaNavLabel,
@@ -2302,7 +2427,7 @@ export default function App() {
   }
 
   // ============================================================================
-  // PHÂN HỆ 3: BAN QUẢN LÝ TÒA NHÀ (BMB WEB APPLICATION) — KHỚP 100% 4 MÀN HÌNH FIGMA BMB
+  // PHÂN HỆ 3: BAN QUẢN LÝ TÒA NHÀ (BMB WEB APPLICATION) — BÁM BỐ CỤC 4 MÀN HÌNH FIGMA BMB
   // ============================================================================
   const bmbPendingCount = tickets.filter((t) => t.status === 'PENDING').length;
   const bmbAssignedCount = tickets.filter((t) => t.status === 'ASSIGNED').length;
@@ -2332,7 +2457,7 @@ export default function App() {
         <View style={styles.bmbSidebar}>
           <View>
             <View style={styles.bmbSidebarBrandRow}>
-              <Text style={{ fontSize: 22, marginRight: 8 }}>🏢</Text>
+              <View style={{ marginRight: 9 }}><ResiFixLogoMark size={26} /></View>
               <Text style={styles.bmbSidebarLogoText}>ResiFix BMB</Text>
             </View>
             <Text style={styles.bmbSidebarSubText}>Hệ thống Quản lý Tòa nhà</Text>
@@ -2390,7 +2515,7 @@ export default function App() {
               </Text>
               <View style={styles.bmbSidebarNewRedTag}>
                 <Text style={styles.bmbSidebarNewRedText}>
-                  0{unreadCount || 4} mới
+                  {String(unreadCount).padStart(2, '0')} mới
                 </Text>
               </View>
             </TouchableOpacity>
@@ -2443,7 +2568,7 @@ export default function App() {
                     Theo dõi, phê duyệt và điều phối xử lý sự cố
                   </Text>
                 </View>
-                <Text style={styles.bmbDateLabel}>30/10/2026</Text>
+                <Text style={styles.bmbDateLabel}>{new Date().toLocaleDateString('vi-VN')}</Text>
               </View>
 
               {/* 4 Thẻ KPI lớn chuẩn Figma 01 BMB */}
@@ -2452,7 +2577,7 @@ export default function App() {
                   <Text style={styles.bmbKpiLabel}>Chờ duyệt AI</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#EA580C' }]}>
-                      0{bmbPendingCount}
+                      {String(bmbPendingCount).padStart(2, '0')}
                     </Text>
                     <Text style={{ color: '#EA580C', fontSize: 16 }}>●</Text>
                   </View>
@@ -2462,7 +2587,7 @@ export default function App() {
                   <Text style={styles.bmbKpiLabel}>Đã phân công</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>
-                      0{bmbAssignedCount}
+                      {String(bmbAssignedCount).padStart(2, '0')}
                     </Text>
                     <Text style={{ color: '#2563EB', fontSize: 16 }}>●</Text>
                   </View>
@@ -2472,7 +2597,7 @@ export default function App() {
                   <Text style={styles.bmbKpiLabel}>Đang xử lý</Text>
                   <View style={styles.cardTopRow}>
                     <Text style={[styles.bmbKpiNumber, { color: '#4F46E5' }]}>
-                      0{bmbInProgressCount}
+                      {String(bmbInProgressCount).padStart(2, '0')}
                     </Text>
                     <Text style={{ color: '#4F46E5', fontSize: 16 }}>●</Text>
                   </View>
@@ -2579,7 +2704,7 @@ export default function App() {
                         <Text
                           style={[
                             styles.cardCodeText,
-                            isSelected && { color: '#1D61E7', fontWeight: '800' },
+                            isSelected && { color: '#2563EB', fontWeight: '800' },
                           ]}
                         >
                           {t.ticketCode}
@@ -2604,7 +2729,7 @@ export default function App() {
                             isPending
                               ? { color: '#D97706' }
                               : isAssigned
-                                ? { color: '#1D61E7' }
+                                ? { color: '#2563EB' }
                                 : { color: '#4F46E5' },
                           ]}
                         >
@@ -2654,7 +2779,7 @@ export default function App() {
                 </Text>
                 <View style={styles.rowCenter}>
                   <View style={styles.pageNumActive}>
-                    <Text style={{ color: '#1D61E7', fontWeight: '800', fontSize: 12 }}>
+                    <Text style={{ color: '#2563EB', fontWeight: '800', fontSize: 12 }}>
                       1
                     </Text>
                   </View>
@@ -3073,10 +3198,10 @@ export default function App() {
                       onPress={() => setBmbRadioTicketId(pt.id)}
                     >
                       <View style={styles.rowCenter}>
-                        <Text style={{ fontSize: 14, color: '#1D61E7', marginRight: 6 }}>
+                        <Text style={{ fontSize: 14, color: '#2563EB', marginRight: 6 }}>
                           {isRadioChecked ? '🔘' : '⚪'}
                         </Text>
-                        <Text style={{ fontWeight: '800', color: '#1D61E7', fontSize: 13 }}>
+                        <Text style={{ fontWeight: '800', color: '#2563EB', fontSize: 13 }}>
                           {pt.ticketCode}
                         </Text>
                         <View style={styles.bmbMiniOrangeBadge}>
@@ -3183,7 +3308,7 @@ export default function App() {
                   </Text>
                 </View>
                 <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
-                  <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 13 }}>
+                  <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 13 }}>
                     ✓ Đánh dấu tất cả đã đọc
                   </Text>
                 </TouchableOpacity>
@@ -3238,7 +3363,7 @@ export default function App() {
                   style={{ alignSelf: 'flex-end', marginTop: 8 }}
                   onPress={() => setBmbNavTab('TICKETS')}
                 >
-                  <Text style={{ color: '#1D61E7', fontWeight: '800', fontSize: 13 }}>
+                  <Text style={{ color: '#2563EB', fontWeight: '800', fontSize: 13 }}>
                     Duyệt & Giao việc ngay →
                   </Text>
                 </TouchableOpacity>
@@ -3264,7 +3389,7 @@ export default function App() {
                   style={styles.bmbManualReviewOutlineBtn}
                   onPress={() => setBmbNavTab('TICKETS')}
                 >
-                  <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 12.5 }}>
+                  <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 12.5 }}>
                     Phân loại thủ công →
                   </Text>
                 </TouchableOpacity>
@@ -3370,7 +3495,7 @@ export default function App() {
 }
 
 // ============================================================================
-// STYLESHEET HOÀN CHỈNH CHO CẢ 15 MÀN HÌNH FIGMA (MOBILE + BMB WEB)
+// STYLESHEET ĐỒNG BỘ CHO 15 MÀN HÌNH FIGMA (MOBILE + BMB WEB)
 // ============================================================================
 const styles = StyleSheet.create({
   screenBg: {
@@ -3378,21 +3503,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
     paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 0,
   },
-  loginScroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16 },
-  mobileFrame: { width: '100%', maxWidth: 420 },
+  loginScroll: { flexGrow: 1, justifyContent: 'flex-start', alignItems: 'center', paddingHorizontal: 16, paddingTop: 40, paddingBottom: 24 },
+  mobileFrame: { width: '100%', maxWidth: 412 },
   mobileShell: {
     flex: 1,
     width: '100%',
-    maxWidth: 460,
+    maxWidth: 412,
     alignSelf: 'center',
     backgroundColor: '#F8FAFC',
   },
-  scrollArea: { flex: 1, paddingHorizontal: 16, paddingTop: 6 },
+  scrollArea: { flex: 1, paddingHorizontal: 17, paddingTop: 9 },
 
   // Màn hình 00 BMB Web Login (Split-Card 2 cột chuẩn Figma)
   bmbLoginOuterBg: {
     flex: 1,
-    backgroundColor: '#F1F5F9',
+    backgroundColor: '#F8FAFC',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -3410,7 +3535,7 @@ const styles = StyleSheet.create({
   },
   bmbLoginLeftBlue: {
     flex: 1,
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     padding: 36,
     justifyContent: 'flex-start',
   },
@@ -3440,7 +3565,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   bmbWebLoginBtn: {
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     height: 46,
     borderRadius: 10,
     justifyContent: 'center',
@@ -3463,7 +3588,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   bmbSidebarBrandRow: { flexDirection: 'row', alignItems: 'center' },
-  bmbSidebarLogoText: { fontSize: 20, fontWeight: '800', color: '#1D61E7' },
+  bmbSidebarLogoText: { fontSize: 20, fontWeight: '800', color: '#2563EB' },
   bmbSidebarSubText: { fontSize: 12, color: '#64748B', marginTop: 2, marginBottom: 22 },
   bmbWorkspaceHeading: {
     fontSize: 11,
@@ -3480,7 +3605,7 @@ const styles = StyleSheet.create({
   },
   bmbMenuBtnActive: { backgroundColor: '#EFF6FF' },
   bmbMenuBtnText: { fontSize: 13.5, fontWeight: '600', color: '#475569' },
-  bmbMenuBtnTextActive: { color: '#1D61E7', fontWeight: '800' },
+  bmbMenuBtnTextActive: { color: '#2563EB', fontWeight: '800' },
   bmbSidebarNewRedTag: {
     backgroundColor: '#FEE2E2',
     paddingHorizontal: 8,
@@ -3508,7 +3633,7 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: Platform.OS === 'web' ? 'row' : 'column',
     padding: 20,
-    gap: 20,
+    gap: 18,
   },
   bmbCenterColumn: { flex: 1.35 },
   bmbRightInspector: {
@@ -3548,7 +3673,7 @@ const styles = StyleSheet.create({
     marginRight: 6,
     marginBottom: 6,
   },
-  bmbFilterChipActive: { backgroundColor: '#1D61E7', borderColor: '#1D61E7' },
+  bmbFilterChipActive: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
   bmbFilterChipText: { fontSize: 12, fontWeight: '600', color: '#475569' },
   bmbFilterChipTextActive: { color: '#FFFFFF', fontWeight: '700' },
   bmbUrgentInlineDot: { fontSize: 12, fontWeight: '700', color: '#DC2626' },
@@ -3589,7 +3714,7 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 10,
   },
-  qrVerifiedPillText: { fontSize: 11, fontWeight: '700', color: '#1D61E7' },
+  qrVerifiedPillText: { fontSize: 11, fontWeight: '700', color: '#2563EB' },
   bmbInspectorDesc: { fontSize: 13.5, color: '#0F172A', marginTop: 8, lineHeight: 19 },
   bmbAttachmentThumb: {
     width: 64,
@@ -3657,7 +3782,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: 12,
   },
-  bmbTechInitialsText: { fontSize: 14, fontWeight: '800', color: '#1D61E7' },
+  bmbTechInitialsText: { fontSize: 14, fontWeight: '800', color: '#2563EB' },
   workloadTrack: {
     height: 7,
     backgroundColor: '#E2E8F0',
@@ -3676,9 +3801,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  bmbWorkloadBtnBlueActive: { backgroundColor: '#1D61E7', borderColor: '#1D61E7' },
+  bmbWorkloadBtnBlueActive: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
   bmbWorkloadBtnIndigoActive: { backgroundColor: '#4F46E5', borderColor: '#4F46E5' },
-  bmbWorkloadBtnText: { fontSize: 12, fontWeight: '700', color: '#1D61E7' },
+  bmbWorkloadBtnText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
   bmbBlueOutlinePanel: {
     backgroundColor: '#FFFFFF',
     borderWidth: 1.5,
@@ -3686,7 +3811,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 14,
   },
-  bmbPanelBlueTitle: { fontSize: 15, fontWeight: '800', color: '#1D4ED8', marginBottom: 4 },
+  bmbPanelBlueTitle: { fontSize: 15, fontWeight: '800', color: '#2563EB', marginBottom: 4 },
   bmbRadioTicketBox: {
     borderWidth: 1,
     borderColor: '#E2E8F0',
@@ -3754,18 +3879,18 @@ const styles = StyleSheet.create({
   },
 
   // Styles dùng chung cho Mobile (Cư dân & Kỹ thuật viên)
-  brandCenter: { alignItems: 'center', marginBottom: 20 },
+  brandCenter: { alignItems: 'center', marginBottom: 20, gap: 0 },
   appIconBox: {
     width: 68,
     height: 68,
     borderRadius: 18,
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 10,
   },
   appIconSymbol: { fontSize: 30, color: '#FFFFFF' },
-  brandTitle: { fontSize: 30, fontWeight: '800', color: '#1D61E7' },
+  brandTitle: { fontSize: 30, fontWeight: '800', color: '#2563EB', marginTop: 9 },
   brandSub: { fontSize: 13.5, color: '#64748B', marginTop: 4, textAlign: 'center' },
   geminiBadgePill: {
     marginTop: 10,
@@ -3818,12 +3943,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  checkboxChecked: { backgroundColor: '#1D61E7', borderColor: '#1D61E7' },
+  checkboxChecked: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
   checkMark: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
   rememberText: { fontSize: 13, color: '#475569' },
-  forgotText: { fontSize: 13, fontWeight: '700', color: '#1D61E7' },
+  forgotText: { fontSize: 13, fontWeight: '700', color: '#2563EB' },
   loginSubmitBtn: {
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     height: 50,
     borderRadius: 12,
     justifyContent: 'center',
@@ -3841,7 +3966,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     alignItems: 'center',
   },
-  demoChipText: { fontSize: 11, fontWeight: '700', color: '#1D4ED8', textAlign: 'center' },
+  demoChipText: { fontSize: 11, fontWeight: '700', color: '#2563EB', textAlign: 'center' },
   resHomeHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3878,11 +4003,11 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   ctaTitleRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  qrFrameIcon: { fontSize: 20, color: '#1D61E7', marginRight: 8, fontWeight: '800' },
+  qrFrameIcon: { fontSize: 20, color: '#2563EB', marginRight: 8, fontWeight: '800' },
   ctaHeroTitle: { fontSize: 17, fontWeight: '800', color: '#0F172A' },
   ctaHeroDesc: { fontSize: 13, color: '#475569', lineHeight: 19, marginBottom: 14 },
   ctaPrimaryBtn: {
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     height: 46,
     borderRadius: 12,
     justifyContent: 'center',
@@ -3896,7 +4021,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   sectionTitleText: { fontSize: 17.5, fontWeight: '800', color: '#0F172A' },
-  seeHistoryLink: { fontSize: 13.5, fontWeight: '700', color: '#1D61E7' },
+  seeHistoryLink: { fontSize: 13.5, fontWeight: '700', color: '#2563EB' },
   pillsScroll: { marginBottom: 14, flexGrow: 0 },
   chipWrapRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8 },
   filterPill: {
@@ -3908,7 +4033,7 @@ const styles = StyleSheet.create({
     borderColor: '#E2E8F0',
     marginRight: 8,
   },
-  filterPillActive: { backgroundColor: '#1D61E7', borderColor: '#1D61E7' },
+  filterPillActive: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
   filterPillText: { fontSize: 13, fontWeight: '600', color: '#475569' },
   filterPillTextActive: { color: '#FFFFFF', fontWeight: '700' },
   resTicketCard: {
@@ -4026,8 +4151,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 8,
   },
-  techPlusIcon: { fontSize: 22, color: '#1D61E7', marginBottom: 4 },
-  techAddPhotoBlueText: { fontSize: 12, fontWeight: '700', color: '#1D61E7', textAlign: 'center' },
+  techPlusIcon: { fontSize: 22, color: '#2563EB', marginBottom: 4 },
+  techAddPhotoBlueText: { fontSize: 12, fontWeight: '700', color: '#2563EB', textAlign: 'center' },
   techNotiUrgentBox: {
     backgroundColor: '#EFF6FF',
     borderRadius: 12,
@@ -4063,7 +4188,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
     alignSelf: 'flex-start',
   },
-  specialtyPillText: { fontSize: 12, fontWeight: '700', color: '#1D61E7' },
+  specialtyPillText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
   techDivider: { height: 1, backgroundColor: '#E2E8F0', marginVertical: 12 },
   techProfileLine: { fontSize: 13.5, color: '#0F172A', marginBottom: 8, lineHeight: 20 },
   waitingResidentBanner: {
@@ -4080,7 +4205,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
   },
-  sentPhotoBlueText: { fontSize: 12.5, fontWeight: '600', color: '#1D61E7' },
+  sentPhotoBlueText: { fontSize: 12.5, fontWeight: '600', color: '#2563EB' },
   closedResidentGreenBar: {
     marginTop: 10,
     backgroundColor: '#ECFDF5',
@@ -4117,7 +4242,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 10,
   },
-  qrDashedBtnText: { color: '#1D61E7', fontSize: 14, fontWeight: '700' },
+  qrDashedBtnText: { color: '#2563EB', fontSize: 14, fontWeight: '700' },
   qrRecognizedBox: {
     backgroundColor: '#ECFDF5',
     borderWidth: 1,
@@ -4292,7 +4417,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 14,
   },
-  unreadPillText: { fontSize: 12, fontWeight: '700', color: '#1D61E7' },
+  unreadPillText: { fontSize: 12, fontWeight: '700', color: '#2563EB' },
   notiBlueItem: {
     backgroundColor: '#EFF6FF',
     borderRadius: 12,
@@ -4308,7 +4433,7 @@ const styles = StyleSheet.create({
     width: 9,
     height: 9,
     borderRadius: 5,
-    backgroundColor: '#1D61E7',
+    backgroundColor: '#2563EB',
     marginTop: 4,
   },
   profileAvatarWrapper: { alignItems: 'center', marginVertical: 10 },
@@ -4381,11 +4506,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
     borderTopColor: '#E2E8F0',
-    paddingVertical: 10,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'android' ? 13 : 14,
+    minHeight: 65,
   },
   figmaNavTab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  figmaNavLabel: { fontSize: 12, color: '#64748B', marginTop: 2, fontWeight: '600' },
-  figmaNavLabelActive: { color: '#1D61E7', fontWeight: '800' },
+  figmaNavLabel: { fontSize: 11.5, color: '#64748B', marginTop: 5, fontWeight: '600' },
+  figmaNavLabelActive: { color: '#2563EB', fontWeight: '800' },
   rowCenter: { flexDirection: 'row', alignItems: 'center' },
   toastBanner: {
     backgroundColor: '#EFF6FF',
@@ -4396,5 +4523,5 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginBottom: 10,
   },
-  toastText: { color: '#1D4ED8', fontWeight: '700', fontSize: 13, textAlign: 'center' },
+  toastText: { color: '#2563EB', fontWeight: '700', fontSize: 13, textAlign: 'center' },
 });
