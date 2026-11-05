@@ -26,7 +26,7 @@ const getApiBaseUrl = () => {
     // Trên trình duyệt máy tính: Luôn gọi thẳng vào cổng 5000 nội bộ của máy tính
     return 'http://localhost:5000/api';
   }
-  return 'https://fast-games-eat.loca.lt/api';
+  return 'https://dark-crabs-double.loca.lt/api';
 };
 
 const API_BASE_URL = getApiBaseUrl();
