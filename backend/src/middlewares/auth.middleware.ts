@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { Role } from '@prisma/client';
+import { prisma } from '../db';
 
 // Mở rộng kiểu Request của Express để gắn thông tin User sau khi giải mã JWT
 export interface AuthRequest extends Request {
@@ -13,7 +14,7 @@ export interface AuthRequest extends Request {
 }
 
 // 1. Middleware xác thực JWT Token (Đáp ứng US-03, US-46, NFR02)
-export const authenticateJWT = (req: AuthRequest, res: Response, next: NextFunction): void => {
+export const authenticateJWT = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -25,17 +26,55 @@ export const authenticateJWT = (req: AuthRequest, res: Response, next: NextFunct
   }
 
   const token = authHeader.split(' ')[1];
-  const secret = process.env.JWT_SECRET || 'ResiFix_C1SE52_SuperSecretKey_2026';
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    res.status(503).json({ success: false, message: 'Dịch vụ xác thực chưa được cấu hình.' });
+    return;
+  }
 
+  let decoded: jwt.JwtPayload;
   try {
-    const decoded = jwt.verify(token, secret) as AuthRequest['user'];
-    req.user = decoded;
-    next();
-  } catch (error) {
-    res.status(403).json({
+    const payload = jwt.verify(token, secret);
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      typeof payload.userId !== 'string' ||
+      !Object.values(Role).includes(payload.role as Role)
+    ) {
+      res.status(401).json({
+        success: false,
+        message: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại!',
+      });
+      return;
+    }
+    decoded = payload;
+  } catch {
+    res.status(401).json({
       success: false,
       message: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại!',
     });
+    return;
+  }
+
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId as string },
+      select: { id: true, phone: true, role: true, fullName: true, isActive: true },
+    });
+    if (!user || !user.isActive || user.role !== decoded.role) {
+      res.status(401).json({ success: false, message: 'Tài khoản không còn hoạt động. Vui lòng đăng nhập lại!' });
+      return;
+    }
+
+    req.user = {
+      userId: user.id,
+      phone: user.phone,
+      role: user.role,
+      fullName: user.fullName,
+    };
+    next();
+  } catch {
+    res.status(503).json({ success: false, message: 'Không thể xác minh phiên đăng nhập lúc này.' });
   }
 };
 

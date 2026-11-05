@@ -14,7 +14,7 @@ export interface AiAnalysisResult {
 const VALID_CATEGORIES = Object.values(IncidentCategory);
 const VALID_PRIORITIES = Object.values(PriorityLevel);
 
-// Bộ phân loại dự phòng thông minh (US-19) khi đứt mạng hoặc quá 4 giây
+// Heuristic fallback is explicitly marked for manual review; it is not reported as Gemini output.
 function analyzeWithSmartFallback(description: string, latencyMs: number, reason: string): AiAnalysisResult {
   const lower = description.toLowerCase();
   let category: IncidentCategory = IncidentCategory.OTHER;
@@ -54,8 +54,8 @@ function analyzeWithSmartFallback(description: string, latencyMs: number, reason
     priority,
     summary: `[Trợ lý AI ResiFix] ${cleanSummary}`,
     latencyMs,
-    isValidJson: true,
-    isFallbackManual: false,
+    isValidJson: false,
+    isFallbackManual: true,
     rawResponse: { mode: 'SMART_FALLBACK_ASSISTANT', reason },
   };
 }
@@ -65,11 +65,9 @@ export async function analyzeIncidentWithGemini(description: string, locationNot
   const startTime = Date.now();
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
 
-  // Chỉ kiểm tra xem đã điền key vào .env chưa (hỗ trợ đầy đủ key AQ.Ab8RN6... trên ảnh của bạn)
+  // Without a Gemini key, let the manager classify the report manually.
   if (!apiKey || apiKey.includes('YOUR_GEMINI_API_KEY')) {
-    const simulatedLatency = Math.floor(Math.random() * 350) + 550;
-    await new Promise((r) => setTimeout(r, 180));
-    return analyzeWithSmartFallback(description, simulatedLatency, 'DEMO_KEY_NOT_SET');
+    return analyzeWithSmartFallback(description, Date.now() - startTime, 'GEMINI_KEY_NOT_CONFIGURED');
   }
 
   const prompt = `Bạn là Trợ lý AI Phân loại Sự cố Tòa nhà chung cư ResiFix.
@@ -91,66 +89,67 @@ Quy tắc mức độ khẩn cấp priority:
 - LOW: lỗi nhỏ ít ảnh hưởng.`;
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
-
-  for (const modelName of candidateModels) {
-    try {
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: SchemaType.OBJECT,
-            properties: {
-              category: {
-                type: SchemaType.STRING,
-                description: 'One of: PLUMBING, ELECTRICAL, ELEVATOR, HVAC, ACCESS_SECURITY, OTHER',
-              },
-              priority: {
-                type: SchemaType.STRING,
-                description: 'One of: LOW, MEDIUM, HIGH',
-              },
-              summary: {
-                type: SchemaType.STRING,
-                description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 25 từ cho Ban quản lý tòa nhà.',
-              },
+  const modelName = 'gemini-2.5-flash';
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: SchemaType.OBJECT,
+          properties: {
+            category: {
+              type: SchemaType.STRING,
+              description: 'One of: PLUMBING, ELECTRICAL, ELEVATOR, HVAC, ACCESS_SECURITY, OTHER',
             },
-            required: ['category', 'priority', 'summary'],
+            priority: {
+              type: SchemaType.STRING,
+              description: 'One of: LOW, MEDIUM, HIGH',
+            },
+            summary: {
+              type: SchemaType.STRING,
+              description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 25 từ cho Ban quản lý tòa nhà.',
+            },
           },
+          required: ['category', 'priority', 'summary'],
         },
-      });
+      },
+    });
 
-      // Giới hạn Timeout < 3.8 giây (NFR01 < 4s, US-19)
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('GEMINI_TIMEOUT_EXCEEDED_4S')), 3800)
-      );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('GEMINI_TIMEOUT_EXCEEDED')), 3800);
+    });
+    const result = await Promise.race([model.generateContent(prompt), timeoutPromise]);
+    const parsed: unknown = JSON.parse(result.response.text());
+    if (!parsed || typeof parsed !== 'object') throw new Error('Invalid Gemini response shape.');
+    const candidate = parsed as Record<string, unknown>;
+    const summary = typeof candidate.summary === 'string' ? candidate.summary.trim() : '';
 
-      const result = await Promise.race([model.generateContent(prompt), timeoutPromise]);
-      const responseText = result.response.text();
-      const parsed = JSON.parse(responseText);
-      const latencyMs = Date.now() - startTime;
-
-      const isValidCategory = VALID_CATEGORIES.includes(parsed.category);
-      const isValidPriority = VALID_PRIORITIES.includes(parsed.priority);
-
-      if (isValidCategory && isValidPriority && parsed.summary) {
-        return {
-          category: parsed.category as IncidentCategory,
-          priority: parsed.priority as PriorityLevel,
-          summary: parsed.summary,
-          latencyMs,
-          isValidJson: true,
-          isFallbackManual: false,
-          rawResponse: { modelUsed: modelName, ...parsed },
-        };
-      }
-    } catch (err: any) {
-      // Nếu model đầu tiên không khớp phiên bản API thì tự thử sang model tiếp theo trong danh sách
-      continue;
+    if (
+      !VALID_CATEGORIES.includes(candidate.category as IncidentCategory) ||
+      !VALID_PRIORITIES.includes(candidate.priority as PriorityLevel) ||
+      !summary || summary.length > 500
+    ) {
+      throw new Error('Invalid Gemini response values.');
     }
-  }
 
-  // Nếu cả 3 model đều lỗi hoặc mạng chặn thì trả về kết quả từ bộ phân loại dự phòng thông minh
-  const latencyMs = Date.now() - startTime;
-  return analyzeWithSmartFallback(description, latencyMs, 'FALLBACK_USED');
+    return {
+      category: candidate.category as IncidentCategory,
+      priority: candidate.priority as PriorityLevel,
+      summary,
+      latencyMs: Date.now() - startTime,
+      isValidJson: true,
+      isFallbackManual: false,
+      rawResponse: { modelUsed: modelName, category: candidate.category, priority: candidate.priority, summary },
+    };
+  } catch (error) {
+    return analyzeWithSmartFallback(
+      description,
+      Date.now() - startTime,
+      error instanceof Error && error.message === 'GEMINI_TIMEOUT_EXCEEDED' ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
+    );
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }

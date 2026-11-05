@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import {
   Modal,
-  View,
-  Text,
-  TouchableOpacity,
   StyleSheet,
-  TextInput,
-  ActivityIndicator,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import {
+  UiActivityIndicator as ActivityIndicator,
+  UiText as Text,
+  UiTextInput as TextInput,
+  UiTouchableOpacity as TouchableOpacity,
+  UiView as View,
+  useUiPreferences,
+} from './UiPreferences';
 
 interface QrScannerModalProps {
   visible: boolean;
@@ -17,48 +20,40 @@ interface QrScannerModalProps {
   roleTitle?: string;
 }
 
-const SAMPLE_QR_CODES = [
-  { code: 'AC-B02', name: 'Máy lạnh sảnh B (Tầng 1)' },
-  { code: 'WP-1204', name: 'Ống nước bồn rửa (Căn A-1204)' },
-  { code: 'HL-B12', name: 'Đèn hành lang khu B (Tầng 12)' },
-  { code: 'ELV-02', name: 'Thang máy khách số 02 (Sảnh B)' },
-  { code: 'PK-B1-02', name: 'Đầu đọc thẻ từ (Hầm B1)' },
-];
-
 export default function QrScannerModal({
   visible,
   onClose,
   onScannedCode,
   roleTitle = 'Quét mã QR Thiết bị Tòa nhà (FR05)',
 }: QrScannerModalProps) {
+  const { t } = useUiPreferences();
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [manualCode, setManualCode] = useState('');
   const [cameraReady, setCameraReady] = useState(false);
   const [facing, setFacing] = useState<'back' | 'front'>('back');
   const [cameraKey, setCameraKey] = useState(1);
+  const shouldRequestPermission = Boolean(
+    permission && !permission.granted && permission.canAskAgain
+  );
 
   // Tự động xin quyền và tạo độ trễ 250ms khi mở Modal để Android kịp khởi tạo SurfaceView
   useEffect(() => {
-    let timer: any;
-    if (visible) {
-      setScanned(false);
-      setManualCode('');
-      setCameraReady(false);
+    if (!visible) return;
 
-      if (permission && !permission.granted && permission.canAskAgain) {
-        requestPermission();
-      }
+    setScanned(false);
+    setManualCode('');
+    setCameraReady(false);
 
-      timer = setTimeout(() => {
-        setCameraReady(true);
-        setCameraKey((prev) => prev + 1);
-      }, 250);
-    } else {
-      setCameraReady(false);
-    }
+    if (shouldRequestPermission) requestPermission();
+
+    const timer = setTimeout(() => {
+      setCameraReady(true);
+      setCameraKey((prev) => prev + 1);
+    }, 250);
+
     return () => clearTimeout(timer);
-  }, [visible, permission?.granted]);
+  }, [visible, shouldRequestPermission, requestPermission]);
 
   const handleRequestPermission = async () => {
     setCameraReady(false);
@@ -75,20 +70,22 @@ export default function QrScannerModal({
     if (scanned || !data) return;
     setScanned(true);
 
-    let cleanCode = data.trim().toUpperCase();
+    let cleanCode = data.trim();
     try {
       if (cleanCode.startsWith('{')) {
         const parsed = JSON.parse(data);
-        if (parsed.qrCode) cleanCode = String(parsed.qrCode).toUpperCase();
-      } else if (cleanCode.includes('/')) {
-        const parts = cleanCode.split('/');
-        cleanCode = parts[parts.length - 1];
+        if (parsed.qrCode) cleanCode = String(parsed.qrCode);
+      } else if (/^https?:\/\//i.test(cleanCode)) {
+        const parsedUrl = new URL(cleanCode);
+        cleanCode = parsedUrl.searchParams.get('data') ||
+          parsedUrl.searchParams.get('qrCode') ||
+          parsedUrl.pathname.split('/').filter(Boolean).pop() || cleanCode;
       }
     } catch {
       // Giữ nguyên chuỗi gốc
     }
 
-    onScannedCode(cleanCode);
+    onScannedCode(cleanCode.trim().toUpperCase());
     onClose();
   };
 
@@ -104,10 +101,9 @@ export default function QrScannerModal({
           {/* Header Modal */}
           <View style={styles.headerRow}>
             <View style={{ flex: 1, paddingRight: 8 }}>
-              <Text style={styles.headerTitle}>📷 {roleTitle}</Text>
+              <Text style={styles.headerTitle}>📷 {t(roleTitle)}</Text>
               <Text style={styles.headerSub}>
-                Hướng camera vào tem QR dán trên thiết bị để tự động điền thông tin
-              </Text>
+                {t("Hướng camera vào tem QR dán trên thiết bị để tự động điền thông tin")}</Text>
             </View>
             <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
               <Text style={styles.closeBtnText}>✕</Text>
@@ -119,25 +115,24 @@ export default function QrScannerModal({
             {!permission ? (
               <View style={styles.centerBox}>
                 <ActivityIndicator color="#38BDF8" size="large" />
-                <Text style={styles.permissionText}>Đang kiểm tra quyền Camera...</Text>
+                <Text style={styles.permissionText}>{t("Đang kiểm tra quyền Camera...")}</Text>
               </View>
             ) : !permission.granted ? (
               <View style={styles.centerBox}>
                 <Text style={{ fontSize: 34, marginBottom: 8 }}>🔒</Text>
                 <Text style={styles.permissionText}>
-                  Ứng dụng cần quyền truy cập Camera để quét mã QR thiết bị (FR05).
-                </Text>
+                  {t("Ứng dụng cần quyền truy cập Camera để quét mã QR thiết bị (FR05).")}</Text>
                 <TouchableOpacity
                   style={styles.grantBtn}
                   onPress={handleRequestPermission}
                 >
-                  <Text style={styles.grantBtnText}>Cấp quyền Camera ngay</Text>
+                  <Text style={styles.grantBtnText}>{t("Cấp quyền Camera ngay")}</Text>
                 </TouchableOpacity>
               </View>
             ) : !cameraReady ? (
               <View style={styles.centerBox}>
                 <ActivityIndicator color="#38BDF8" size="large" />
-                <Text style={styles.permissionText}>Đang khởi động ống kính...</Text>
+                <Text style={styles.permissionText}>{t("Đang khởi động ống kính...")}</Text>
               </View>
             ) : (
               <View style={styles.cameraActiveWrapper}>
@@ -160,8 +155,7 @@ export default function QrScannerModal({
                     <View style={[styles.corner, styles.bottomRight]} />
                   </View>
                   <Text style={styles.scanHintText}>
-                    Đặt mã QR thiết bị vào giữa khung ngắm
-                  </Text>
+                    {t("Đặt mã QR thiết bị vào giữa khung ngắm")}</Text>
                 </View>
 
                 {/* Nút làm mới ống kính hoặc đổi Camera Trước/Sau nếu máy Android bị kẹt phần cứng */}
@@ -170,7 +164,7 @@ export default function QrScannerModal({
                     style={styles.camSmallBtn}
                     onPress={() => setCameraKey((prev) => prev + 1)}
                   >
-                    <Text style={styles.camSmallBtnText}>🔄 Làm mới Cam</Text>
+                    <Text style={styles.camSmallBtnText}>{t("🔄 Làm mới Cam")}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.camSmallBtn}
@@ -178,7 +172,7 @@ export default function QrScannerModal({
                       setFacing((prev) => (prev === 'back' ? 'front' : 'back'))
                     }
                   >
-                    <Text style={styles.camSmallBtnText}>🔁 Đổi Cam</Text>
+                    <Text style={styles.camSmallBtnText}>{t("🔁 Đổi Cam")}</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -186,11 +180,11 @@ export default function QrScannerModal({
           </View>
 
           {/* Ô nhập mã thủ công nếu tem QR bị mờ rách */}
-          <Text style={styles.sectionLabel}>Hoặc nhập mã thiết bị nếu tem QR bị mờ:</Text>
+          <Text style={styles.sectionLabel}>{t("Hoặc nhập mã thiết bị nếu tem QR bị mờ:")}</Text>
           <View style={styles.manualRow}>
             <TextInput
               style={styles.manualInput}
-              placeholder="VD: WP-1204, AC-B02..."
+              placeholder={t("VD: WP-1204, AC-B02...")}
               placeholderTextColor="#94A3B8"
               value={manualCode}
               onChangeText={setManualCode}
@@ -205,29 +199,10 @@ export default function QrScannerModal({
                 }
               }}
             >
-              <Text style={styles.manualConfirmText}>Tra cứu</Text>
+              <Text style={styles.manualConfirmText}>{t("Tra cứu")}</Text>
             </TouchableOpacity>
           </View>
 
-          {/* Danh sách mã QR mẫu trong Database để bấm test nhanh khi thuyết trình */}
-          <Text style={styles.sectionLabel}>
-            ⚡ Chọn nhanh tem QR thiết bị mẫu (Dùng khi Demo):
-          </Text>
-          <View style={styles.quickChipsWrap}>
-            {SAMPLE_QR_CODES.map((item) => (
-              <TouchableOpacity
-                key={item.code}
-                style={styles.quickQrChip}
-                onPress={() => {
-                  onScannedCode(item.code);
-                  onClose();
-                }}
-              >
-                <Text style={styles.quickQrCode}>{item.code}</Text>
-                <Text style={styles.quickQrName}>{item.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
         </View>
       </View>
     </Modal>
@@ -401,19 +376,4 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   manualConfirmText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13 },
-  quickChipsWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  quickQrChip: {
-    backgroundColor: '#EFF6FF',
-    borderWidth: 1,
-    borderColor: '#BFDBFE',
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  quickQrCode: { fontSize: 12, fontWeight: '800', color: '#1D4ED8' },
-  quickQrName: { fontSize: 10.5, color: '#475569' },
 });

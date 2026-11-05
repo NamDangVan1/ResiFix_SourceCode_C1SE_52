@@ -6,15 +6,18 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from './db';
 import authRoutes from './routes/auth.routes';
 import ticketRoutes from './routes/ticket.routes';
 import notificationRoutes from './routes/notification.routes';
 import uploadRoutes from './routes/upload.routes';
 
 const app = express();
-const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
+
+if (!process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET is required to start the ResiFix API.');
+}
 
 app.use(cors());
 // Tăng giới hạn payload lên 10MB để hỗ trợ upload ảnh chụp từ Camera (US-08, US-33, US-43)
@@ -36,26 +39,19 @@ app.use('/api/upload', uploadRoutes);
 // 5. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
 app.get('/api/health', async (_req: Request, res: Response) => {
   try {
-    const userCount = await prisma.user.count();
-    const ticketCount = await prisma.incidentTicket.count();
-    const notificationCount = await prisma.notification.count();
+    await prisma.$queryRaw`SELECT 1`;
     res.status(200).json({
       status: 'OK',
       project: 'ResiFix API Gateway - C1SE.52',
       database: 'Connected to Neon PostgreSQL successfully!',
-      stats: {
-        totalUsers: userCount,
-        totalTickets: ticketCount,
-        totalNotifications: notificationCount,
-      },
     });
   } catch (error) {
-    res.status(500).json({ status: 'ERROR', message: 'Database connection failed', error });
+    console.error('Health check failed:', error);
+    res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
   }
 });
 
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`✅ Đã nạp DATABASE_URL: ${process.env.DATABASE_URL ? 'THÀNH CÔNG' : 'THẤT BẠI (Kiểm tra lại tên file .env)'}`);
   console.log(`🚀 ResiFix Backend Server đang chạy tại: http://localhost:${PORT}/api/health`);
-  console.log(`📱 Điện thoại kết nối qua Wi-Fi tại: http://192.168.1.11:${PORT}/api/health`);
 });

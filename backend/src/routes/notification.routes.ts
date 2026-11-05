@@ -1,10 +1,8 @@
 import { Router, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { authenticateJWT, AuthRequest } from '../middlewares/auth.middleware';
+import { prisma } from '../db';
 
 const router = Router();
-const prisma = new PrismaClient();
-
 const getParamAsString = (param: string | string[] | undefined): string => {
   if (Array.isArray(param)) return param[0] || '';
   return String(param || '');
@@ -49,7 +47,8 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
       notifications,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Lỗi khi tải hộp thư thông báo', error });
+    console.error('Lỗi khi tải hộp thư thông báo:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi tải hộp thư thông báo.' });
   }
 });
 
@@ -69,7 +68,8 @@ router.patch('/read-all', authenticateJWT, async (req: AuthRequest, res: Respons
       updatedCount: result.count,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Lỗi khi cập nhật trạng thái thông báo', error });
+    console.error('Lỗi khi cập nhật trạng thái thông báo:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi cập nhật trạng thái thông báo.' });
   }
 });
 
@@ -100,7 +100,8 @@ router.patch('/:id/read', authenticateJWT, async (req: AuthRequest, res: Respons
       notification: updated,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Lỗi khi đánh dấu đã đọc', error });
+    console.error('Lỗi khi đánh dấu đã đọc:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi đánh dấu đã đọc.' });
   }
 });
 

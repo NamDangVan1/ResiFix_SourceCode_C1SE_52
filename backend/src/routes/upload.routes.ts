@@ -1,71 +1,63 @@
 import { Router, Response } from 'express';
 import { v2 as cloudinary } from 'cloudinary';
+import { Role } from '@prisma/client';
 import { authenticateJWT, AuthRequest } from '../middlewares/auth.middleware';
 
 const router = Router();
 
-// Cấu hình Cloudinary từ biến môi trường .env (Task 2.2.2.2, US-43)
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+const IMAGE_DATA_URI = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/i;
 
-// ============================================================================
-// POST /api/upload - Tải ảnh hiện trường (Cư dân) hoặc ảnh nghiệm thu (KTV) lên Cloudinary (US-08, US-33, US-43)
-// Nhận vào: { imageBase64: "data:image/jpeg;base64,...", folder: "scene_before" | "repair_proof" }
-// ============================================================================
 router.post('/', authenticateJWT, async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const imageBase64 = body.imageBase64;
+  const folder = body.folder;
+
+  if (typeof imageBase64 !== 'string' || !IMAGE_DATA_URI.test(imageBase64)) {
+    res.status(400).json({ success: false, message: 'Ảnh phải là dữ liệu JPEG, PNG hoặc WebP hợp lệ.' });
+    return;
+  }
+  if (imageBase64.length > 9_500_000) {
+    res.status(413).json({ success: false, message: 'Ảnh vượt quá dung lượng cho phép.' });
+    return;
+  }
+  if (folder !== 'incident_scene' && folder !== 'repair_proof') {
+    res.status(400).json({ success: false, message: 'Loại ảnh tải lên không hợp lệ.' });
+    return;
+  }
+  if (
+    (folder === 'incident_scene' && req.user?.role !== Role.RESIDENT) ||
+    (folder === 'repair_proof' && req.user?.role !== Role.TECHNICIAN)
+  ) {
+    res.status(403).json({ success: false, message: 'Vai trò hiện tại không được tải loại ảnh này.' });
+    return;
+  }
+
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (!cloudName || !apiKey || !apiSecret) {
+    res.status(503).json({ success: false, message: 'Dịch vụ lưu ảnh chưa được cấu hình.' });
+    return;
+  }
+
   try {
-    const { imageBase64, folder } = req.body;
-
-    if (!imageBase64) {
-      res.status(400).json({
-        success: false,
-        message: 'Vui lòng cung cấp dữ liệu hình ảnh (imageBase64 hoặc URL)!',
-      });
-      return;
-    }
-
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME || '';
-
-    // Cơ chế Fallback thông minh: Nếu chưa cấu hình Cloudinary thật trong .env thì trả về ảnh Demo chất lượng cao
-    if (!cloudName || cloudName === 'your_cloud_name') {
-      const isRepairProof = folder === 'repair_proof';
-      const demoUrl = isRepairProof
-        ? 'https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg'
-        : 'https://images.unsplash.com/photo-1585704032915-c3400ca199e7?auto=format&fit=crop&w=800&q=80';
-
-      res.status(200).json({
-        success: true,
-        mode: 'CLOUDINARY_DEMO_FALLBACK',
-        message: 'Tải ảnh thành công (Chế độ Demo khi chưa điền CLOUDINARY_CLOUD_NAME trong .env)!',
-        imageUrl: demoUrl,
-        publicId: `resifix_demo_${Date.now()}`,
-      });
-      return;
-    }
-
-    // Nếu đã có tài khoản Cloudinary thật: Tải lên và tự động nén ảnh (Risk R4: Optimize storage payload)
-    const uploadResult = await cloudinary.uploader.upload(String(imageBase64), {
-      folder: `resifix_c1se52/${folder || 'incidents'}`,
+    cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret });
+    const uploadResult = await cloudinary.uploader.upload(imageBase64, {
+      folder: `resifix_c1se52/${folder}`,
       transformation: [{ width: 1080, crop: 'limit', quality: 'auto:good', fetch_format: 'auto' }],
+      resource_type: 'image',
     });
 
-    res.status(200).json({
+    res.status(201).json({
       success: true,
       mode: 'CLOUDINARY_CLOUD',
-      message: 'Đã tải ảnh lên Cloudinary thành công!',
+      message: 'Đã tải ảnh lên Cloudinary thành công.',
       imageUrl: uploadResult.secure_url,
       publicId: uploadResult.public_id,
     });
   } catch (error) {
     console.error('Lỗi upload Cloudinary:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Lỗi khi tải ảnh lên đám mây Cloudinary.',
-      error,
-    });
+    res.status(502).json({ success: false, message: 'Không thể tải ảnh lên Cloudinary. Vui lòng thử lại.' });
   }
 });
 
