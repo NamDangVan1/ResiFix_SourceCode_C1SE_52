@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import {
+  Prisma,
   PrismaClient,
   Role,
   TicketStatus,
@@ -8,11 +9,43 @@ import {
   IncidentCategory,
   PriorityLevel,
 } from '@prisma/client';
+import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { analyzeIncidentWithGemini } from '../services/gemini.service';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+const TECHNICIAN_SELECT = {
+  id: true,
+  fullName: true,
+  phone: true,
+  email: true,
+  specialty: true,
+  specialtyLabel: true,
+  shiftName: true,
+  isOnDuty: true,
+  isActive: true,
+  assignedTickets: {
+    where: { status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] } },
+    select: { id: true, ticketCode: true, title: true, status: true, locationNote: true },
+  },
+} satisfies Prisma.UserSelect;
+
+const TECHNICIAN_SPECIALTY_LABELS: Record<IncidentCategory, string> = {
+  [IncidentCategory.PLUMBING]: 'Điện - Nước',
+  [IncidentCategory.ELECTRICAL]: 'Điện & Chiếu sáng',
+  [IncidentCategory.ELEVATOR]: 'Thang máy & Cơ khí',
+  [IncidentCategory.HVAC]: 'Điều hòa & Thông gió',
+  [IncidentCategory.ACCESS_SECURITY]: 'Điện tử & An ninh',
+  [IncidentCategory.OTHER]: 'Khác',
+};
+
+const isIncidentCategory = (value: unknown): value is IncidentCategory =>
+  typeof value === 'string' && Object.values(IncidentCategory).includes(value as IncidentCategory);
+
+const isUniqueConstraintError = (error: unknown): boolean =>
+  error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 
 // Hàm ép kiểu an toàn cho req.params của Express để không bao giờ bị lỗi TS2339 / TS2322
 const getParamAsString = (param: string | string[] | undefined): string => {
@@ -126,25 +159,216 @@ router.get(
     try {
       const technicians = await prisma.user.findMany({
         where: { role: Role.TECHNICIAN, isActive: true },
-        select: {
-          id: true,
-          fullName: true,
-          phone: true,
-          specialty: true,
-          specialtyLabel: true,
-          shiftName: true,
-          isOnDuty: true,
-          assignedTickets: {
-            where: { status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] } },
-            select: { id: true, ticketCode: true, title: true, status: true, locationNote: true },
-          },
-        },
+        select: TECHNICIAN_SELECT,
         orderBy: { isOnDuty: 'desc' },
       });
 
       res.status(200).json({ success: true, technicians });
     } catch (error) {
       res.status(500).json({ success: false, message: 'Lỗi khi tải danh sách Kỹ thuật viên ca trực', error });
+    }
+  }
+);
+
+// ============================================================================
+// 3. POST /api/tickets/technicians - Tạo tài khoản Kỹ thuật viên (BMB only)
+// ============================================================================
+router.post(
+  '/technicians',
+  authenticateJWT,
+  authorizeRoles(Role.BMB),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const body = req.body ?? {};
+    const fullName = typeof body.fullName === 'string' ? body.fullName.trim() : '';
+    const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    const specialty = body.specialty;
+
+    if (fullName.length < 2 || fullName.length > 100 || phone.length < 8 || phone.length > 32) {
+      res.status(400).json({ success: false, message: 'Vui lòng nhập họ tên và số điện thoại hợp lệ.' });
+      return;
+    }
+    if (email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)) {
+      res.status(400).json({ success: false, message: 'Email không hợp lệ.' });
+      return;
+    }
+    if (password.length < 6 || password.length > 128) {
+      res.status(400).json({ success: false, message: 'Mật khẩu ban đầu phải có từ 6 đến 128 ký tự.' });
+      return;
+    }
+    if (!isIncidentCategory(specialty)) {
+      res.status(400).json({ success: false, message: 'Vui lòng chọn chuyên môn hợp lệ.' });
+      return;
+    }
+    if (body.isOnDuty !== undefined && typeof body.isOnDuty !== 'boolean') {
+      res.status(400).json({ success: false, message: 'Trạng thái ca trực không hợp lệ.' });
+      return;
+    }
+
+    try {
+      const technician = await prisma.user.create({
+        data: {
+          fullName,
+          phone,
+          email: email || null,
+          passwordHash: await bcrypt.hash(password, 10),
+          role: Role.TECHNICIAN,
+          specialty,
+          specialtyLabel: TECHNICIAN_SPECIALTY_LABELS[specialty],
+          shiftName: typeof body.shiftName === 'string' ? body.shiftName.trim() || null : null,
+          isOnDuty: body.isOnDuty ?? false,
+          isActive: true,
+        },
+        select: TECHNICIAN_SELECT,
+      });
+
+      res.status(201).json({ success: true, technician });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        res.status(409).json({ success: false, message: 'Số điện thoại hoặc email đã được sử dụng.' });
+        return;
+      }
+      res.status(500).json({ success: false, message: 'Không thể tạo kỹ thuật viên.' });
+    }
+  }
+);
+
+// ============================================================================
+// 4. PATCH /api/tickets/technicians/:technicianId - Cập nhật hồ sơ KTV (BMB only)
+// ============================================================================
+router.patch(
+  '/technicians/:technicianId',
+  authenticateJWT,
+  authorizeRoles(Role.BMB),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const technicianId = getParamAsString(req.params.technicianId);
+    const body = req.body ?? {};
+    const data: Prisma.UserUpdateInput = {};
+
+    if (body.fullName !== undefined) {
+      const fullName = typeof body.fullName === 'string' ? body.fullName.trim() : '';
+      if (fullName.length < 2 || fullName.length > 100) {
+        res.status(400).json({ success: false, message: 'Họ tên phải có từ 2 đến 100 ký tự.' });
+        return;
+      }
+      data.fullName = fullName;
+    }
+    if (body.phone !== undefined) {
+      const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
+      if (phone.length < 8 || phone.length > 32) {
+        res.status(400).json({ success: false, message: 'Số điện thoại không hợp lệ.' });
+        return;
+      }
+      data.phone = phone;
+    }
+    if (body.email !== undefined) {
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      if (email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)) {
+        res.status(400).json({ success: false, message: 'Email không hợp lệ.' });
+        return;
+      }
+      data.email = email || null;
+    }
+    if (body.specialty !== undefined) {
+      const specialty = body.specialty as unknown;
+      if (!isIncidentCategory(specialty)) {
+        res.status(400).json({ success: false, message: 'Vui lòng chọn chuyên môn hợp lệ.' });
+        return;
+      }
+      data.specialty = specialty;
+      data.specialtyLabel = TECHNICIAN_SPECIALTY_LABELS[specialty];
+    }
+    if (body.shiftName !== undefined) {
+      data.shiftName = typeof body.shiftName === 'string' ? body.shiftName.trim() || null : null;
+    }
+    if (body.isOnDuty !== undefined) {
+      if (typeof body.isOnDuty !== 'boolean') {
+        res.status(400).json({ success: false, message: 'Trạng thái ca trực không hợp lệ.' });
+        return;
+      }
+      data.isOnDuty = body.isOnDuty;
+    }
+    if (body.password !== undefined && body.password !== '') {
+      if (typeof body.password !== 'string' || body.password.length < 6 || body.password.length > 128) {
+        res.status(400).json({ success: false, message: 'Mật khẩu phải có từ 6 đến 128 ký tự.' });
+        return;
+      }
+      data.passwordHash = await bcrypt.hash(body.password, 10);
+    }
+    if (Object.keys(data).length === 0) {
+      res.status(400).json({ success: false, message: 'Không có thông tin nào để cập nhật.' });
+      return;
+    }
+
+    try {
+      const existingTechnician = await prisma.user.findFirst({
+        where: { id: technicianId, role: Role.TECHNICIAN, isActive: true },
+        select: { id: true },
+      });
+      if (!existingTechnician) {
+        res.status(404).json({ success: false, message: 'Không tìm thấy kỹ thuật viên.' });
+        return;
+      }
+
+      const technician = await prisma.user.update({
+        where: { id: technicianId },
+        data,
+        select: TECHNICIAN_SELECT,
+      });
+      res.status(200).json({ success: true, technician });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        res.status(409).json({ success: false, message: 'Số điện thoại hoặc email đã được sử dụng.' });
+        return;
+      }
+      res.status(500).json({ success: false, message: 'Không thể cập nhật kỹ thuật viên.' });
+    }
+  }
+);
+
+// ============================================================================
+// 5. DELETE /api/tickets/technicians/:technicianId - Vô hiệu hóa tài khoản KTV
+// Xóa mềm để giữ lại lịch sử ticket và quan hệ dữ liệu.
+// ============================================================================
+router.delete(
+  '/technicians/:technicianId',
+  authenticateJWT,
+  authorizeRoles(Role.BMB),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const technicianId = getParamAsString(req.params.technicianId);
+
+    try {
+      const technician = await prisma.user.findFirst({
+        where: { id: technicianId, role: Role.TECHNICIAN, isActive: true },
+        select: { id: true },
+      });
+      if (!technician) {
+        res.status(404).json({ success: false, message: 'Không tìm thấy kỹ thuật viên.' });
+        return;
+      }
+
+      const activeAssignments = await prisma.incidentTicket.count({
+        where: {
+          assignedTechId: technicianId,
+          status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
+        },
+      });
+      if (activeAssignments > 0) {
+        res.status(409).json({
+          success: false,
+          message: 'Không thể xóa kỹ thuật viên đang có công việc. Hãy điều phối lại các công việc trước.',
+        });
+        return;
+      }
+
+      await prisma.user.update({
+        where: { id: technicianId },
+        data: { isActive: false, isOnDuty: false },
+      });
+      res.status(200).json({ success: true, message: 'Đã vô hiệu hóa kỹ thuật viên.' });
+    } catch {
+      res.status(500).json({ success: false, message: 'Không thể xóa kỹ thuật viên.' });
     }
   }
 );
@@ -237,6 +461,11 @@ router.post(
         (title && String(title).trim()) ||
         (cleanDesc.length > 48 ? cleanDesc.substring(0, 45) + '...' : cleanDesc);
 
+      const managers = await prisma.user.findMany({
+        where: { role: Role.BMB, isActive: true, id: { not: req.user!.userId } },
+        select: { id: true },
+      });
+
       const newTicket = await prisma.incidentTicket.create({
         data: {
           ticketCode,
@@ -273,6 +502,19 @@ router.post(
               changedById: req.user!.userId,
             },
           },
+          ...(managers.length > 0 ? {
+            notifications: {
+              create: managers.map((manager) => ({
+                userId: manager.id,
+                type: aiResult.isFallbackManual
+                  ? NotificationType.AI_TIMEOUT_ALERT
+                  : NotificationType.NEW_INCIDENT_AI,
+                title: `${aiResult.isFallbackManual ? '⚠️ Cần phân loại thủ công' : '📋 Sự cố mới'}: ${ticketCode}`,
+                message: `${autoTitle} • ${finalLocation}`,
+                fcmSent: false,
+              })),
+            },
+          } : {}),
         },
         include: { asset: true, media: true, statusLogs: true },
       });

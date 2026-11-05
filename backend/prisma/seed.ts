@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { PrismaClient, Role, IncidentCategory, PriorityLevel, TicketStatus, MediaType } from '@prisma/client';
 import bcrypt from 'bcrypt';
 

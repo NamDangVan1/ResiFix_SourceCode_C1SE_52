@@ -50,12 +50,12 @@ app.get('/api/health', async (_req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ status: 'ERROR', message: 'Database connection failed', error });
+    res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
   }
 });
 
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`✅ Đã nạp DATABASE_URL: ${process.env.DATABASE_URL ? 'THÀNH CÔNG' : 'THẤT BẠI (Kiểm tra lại tên file .env)'}`);
   console.log(`🚀 ResiFix Backend Server đang chạy tại: http://localhost:${PORT}/api/health`);
-  console.log(`📱 Điện thoại kết nối qua Wi-Fi tại: http://192.168.1.11:${PORT}/api/health`);
+  console.log(`📱 Điện thoại kết nối qua Wi-Fi tại: http://192.168.1.50:${PORT}/api/health`);
 });
