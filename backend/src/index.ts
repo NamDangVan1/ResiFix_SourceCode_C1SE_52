@@ -11,6 +11,12 @@ import authRoutes from './routes/auth.routes';
 import ticketRoutes from './routes/ticket.routes';
 import notificationRoutes from './routes/notification.routes';
 import uploadRoutes from './routes/upload.routes';
+import managementRoutes from './routes/management.routes';
+import payrollRoutes from './routes/payroll.routes';
+import scheduleRoutes from './routes/schedule.routes';
+import costRoutes from './routes/cost.routes';
+import slaRoutes from './routes/sla.routes';
+import { slaWorker } from './services/sla_worker';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -36,7 +42,22 @@ app.use('/api/notifications', notificationRoutes);
 // 4. Module Tải ảnh đám mây Cloudinary (EP08: US-43, Risk R4)
 app.use('/api/upload', uploadRoutes);
 
-// 5. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
+// 5. Module Quản lý Căn hộ, Cư dân & Liên hệ Khẩn cấp
+app.use('/api/management', managementRoutes);
+
+// 6. Module Chấm công & Tính lương Kỹ thuật viên
+app.use('/api/payroll', payrollRoutes);
+
+// 7. Module Đổi ca & Xin nghỉ phép KTV
+app.use('/api/schedule', scheduleRoutes);
+
+// 8. Module Chi phí sửa chữa & Vật tư gắn với IncidentTicket
+app.use('/api/costs', costRoutes);
+
+// 9. Module Cam kết chất lượng dịch vụ (SLA) & Leo thang sự cố
+app.use('/api/sla', slaRoutes);
+
+// 10. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
 app.get('/api/health', async (_req: Request, res: Response) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -45,13 +66,22 @@ app.get('/api/health', async (_req: Request, res: Response) => {
       project: 'ResiFix API Gateway - C1SE.52',
       database: 'Connected to Neon PostgreSQL successfully!',
     });
-  } catch (error) {
-    console.error('Health check failed:', error);
-    res.status(500).json({ status: 'ERROR', message: 'Database connection failed' });
+  } catch (error: any) {
+    console.error('Health check database check failed:', error?.message || error);
+    res.status(503).json({
+      status: 'UNAVAILABLE',
+      message: 'Cơ sở dữ liệu đang kết nối hoặc tạm thời chưa sẵn sàng. Vui lòng thử lại sau giây lát.',
+    });
   }
 });
 
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`✅ Đã nạp DATABASE_URL: ${process.env.DATABASE_URL ? 'THÀNH CÔNG' : 'THẤT BẠI (Kiểm tra lại tên file .env)'}`);
   console.log(`🚀 ResiFix Backend Server đang chạy tại: http://localhost:${PORT}/api/health`);
+  slaWorker.start();
+
+  // Kiểm tra kết nối cơ sở dữ liệu khi khởi động
+  prisma.$queryRaw`SELECT 1`
+    .then(() => console.log('✅ Kết nối Neon PostgreSQL: SẴN SÀNG!'))
+    .catch((err: any) => console.warn('⚠️ Neon PostgreSQL đang khởi động hoặc chưa sẵn sàng:', err?.message || err));
 });

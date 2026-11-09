@@ -61,9 +61,31 @@ export const authenticateJWT = async (req: AuthRequest, res: Response, next: Nex
       where: { id: decoded.userId as string },
       select: { id: true, phone: true, role: true, fullName: true, isActive: true },
     });
-    if (!user || !user.isActive || user.role !== decoded.role) {
-      res.status(401).json({ success: false, message: 'Tài khoản không còn hoạt động. Vui lòng đăng nhập lại!' });
+    if (!user || !user.isActive || (user as any).isActivated === false || user.role !== decoded.role) {
+      res.status(401).json({ success: false, message: 'Tài khoản chưa được kích hoạt hoặc không còn hoạt động. Vui lòng đăng nhập lại!' });
       return;
+    }
+
+    if (decoded.tokenVersion !== undefined) {
+      try {
+        const userExtra = await prisma.user.findUnique({
+          where: { id: decoded.userId as string },
+          select: { id: true, tokenVersion: true } as any,
+        });
+        if (
+          userExtra &&
+          (userExtra as any).tokenVersion !== undefined &&
+          decoded.tokenVersion !== (userExtra as any).tokenVersion
+        ) {
+          res.status(401).json({
+            success: false,
+            message: 'Phiên đăng nhập đã hết hạn do mật khẩu đã được thay đổi. Vui lòng đăng nhập lại!',
+          });
+          return;
+        }
+      } catch {
+        // Bỏ qua nếu cột tokenVersion chưa tồn tại trên database
+      }
     }
 
     req.user = {

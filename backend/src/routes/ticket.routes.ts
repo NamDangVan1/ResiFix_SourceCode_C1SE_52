@@ -13,6 +13,7 @@ import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { analyzeIncidentWithGemini } from '../services/gemini.service';
 import { prisma } from '../db';
+import { isTechOnApprovedLeave, resiFixStore } from '../data/resifix_store';
 
 const router = Router();
 
@@ -31,6 +32,41 @@ const TECHNICIAN_SELECT = {
     select: { id: true, ticketCode: true, title: true, status: true, locationNote: true },
   },
 } satisfies Prisma.UserSelect;
+
+export const INCIDENT_TICKET_BASE_SELECT = {
+  id: true,
+  ticketCode: true,
+  title: true,
+  description: true,
+  isVoiceInput: true,
+  locationNote: true,
+  areaId: true,
+  isQrScannedByRes: true,
+  aiSummary: true,
+  aiSuggestedCategory: true,
+  aiSuggestedPriority: true,
+  aiLatencyMs: true,
+  isAiValidJson: true,
+  isAiFallbackManual: true,
+  aiRawResponse: true,
+  finalCategory: true,
+  finalPriority: true,
+  bmbAdminNote: true,
+  bmbApprovedById: true,
+  assignedAt: true,
+  assignedTechId: true,
+  acknowledgedAt: true,
+  isQrVerifiedByTech: true,
+  techRepairNote: true,
+  completedAt: true,
+  status: true,
+  resolvedConfirmedAt: true,
+  ratingStars: true,
+  ratingComment: true,
+  residentId: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.IncidentTicketSelect;
 
 const TECHNICIAN_SPECIALTY_LABELS: Record<IncidentCategory, string> = {
   [IncidentCategory.PLUMBING]: 'Điện - Nước',
@@ -58,6 +94,39 @@ const isHttpImageUrl = (value: unknown): value is string => {
 
 const isUniqueConstraintError = (error: unknown): boolean =>
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+
+export const isCurrentlyInShift = (shiftName?: string | null): boolean => {
+  if (!shiftName) return false;
+  const match = shiftName.match(/(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})/);
+  if (!match) return false;
+
+  const startHour = parseInt(match[1], 10);
+  const startMin = parseInt(match[2], 10);
+  const endHour = parseInt(match[3], 10);
+  const endMin = parseInt(match[4], 10);
+
+  const startMinutes = startHour * 60 + startMin;
+  const endMinutes = endHour * 60 + endMin;
+
+  const now = new Date();
+  const vnTimeStr = now.toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const [currH, currM] = vnTimeStr.split(':').map(Number);
+  const currentMinutes = currH * 60 + currM;
+
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+  }
+  if (startMinutes > endMinutes) {
+    // Hỗ trợ ca qua đêm (ví dụ: 22:00 - 06:00 hoặc 23:00 - 07:00)
+    return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
+  }
+  return false;
+};
 
 class RouteError extends Error {
   constructor(readonly statusCode: number, message: string) {
@@ -96,26 +165,38 @@ router.get(
       return;
     }
 
-    const asset = await prisma.equipmentAsset.findFirst({
+    const area = await prisma.buildingArea.findFirst({
       where: { qrCode, isActive: true },
     });
 
-    if (!asset) {
+    if (!area) {
       res.status(404).json({
         success: false,
-        message: `Không tìm thấy thiết bị nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
+        message: `Không tìm thấy khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
       });
       return;
     }
 
     res.status(200).json({
       success: true,
-      message: `Đã nhận diện từ mã QR: ${asset.assetName}`,
-      asset,
+      message: `Đã nhận diện từ mã QR: ${area.areaName}`,
+      area,
+      // Tương thích ngược 100% với Frontend phiên bản hiện tại
+      asset: {
+        id: area.id,
+        qrCode: area.qrCode,
+        assetName: area.areaName,
+        areaName: area.areaName,
+        category: area.category,
+        locationLabel: area.locationLabel,
+        buildingBlock: area.buildingBlock,
+        floor: area.floor,
+        isActive: area.isActive,
+      },
     });
   } catch (error) {
-    console.error('Lỗi khi tra cứu mã QR thiết bị:', error);
-    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR thiết bị.' });
+    console.error('Lỗi khi tra cứu mã QR khu vực:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực.' });
   }
   }
 );
@@ -135,7 +216,40 @@ router.get(
         orderBy: { isOnDuty: 'desc' },
       });
 
-      res.status(200).json({ success: true, technicians });
+      // Đồng bộ trạng thái ca trực tự động theo giờ Asia/Ho_Chi_Minh & đối soát chấm công
+      const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+      const store = resiFixStore.get();
+
+      const enhancedTechnicians = technicians.map((tech) => {
+        const inShift = isCurrentlyInShift(tech.shiftName);
+        const onLeave = isTechOnApprovedLeave(tech.id, todayVn);
+        // Tìm ca trực đang mở hôm nay (đã check-in và CHƯA check-out)
+        const todayLogs = store.attendanceLogs.filter((a) => a.techId === tech.id && a.date === todayVn);
+        const activeAttendance = todayLogs.find((a) => !a.checkOut);
+        const isCheckedIn = Boolean(activeAttendance);
+
+        // KTV chỉ đủ điều kiện phân công khi:
+        // 1. KTV đang hoạt động (isActive: true)
+        // 2. Không trong lịch nghỉ phép được duyệt hôm nay (!onLeave)
+        // 3. Đã check-in và CHƯA check-out ca làm việc (isCheckedIn && activeAttendance)
+        // 4. Đang trong giờ ca trực hợp lệ (inShift)
+        // 5. Đang bật trực (tech.isOnDuty === true) - Tuyệt đối không cho phép isOnDuty = false được phân công chỉ vì đang trong giờ ca
+        const isEligible = Boolean(!onLeave && isCheckedIn && tech.isOnDuty && inShift);
+        const isCheckedOut = !activeAttendance && todayLogs.length > 0;
+
+        return {
+          ...tech,
+          isOnDuty: isEligible,
+          isShiftActive: inShift,
+          isCheckedIn,
+          isCheckedOut,
+          isOnLeave: onLeave,
+          isEligibleForAssignment: isEligible,
+          activeAttendance: activeAttendance || null,
+        };
+      });
+
+      res.status(200).json({ success: true, technicians: enhancedTechnicians });
     } catch (error) {
       console.error('Lỗi khi tải danh sách Kỹ thuật viên ca trực:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi tải danh sách Kỹ thuật viên ca trực.' });
@@ -310,23 +424,78 @@ router.delete(
   authorizeRoles(Role.BMB),
   async (req: AuthRequest, res: Response): Promise<void> => {
     const technicianId = getParamAsString(req.params.technicianId);
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const handoverTechId = typeof body.handoverTechId === 'string' ? body.handoverTechId.trim() : undefined;
 
     try {
+      let reassignedCount = 0;
       await prisma.$transaction(async (tx) => {
         const technician = await tx.user.findFirst({
           where: { id: technicianId, role: Role.TECHNICIAN, isActive: true },
-          select: { id: true },
+          select: { id: true, fullName: true },
         });
         if (!technician) throw new RouteError(404, 'Không tìm thấy kỹ thuật viên.');
 
-        const activeAssignments = await tx.incidentTicket.count({
+        const activeTickets = await tx.incidentTicket.findMany({
           where: {
             assignedTechId: technicianId,
             status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
           },
+          select: { id: true, ticketCode: true, title: true, status: true },
         });
-        if (activeAssignments > 0) {
-          throw new RouteError(409, 'Không thể vô hiệu hóa kỹ thuật viên đang có công việc. Hãy điều phối lại trước.');
+
+        if (activeTickets.length > 0) {
+          if (!handoverTechId) {
+            throw new RouteError(
+              409,
+              `Kỹ thuật viên đang phụ trách ${activeTickets.length} sự cố chưa hoàn thành. Vui lòng chọn kỹ thuật viên nhận bàn giao trước khi vô hiệu hóa.`
+            );
+          }
+          if (handoverTechId === technicianId) {
+            throw new RouteError(400, 'Không thể bàn giao công việc cho chính kỹ thuật viên sắp bị vô hiệu hóa.');
+          }
+
+          const targetTech = await tx.user.findFirst({
+            where: { id: handoverTechId, role: Role.TECHNICIAN, isActive: true },
+            select: { id: true, fullName: true },
+          });
+          if (!targetTech) {
+            throw new RouteError(400, 'Kỹ thuật viên nhận bàn giao không hợp lệ hoặc đã bị vô hiệu hóa.');
+          }
+
+          // Bàn giao toàn bộ ticket đang xử lý
+          await tx.incidentTicket.updateMany({
+            where: {
+              assignedTechId: technicianId,
+              status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
+            },
+            data: { assignedTechId: handoverTechId },
+          });
+
+          // Ghi lịch sử tiến độ cho từng ticket
+          for (const t of activeTickets) {
+            await tx.ticketStatusLog.create({
+              data: {
+                ticketId: t.id,
+                fromStatus: t.status,
+                toStatus: t.status,
+                changedById: req.user!.userId,
+                title: 'Bàn giao kỹ thuật viên',
+                note: `BMB đã bàn giao sự cố từ KTV ${technician.fullName} sang KTV ${targetTech.fullName} trước khi vô hiệu hóa tài khoản.`,
+              },
+            });
+          }
+
+          // Gửi thông báo đến KTV nhận bàn giao
+          await tx.notification.create({
+            data: {
+              userId: handoverTechId,
+              type: NotificationType.TASK_ASSIGNED,
+              title: 'Tiếp nhận bàn giao công việc',
+              message: `Bạn được BMB giao phụ trách ${activeTickets.length} sự cố tiếp nhận từ KTV ${technician.fullName}.`,
+            },
+          });
+          reassignedCount = activeTickets.length;
         }
 
         const result = await tx.user.updateMany({
@@ -335,7 +504,14 @@ router.delete(
         });
         if (result.count !== 1) throw new RouteError(409, 'Tài khoản kỹ thuật viên đã được cập nhật.');
       });
-      res.status(200).json({ success: true, message: 'Đã vô hiệu hóa kỹ thuật viên.' });
+
+      res.status(200).json({
+        success: true,
+        message: reassignedCount > 0
+          ? `Đã vô hiệu hóa kỹ thuật viên và bàn giao thành công ${reassignedCount} sự cố.`
+          : 'Đã vô hiệu hóa kỹ thuật viên.',
+        reassignedCount,
+      });
     } catch (error) {
       if (error instanceof RouteError) {
         res.status(error.statusCode).json({ success: false, message: error.message });
@@ -370,12 +546,13 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
       whereClause.status = statusQuery as TicketStatus;
     }
 
-    const tickets = await prisma.incidentTicket.findMany({
+    const rawTickets = await prisma.incidentTicket.findMany({
       where: whereClause,
-      include: {
+      select: {
+        ...INCIDENT_TICKET_BASE_SELECT,
         resident: { select: { fullName: true, apartmentCode: true, buildingBlock: true, phone: true } },
         assignedTech: { select: { fullName: true, specialtyLabel: true, phone: true, isOnDuty: true } },
-        asset: true,
+        area: true,
         media: true,
         statusLogs: {
           include: { changedBy: { select: { fullName: true, role: true } } },
@@ -385,9 +562,24 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
       orderBy: { createdAt: 'desc' },
     });
 
+    const tickets = rawTickets.map((t: any) => ({
+      ...t,
+      asset: t.area ? {
+        id: t.area.id,
+        qrCode: t.area.qrCode,
+        assetName: t.area.areaName,
+        areaName: t.area.areaName,
+        locationLabel: t.area.locationLabel,
+        buildingBlock: t.area.buildingBlock,
+        floor: t.area.floor,
+        category: t.area.category,
+        isActive: t.area.isActive,
+      } : null,
+    }));
+
     res.status(200).json({ success: true, count: tickets.length, tickets });
-  } catch (error) {
-    console.error('Lỗi khi tải danh sách sự cố:', error);
+  } catch (error: any) {
+    console.error('Lỗi khi tải danh sách sự cố:', error?.message || error);
     res.status(500).json({ success: false, message: 'Lỗi khi tải danh sách sự cố.' });
   }
 });
@@ -429,17 +621,17 @@ router.post(
       }
       const cleanDesc = description.trim();
 
-      let asset = null;
+      let area = null;
       if (qrCode) {
         if (typeof qrCode !== 'string' || qrCode.trim().length > 128) {
-          res.status(400).json({ success: false, message: 'Mã QR thiết bị không hợp lệ.' });
+          res.status(400).json({ success: false, message: 'Mã QR khu vực không hợp lệ.' });
           return;
         }
-        asset = await prisma.equipmentAsset.findFirst({
+        area = await prisma.buildingArea.findFirst({
           where: { qrCode: qrCode.trim().toUpperCase(), isActive: true },
         });
-        if (!asset) {
-          res.status(404).json({ success: false, message: 'Không tìm thấy thiết bị đang hoạt động với mã QR này.' });
+        if (!area) {
+          res.status(404).json({ success: false, message: 'Không tìm thấy khu vực đang hoạt động với mã QR này.' });
           return;
         }
       }
@@ -454,8 +646,8 @@ router.post(
         resident?.buildingBlock || '',
         resident?.floorNumber ? `Tầng ${resident.floorNumber}` : '',
       ].filter(Boolean).join(' • ');
-      const finalLocation = asset
-        ? `${asset.locationLabel} • Thiết bị: ${asset.qrCode}`
+      const finalLocation = area
+        ? `${area.locationLabel} • Khu vực: ${area.qrCode}`
         : submittedLocation || profileLocation;
       if (!finalLocation || finalLocation.length > 300) {
         res.status(400).json({ success: false, message: 'Vui lòng nhập vị trí sự cố hợp lệ.' });
@@ -484,8 +676,8 @@ router.post(
               description: cleanDesc,
               isVoiceInput: isVoiceInput === true,
               locationNote: finalLocation,
-              assetId: asset?.id || null,
-              isQrScannedByRes: Boolean(asset),
+              areaId: area?.id || null,
+              isQrScannedByRes: Boolean(area),
               aiSummary: aiResult.summary,
               aiSuggestedCategory: aiResult.category,
               aiSuggestedPriority: aiResult.priority,
@@ -527,7 +719,13 @@ router.post(
                 },
               } : {}),
             },
-            include: { asset: true, media: true, statusLogs: { include: { changedBy: { select: { fullName: true } } } } },
+            select: {
+              ...INCIDENT_TICKET_BASE_SELECT,
+              resident: { select: { fullName: true, apartmentCode: true, phone: true } },
+              area: true,
+              media: true,
+              statusLogs: { include: { changedBy: { select: { fullName: true } } } },
+            },
           });
           break;
         } catch (error) {
@@ -537,12 +735,27 @@ router.post(
       }
       if (!newTicket) throw new Error('Unable to create unique ticket code.');
 
+      const safeTicketResponse = {
+        ...newTicket,
+        asset: (newTicket as any).area ? {
+          id: (newTicket as any).area.id,
+          qrCode: (newTicket as any).area.qrCode,
+          assetName: (newTicket as any).area.areaName,
+          areaName: (newTicket as any).area.areaName,
+          locationLabel: (newTicket as any).area.locationLabel,
+          buildingBlock: (newTicket as any).area.buildingBlock,
+          floor: (newTicket as any).area.floor,
+          category: (newTicket as any).area.category,
+          isActive: (newTicket as any).area.isActive,
+        } : null,
+      };
+
       res.status(201).json({
         success: true,
         message: aiResult.isFallbackManual
           ? `Đã gửi báo cáo sự cố ${ticketCode}. Báo cáo đang chờ Ban quản lý phân loại.`
           : `Đã gửi báo cáo sự cố ${ticketCode}.`,
-        ticket: newTicket,
+        ticket: safeTicketResponse,
       });
     } catch (error) {
       console.error('Lỗi tạo sự cố:', error);
@@ -554,11 +767,7 @@ router.post(
 // ============================================================================
 // 5. PATCH /api/tickets/:id/approve-assign - BMB duyệt/sửa gợi ý AI & Giao việc KTV (FR06, US-23..US-28)
 // ============================================================================
-router.patch(
-  '/:id/approve-assign',
-  authenticateJWT,
-  authorizeRoles(Role.BMB),
-  async (req: AuthRequest, res: Response): Promise<void> => {
+const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const ticketId = getParamAsString(req.params.id);
       const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -580,7 +789,20 @@ router.patch(
         return;
       }
 
-      const ticket = await prisma.incidentTicket.findUnique({ where: { id: ticketId } });
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        select: {
+          id: true,
+          ticketCode: true,
+          title: true,
+          locationNote: true,
+          residentId: true,
+          assignedTechId: true,
+          status: true,
+          aiSuggestedCategory: true,
+          aiSuggestedPriority: true,
+        },
+      });
       if (!ticket) {
         res.status(404).json({ success: false, message: 'Không tìm thấy phiếu sự cố!' });
         return;
@@ -591,13 +813,28 @@ router.patch(
       }
 
       const tech = await prisma.user.findFirst({
-        where: { id: assignedTechId.trim(), role: Role.TECHNICIAN, isActive: true, isOnDuty: true },
-        select: { id: true, fullName: true, specialtyLabel: true },
+        where: { id: assignedTechId.trim(), role: Role.TECHNICIAN, isActive: true },
+        select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
       });
-      if (!tech) {
-        res.status(400).json({
+      const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+      const store = resiFixStore.get();
+
+      // Kiểm tra KTV tồn tại, đang hoạt động, đang trực, trong ca trực và không nghỉ phép
+      if (!tech || !tech.isOnDuty || !isCurrentlyInShift(tech.shiftName) || isTechOnApprovedLeave(tech.id, todayVn)) {
+        res.status(409).json({
           success: false,
-          message: 'Kỹ thuật viên không tồn tại hoặc đang ngoài ca trực (Off-duty). Vui lòng chọn KTV đang trực!',
+          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
+        });
+        return;
+      }
+
+      // Kiểm tra KTV đã check-in và CHƯA check-out
+      const todaySessions = store.attendanceLogs.filter((a) => a.techId === tech.id && a.date === todayVn);
+      const activeSession = todaySessions.find((a) => !a.checkOut);
+      if (!activeSession) {
+        res.status(409).json({
+          success: false,
+          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
         });
         return;
       }
@@ -606,10 +843,22 @@ router.patch(
       const priorityToSave = finalPriority ?? ticket.aiSuggestedPriority ?? PriorityLevel.MEDIUM;
       const updatedTicket = await prisma.$transaction(async (tx) => {
         const currentTech = await tx.user.findFirst({
-          where: { id: tech.id, role: Role.TECHNICIAN, isActive: true, isOnDuty: true },
-          select: { id: true, fullName: true, specialtyLabel: true },
+          where: { id: tech.id, role: Role.TECHNICIAN, isActive: true },
+          select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
         });
-        if (!currentTech) throw new RouteError(409, 'Kỹ thuật viên hiện không còn trong ca trực.');
+        if (!currentTech || !currentTech.isOnDuty || !isCurrentlyInShift(currentTech.shiftName)) {
+          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
+        }
+        if (isTechOnApprovedLeave(currentTech.id, todayVn)) {
+          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
+        }
+
+        // Chống race condition với check-out đồng thời
+        const freshStore = resiFixStore.get();
+        const activeAtt = freshStore.attendanceLogs.find((a) => a.techId === currentTech.id && a.date === todayVn && !a.checkOut);
+        if (!activeAtt) {
+          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
+        }
 
         const updateResult = await tx.incidentTicket.updateMany({
           where: { id: ticketId, status: TicketStatus.PENDING },
@@ -657,7 +906,8 @@ router.patch(
         });
         return tx.incidentTicket.findUniqueOrThrow({
           where: { id: ticketId },
-          include: {
+          select: {
+            ...INCIDENT_TICKET_BASE_SELECT,
             assignedTech: { select: { fullName: true, specialtyLabel: true } },
             statusLogs: {
               include: { changedBy: { select: { fullName: true } } },
@@ -680,8 +930,11 @@ router.patch(
       console.error('Lỗi khi duyệt và giao việc:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi duyệt và giao việc.' });
     }
-  }
-);
+};
+
+router.patch('/:id/approve-assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
+router.patch('/:id/assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
+router.post('/:id/assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
 
 // ============================================================================
 // 6. PATCH /api/tickets/:id/acknowledge - KTV bấm "Nhận việc ngay" (Assigned -> In Progress | FR07, US-31, US-32)
@@ -693,7 +946,20 @@ router.patch(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const ticketId = getParamAsString(req.params.id);
-      const ticket = await prisma.incidentTicket.findUnique({ where: { id: ticketId } });
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        select: {
+          id: true,
+          ticketCode: true,
+          title: true,
+          locationNote: true,
+          residentId: true,
+          assignedTechId: true,
+          status: true,
+          aiSuggestedCategory: true,
+          aiSuggestedPriority: true,
+        },
+      });
 
       if (!ticket) {
         res.status(404).json({ success: false, message: 'Không tìm thấy sự cố.' });
@@ -736,7 +1002,10 @@ router.patch(
         });
         return tx.incidentTicket.findUniqueOrThrow({
           where: { id: ticketId },
-          include: { statusLogs: { orderBy: { createdAt: 'asc' } } },
+          select: {
+            ...INCIDENT_TICKET_BASE_SELECT,
+            statusLogs: { orderBy: { createdAt: 'asc' } },
+          },
         });
       });
 
@@ -785,7 +1054,20 @@ router.patch(
         return;
       }
 
-      const ticket = await prisma.incidentTicket.findUnique({ where: { id: ticketId } });
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        select: {
+          id: true,
+          ticketCode: true,
+          title: true,
+          locationNote: true,
+          residentId: true,
+          assignedTechId: true,
+          status: true,
+          aiSuggestedCategory: true,
+          aiSuggestedPriority: true,
+        },
+      });
       if (!ticket) {
         res.status(404).json({ success: false, message: 'Không tìm thấy sự cố.' });
         return;
@@ -841,7 +1123,8 @@ router.patch(
         });
         return tx.incidentTicket.findUniqueOrThrow({
           where: { id: ticketId },
-          include: {
+          select: {
+            ...INCIDENT_TICKET_BASE_SELECT,
             media: { orderBy: { createdAt: 'asc' } },
             statusLogs: {
               include: { changedBy: { select: { fullName: true } } },
@@ -888,7 +1171,20 @@ router.patch(
         return;
       }
 
-      const ticket = await prisma.incidentTicket.findUnique({ where: { id: ticketId } });
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        select: {
+          id: true,
+          ticketCode: true,
+          title: true,
+          locationNote: true,
+          residentId: true,
+          assignedTechId: true,
+          status: true,
+          aiSuggestedCategory: true,
+          aiSuggestedPriority: true,
+        },
+      });
       if (!ticket) {
         res.status(404).json({ success: false, message: 'Không tìm thấy sự cố!' });
         return;
@@ -942,7 +1238,10 @@ router.patch(
         }
         return tx.incidentTicket.findUniqueOrThrow({
           where: { id: ticketId },
-          include: { statusLogs: { orderBy: { createdAt: 'asc' } } },
+          select: {
+            ...INCIDENT_TICKET_BASE_SELECT,
+            statusLogs: { orderBy: { createdAt: 'asc' } },
+          },
         });
       });
 

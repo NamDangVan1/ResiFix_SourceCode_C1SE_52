@@ -101,7 +101,7 @@ export default function QrScannerModal({
           {/* Header Modal */}
           <View style={styles.headerRow}>
             <View style={{ flex: 1, paddingRight: 8 }}>
-              <Text style={styles.headerTitle}>📷 {t(roleTitle)}</Text>
+              <Text style={styles.headerTitle}>{t(roleTitle)}</Text>
               <Text style={styles.headerSub}>
                 {t("Hướng camera vào tem QR dán trên thiết bị để tự động điền thông tin")}</Text>
             </View>
@@ -119,7 +119,6 @@ export default function QrScannerModal({
               </View>
             ) : !permission.granted ? (
               <View style={styles.centerBox}>
-                <Text style={{ fontSize: 34, marginBottom: 8 }}>🔒</Text>
                 <Text style={styles.permissionText}>
                   {t("Ứng dụng cần quyền truy cập Camera để quét mã QR thiết bị (FR05).")}</Text>
                 <TouchableOpacity
@@ -164,7 +163,7 @@ export default function QrScannerModal({
                     style={styles.camSmallBtn}
                     onPress={() => setCameraKey((prev) => prev + 1)}
                   >
-                    <Text style={styles.camSmallBtnText}>{t("🔄 Làm mới Cam")}</Text>
+                    <Text style={styles.camSmallBtnText}>{t("Làm mới")}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.camSmallBtn}
@@ -172,7 +171,7 @@ export default function QrScannerModal({
                       setFacing((prev) => (prev === 'back' ? 'front' : 'back'))
                     }
                   >
-                    <Text style={styles.camSmallBtnText}>{t("🔁 Đổi Cam")}</Text>
+                    <Text style={styles.camSmallBtnText}>{t("Đổi camera")}</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -219,44 +218,46 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     width: '100%',
-    maxWidth: 440,
+    maxWidth: 420,
     backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 18,
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 12,
+    alignItems: 'center',
+    marginBottom: 14,
   },
-  headerTitle: { fontSize: 16.5, fontWeight: '800', color: '#0F172A' },
-  headerSub: { fontSize: 12, color: '#64748B', marginTop: 2 },
+  headerTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A' },
+  headerSub: { fontSize: 12, color: '#64748B', marginTop: 2, lineHeight: 17 },
   closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: '#F1F5F9',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  closeBtnText: { fontSize: 15, fontWeight: '800', color: '#334155' },
+  closeBtnText: { fontSize: 13, fontWeight: '700', color: '#475569' },
   cameraContainer: {
     width: '100%',
-    height: 260,
-    borderRadius: 16,
+    height: 240,
+    borderRadius: 14,
     overflow: 'hidden',
     backgroundColor: '#0F172A',
-    marginBottom: 12,
+    marginBottom: 14,
   },
   cameraActiveWrapper: {
     width: '100%',
-    height: 260,
+    height: 240,
     position: 'relative',
   },
   cameraPreview: {
     width: '100%',
-    height: 260,
+    height: 240,
   },
   centerBox: {
     flex: 1,
@@ -268,17 +269,17 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 13,
     textAlign: 'center',
-    marginTop: 10,
+    marginTop: 8,
     marginBottom: 12,
-    lineHeight: 19,
+    lineHeight: 18,
   },
   grantBtn: {
-    backgroundColor: '#1D61E7',
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 10,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 8,
   },
-  grantBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13.5 },
+  grantBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13 },
   viewfinderWrapper: {
     position: 'absolute',
     top: 0,
@@ -289,40 +290,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   viewfinderBox: {
-    width: 160,
-    height: 160,
+    width: 150,
+    height: 150,
     position: 'relative',
   },
   corner: {
     position: 'absolute',
-    width: 26,
-    height: 26,
-    borderColor: '#38BDF8',
+    width: 24,
+    height: 24,
+    borderColor: '#2563EB',
   },
-  topLeft: { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 10 },
-  topRight: { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 10 },
+  topLeft: { top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 8 },
+  topRight: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 8 },
   bottomLeft: {
     bottom: 0,
     left: 0,
-    borderBottomWidth: 4,
-    borderLeftWidth: 4,
-    borderBottomLeftRadius: 10,
+    borderBottomWidth: 3,
+    borderLeftWidth: 3,
+    borderBottomLeftRadius: 8,
   },
   bottomRight: {
     bottom: 0,
     right: 0,
-    borderBottomWidth: 4,
-    borderRightWidth: 4,
-    borderBottomRightRadius: 10,
+    borderBottomWidth: 3,
+    borderRightWidth: 3,
+    borderBottomRightRadius: 8,
   },
   scanHintText: {
     color: '#FFFFFF',
     fontSize: 11.5,
-    fontWeight: '700',
+    fontWeight: '600',
     marginTop: 10,
     backgroundColor: 'rgba(15, 23, 42, 0.75)',
     paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 12,
   },
   cameraControlBar: {
@@ -333,47 +334,46 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   camSmallBtn: {
-    backgroundColor: 'rgba(15, 23, 42, 0.75)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   camSmallBtnText: {
     color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 10.5,
+    fontWeight: '600',
   },
   sectionLabel: {
     fontSize: 12,
-    fontWeight: '700',
-    color: '#334155',
+    fontWeight: '600',
+    color: '#475569',
     marginBottom: 6,
-    marginTop: 2,
   },
   manualRow: {
     flexDirection: 'row',
     gap: 8,
-    marginBottom: 10,
   },
   manualInput: {
     flex: 1,
-    height: 40,
+    height: 42,
     borderWidth: 1,
     borderColor: '#CBD5E1',
     borderRadius: 10,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     fontSize: 13.5,
     backgroundColor: '#F8FAFC',
     color: '#0F172A',
   },
   manualConfirmBtn: {
-    backgroundColor: '#1D61E7',
-    paddingHorizontal: 16,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 18,
     borderRadius: 10,
+    height: 42,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  manualConfirmText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13 },
+  manualConfirmText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13.5 },
 });

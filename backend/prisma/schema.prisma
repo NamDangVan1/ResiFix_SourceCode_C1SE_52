@@ -64,6 +64,8 @@ model User {
   avatarUrl     String?           // Ảnh đại diện trên màn hình Hồ sơ
   role          Role              @default(RESIDENT)
   isActive      Boolean           @default(true)
+  isActivated   Boolean           @default(false) // Cờ kích hoạt tài khoản qua OTP (Tài khoản mới tạo mặc định false)
+  tokenVersion  Int               @default(0)     // Phiên bản token (dùng để thu hồi token cũ khi đổi mật khẩu)
 
   // Trường dành riêng cho CƯ DÂN
   apartmentCode String?           // Mã căn hộ 
@@ -89,24 +91,34 @@ model User {
   uploadedMedia    TicketMedia[]
   statusLogs       TicketStatusLog[]
   notifications    Notification[]
+  residencies      ResidencyRecord[]
+  attendances      AttendanceLog[]   @relation("TechnicianAttendance")
+  overtimes        OvertimeRequest[] @relation("TechnicianOvertime")
+  reviewedOvertimes OvertimeRequest[] @relation("BmbOvertimeReview")
+  lockedPayrolls   MonthlyPayrollLock[]
+  scheduleRequests ShiftScheduleRequest[] @relation("TechScheduleRequests")
+  receivedSwapRequests ShiftScheduleRequest[] @relation("TargetTechSwapRequests")
+  reviewedScheduleRequests ShiftScheduleRequest[] @relation("BmbScheduleReviews")
+  proposedCosts    RepairMaterialCost[] @relation("ProposedCosts")
+  reviewedCosts    RepairMaterialCost[] @relation("ReviewedCosts")
 
   @@index([role, isOnDuty])
   @@index([apartmentCode])
 }
 
-// BẢNG 2: THIẾT BỊ & VỊ TRÍ GẮN MÃ QR 
-model EquipmentAsset {
+// BẢNG 2: KHU VỰC TÒA NHÀ & MÃ QR VỊ TRÍ SỰ CỐ
+model BuildingArea {
   id            String           @id @default(uuid())
-  qrCode        String           @unique // Mã QR dán trên thiết bị 
-  assetName     String           // Tên thiết bị tự điền khi quét 
-  category      IncidentCategory // Loại thiết bị
-  locationLabel String           // Vị trí hiển thị
+  qrCode        String           @unique // Mã QR dán tại vị trí/khu vực (WP-1204, AC-B02...)
+  areaName      String           // Tên khu vực ("Căn hộ A-1204", "Sảnh B - Tòa S1")
+  category      IncidentCategory // Loại hệ thống sự cố (PLUMBING, HVAC, ELEVATOR...)
+  locationLabel String           // Vị trí hiển thị ("Căn hộ A-1204 • Tầng 12 - Tòa S1")
   buildingBlock String           // Tòa nhà 
   floor         String           // Tầng 
   isActive      Boolean          @default(true)
   createdAt     DateTime         @default(now())
 
-  // Quan hệ
+  // Quan hệ: 1 Khu vực có nhiều sự cố báo cáo tại đây
   tickets       IncidentTicket[]
 
   @@index([qrCode])
@@ -121,9 +133,11 @@ model IncidentTicket {
   isVoiceInput        Boolean           @default(false) // Có dùng Speech-to-Text tiếng Việt không
   locationNote        String            // Địa điểm hiển thị trên Card
 
-  // Bước 1: Quét mã QR thiết bị
-  assetId             String?
-  asset               EquipmentAsset?   @relation(fields: [assetId], references: [id])
+  // Bước 1: Quét mã QR khu vực & Định danh Căn hộ
+  apartmentId         String?           // Khóa ngoại liên kết căn hộ (bảo toàn lịch sử khi cư dân đổi phòng)
+  apartment           Apartment?        @relation(fields: [apartmentId], references: [id], onDelete: SetNull)
+  areaId              String?           // Khóa ngoại liên kết BuildingArea (khớp 100% với 7 ticket thực tế)
+  area                BuildingArea?     @relation(fields: [areaId], references: [id])
   isQrScannedByRes    Boolean           @default(false) // Hiện nhãn "Đã nhận diện từ mã QR"
 
   // Phân tích & Gợi ý từ Trợ lý Gemini Flash AI 
@@ -168,6 +182,9 @@ model IncidentTicket {
   media               TicketMedia[]     // Danh sách ảnh Trước (Cư dân) & Sau khi sửa (KTV)
   statusLogs          TicketStatusLog[] // Lịch sử 5 mốc thời gian trên màn hình Chi tiết
   notifications       Notification[]
+  overtimes           OvertimeRequest[] // Lịch sử tăng ca gắn với sự cố này
+  repairCost          RepairMaterialCost? // Chi phí vật tư & nhân công của sự cố
+  slaTracking         SlaTracking?      // Tiến độ cam kết dịch vụ SLA & leo thang
 
   @@index([status])
   @@index([residentId, status])
@@ -231,4 +248,222 @@ model Notification {
   createdAt   DateTime         @default(now())
 
   @@index([userId, isRead])
+}
+
+// ============================================================================
+// CÁC MODEL MỚI PHỤC VỤ CĂN HỘ, LỊCH SỬ CƯ TRÚ, CHẤM CÔNG & LƯƠNG
+// (CHUẨN BỊ CHO MIGRATION - KHÔNG DÙNG CASCADE ĐỂ BẢO VỆ DỮ LIỆU LỊCH SỬ)
+// ============================================================================
+
+// BẢNG 7: CẤU HÌNH HỆ THỐNG & LIÊN HỆ KHẨN CẤP
+model SystemSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// BẢNG 8: CĂN HỘ TÒA NHÀ
+model Apartment {
+  id            String            @id @default(uuid())
+  apartmentCode String            @unique // Ví dụ: "A-1204"
+  buildingBlock String            // Tòa nhà (Block)
+  floorNumber   Int               // Tầng
+  roomQrCode    String            @unique // Mã QR phòng cố định: "ROOM:A-1204"
+  status        String            @default("OCCUPIED") // OCCUPIED, VACANT, MAINTENANCE
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  tickets       IncidentTicket[]
+  residencies   ResidencyRecord[]
+
+  @@index([buildingBlock, floorNumber])
+}
+
+// BẢNG 9: LỊCH SỬ CƯ TRÚ CỦA CƯ DÂN (BẢO TOÀN LỊCH SỬ KHI RỜI PHÒNG/CHUYỂN PHÒNG)
+model ResidencyRecord {
+  id               String    @id @default(uuid())
+  residentId       String?
+  resident         User?     @relation(fields: [residentId], references: [id], onDelete: SetNull)
+  residentName     String    // Snapshot tên cư dân
+  residentPhone    String    // Snapshot số điện thoại
+  apartmentId      String
+  apartment        Apartment @relation(fields: [apartmentId], references: [id], onDelete: Restrict)
+  apartmentCode    String
+  buildingBlock    String
+  floorNumber      Int
+  moveInDate       DateTime  @default(now())
+  moveOutDate      DateTime?
+  isRepresentative Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+
+  @@index([apartmentId])
+  @@index([residentId])
+}
+
+// BẢNG 10: NHẬT KÝ CHẤM CÔNG KỸ THUẬT VIÊN (HỖ TRỢ NHIỀU CA/NGÀY & CHỐNG CHỒNG PHIÊN)
+model AttendanceLog {
+  id             String    @id @default(uuid())
+  technicianId   String
+  technician     User      @relation("TechnicianAttendance", fields: [technicianId], references: [id], onDelete: Restrict)
+  technicianName String    // Snapshot tên KTV
+  date           String    // YYYY-MM-DD
+  sessionIndex   Int       @default(1) // 1, 2, 3... cho các phiên làm việc trong ngày
+  checkIn        DateTime  // Giờ check-in từ server
+  checkOut       DateTime? // Giờ check-out từ server
+  workMinutes    Int?      // Số phút làm việc chính xác (tránh lỗi làm tròn float)
+  workHours      Decimal?  @db.Decimal(5, 2)
+  shiftScheduled String?
+  anomalyNotes   String?   // Ghi chú bất thường (ví dụ: làm >14h)
+  createdAt      DateTime  @default(now())
+
+  @@unique([technicianId, date, sessionIndex])
+  @@index([technicianId, date])
+}
+
+// BẢNG 11: YÊU CẦU TĂNG CA (CHỐNG GIAN LẬN & TRÙNG KHUNG GIỜ THỜI GIAN THỰC)
+model OvertimeRequest {
+  id              String          @id @default(uuid())
+  technicianId    String
+  technician      User            @relation("TechnicianOvertime", fields: [technicianId], references: [id], onDelete: Restrict)
+  technicianName  String          // Snapshot tên KTV
+  ticketId        String?
+  ticket          IncidentTicket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  ticketCode      String?         // Snapshot mã sự cố (ví dụ #RF-2026-014)
+  date            String          // YYYY-MM-DD
+  fromTime        String          // Giờ bắt đầu (HH:mm)
+  toTime          String          // Giờ kết thúc (HH:mm)
+  durationMinutes Int             // Số phút làm tăng ca chính xác
+  requestedHours  Decimal         @db.Decimal(4, 2)
+  approvedHours   Decimal?        @db.Decimal(4, 2)
+  reason          String
+  status          String          @default("PENDING") // PENDING, APPROVED, REJECTED
+  reviewNote      String?         // Bắt buộc khi BMB từ chối hoặc điều chỉnh giờ
+  reviewedById    String?
+  reviewedBy      User?           @relation("BmbOvertimeReview", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedByName  String?         // Snapshot người duyệt
+  reviewedAt      DateTime?
+  createdAt       DateTime        @default(now())
+
+  @@index([technicianId, date])
+}
+
+// BẢNG 12: KHÓA BẢNG LƯƠNG HÀNG THÁNG (TIỀN VND DÙNG BIGINT CHÍNH XÁC TUYỆT ĐỐI)
+model MonthlyPayrollLock {
+  id           String    @id @default(uuid())
+  month        String    @unique // YYYY-MM
+  totalPayout  BigInt    // Tổng tiền chi trả (VND) dạng BigInt
+  lockedById   String?
+  lockedBy     User?     @relation(fields: [lockedById], references: [id], onDelete: SetNull)
+  lockedByName String    // Snapshot người khóa
+  lockedAt     DateTime  @default(now())
+  auditNote    String?
+}
+
+// ============================================================================
+// 3 MODULE MỚI: ĐỔI CA/XIN NGHỈ, CHI PHÍ VẬT TƯ & THEO DÕI SLA
+// ============================================================================
+
+// BẢNG 13: YÊU CẦU ĐỔI CA & XIN NGHỈ PHÉP KỸ THUẬT VIÊN
+model ShiftScheduleRequest {
+  id             String    @id @default(uuid())
+  type           String    // LEAVE hoặc SHIFT_SWAP
+  techId         String
+  tech           User      @relation("TechScheduleRequests", fields: [techId], references: [id], onDelete: Restrict)
+  techName       String
+  date           String    // YYYY-MM-DD
+  endDate        String?   // Dùng khi xin nghỉ nhiều ngày
+  leaveType      String?   // ANNUAL, SICK, UNPAID
+  shiftName      String?   // Ca trực muốn đổi
+  targetTechId   String?
+  targetTech     User?     @relation("TargetTechSwapRequests", fields: [targetTechId], references: [id], onDelete: SetNull)
+  targetTechName String?
+  reason         String
+  status         String    @default("PENDING") // PENDING, APPROVED, REJECTED, CANCELLED
+  reviewNote     String?
+  reviewedById   String?
+  reviewedBy     User?     @relation("BmbScheduleReviews", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedByName String?
+  reviewedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([techId, date])
+}
+
+// BẢNG 14: HỒ SƠ CHI PHÍ SỬA CHỮA GẮN VỚI SỰ CỐ
+model RepairMaterialCost {
+  id              String         @id @default(uuid())
+  ticketId        String         @unique
+  ticket          IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  ticketCode      String
+  proposedById    String
+  proposedBy      User           @relation("ProposedCosts", fields: [proposedById], references: [id], onDelete: Restrict)
+  proposedByName  String
+  status          String         @default("DRAFT") // DRAFT, PENDING, APPROVED, REJECTED
+  otherCost       BigInt         @default(0) // Chi phí phát sinh (VND BigInt)
+  totalCost       BigInt         // Tổng chi phí (VND BigInt)
+  receiptProofUrl String?        // Link ảnh hóa đơn/chứng từ
+  reviewNote      String?
+  reviewedById    String?
+  reviewedBy      User?          @relation("ReviewedCosts", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedByName  String?
+  reviewedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  items           MaterialItem[]
+}
+
+// BẢNG 15: CHI TIẾT DANH MỤC VẬT TƯ SỬA CHỮA
+model MaterialItem {
+  id           String             @id @default(uuid())
+  costId       String
+  cost         RepairMaterialCost @relation(fields: [costId], references: [id], onDelete: Cascade)
+  materialCode String             // Mã vật tư (VT-ONGNUOC-01...)
+  materialName String             // Tên vật tư
+  unit         String             // Cái, Mét, Bộ, Cuộn...
+  quantity     Int
+  unitPrice    BigInt             // Đơn giá (VND BigInt)
+  totalPrice   BigInt             // Thành tiền (VND BigInt)
+  notes        String?
+
+  @@index([costId])
+}
+
+// BẢNG 16: THEO DÕI TIẾN ĐỘ CAM KẾT DỊCH VỤ (SLA) & LEO THANG SỰ CỐ
+model SlaTracking {
+  id                 String         @id @default(uuid())
+  ticketId           String         @unique
+  ticket             IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  ticketCode         String
+  priority           String         // HIGH, MEDIUM, LOW
+  status             String
+  responseDeadline   DateTime
+  assignmentDeadline DateTime
+  resolutionDeadline DateTime
+  slaStatus          String         @default("ON_TRACK") // ON_TRACK, AT_RISK, BREACHED
+  isPaused           Boolean        @default(false)
+  pauseReason        String?
+  pausedAt           DateTime?
+  escalationTier     Int            @default(0)
+  lastAlertSentAt    DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([slaStatus, escalationTier])
+}
+
+// BẢNG 17: MÃ XÁC THỰC OTP EMAIL (KÍCH HOẠT TÀI KHOẢN & ĐẶT LẠI MẬT KHẨU)
+model OtpVerification {
+  id        String   @id @default(uuid())
+  email     String
+  otpHash   String   // Mã OTP được băm HMAC-SHA256 kèm secret
+  purpose   String   // ACCOUNT_ACTIVATION | PASSWORD_RESET
+  expiresAt DateTime // Hiệu lực 5 phút
+  attempts  Int      @default(0) // Tối đa 5 lần thử sai
+  isUsed    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([email, purpose])
+  @@index([expiresAt])
 }

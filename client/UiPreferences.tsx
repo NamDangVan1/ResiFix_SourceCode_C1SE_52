@@ -11,6 +11,7 @@ import type { ComponentProps, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   ActivityIndicator as NativeActivityIndicator,
+  Platform,
   SafeAreaView as NativeSafeAreaView,
   ScrollView as NativeScrollView,
   StatusBar as NativeStatusBar,
@@ -218,14 +219,16 @@ export function UiView(props: ComponentProps<typeof NativeView>) {
 
 export function UiTextInput(props: ComponentProps<typeof NativeTextInput>) {
   const { themeMode } = useUiPreferences();
+  const webInputReset = Platform.OS === 'web' ? ({ outlineWidth: 0 } as any) : null;
   return (
     <NativeTextInput
       {...props}
-      style={
+      style={[
+        webInputReset,
         themeMode === 'dark'
           ? [{ color: '#F1F5F9' }, themedStyle(props.style, themeMode)]
-          : props.style
-      }
+          : props.style,
+      ]}
       placeholderTextColor={
         themeMode === 'dark'
           ? (darkColor(props.placeholderTextColor, 'color') as string | undefined)
@@ -237,7 +240,14 @@ export function UiTextInput(props: ComponentProps<typeof NativeTextInput>) {
 
 export function UiTouchableOpacity(props: ComponentProps<typeof NativeTouchableOpacity>) {
   const { themeMode } = useUiPreferences();
-  return <NativeTouchableOpacity {...props} style={themedStyle(props.style, themeMode)} />;
+  const webCursor = Platform.OS === 'web' ? ({ cursor: 'pointer', transition: 'all 0.18s cubic-bezier(0.4, 0, 0.2, 1)' } as any) : null;
+  return (
+    <NativeTouchableOpacity
+      activeOpacity={props.activeOpacity ?? 0.78}
+      {...props}
+      style={[webCursor, themedStyle(props.style, themeMode)]}
+    />
+  );
 }
 
 export function UiScrollView(props: ComponentProps<typeof NativeScrollView>) {

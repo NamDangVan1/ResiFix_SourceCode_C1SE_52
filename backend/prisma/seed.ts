@@ -53,13 +53,13 @@ async function main() {
     },
   });
 
-  // 4. Tạo Thiết bị gắn mã QR (WP-1204 & AC-B02)
-  const pipeAsset = await prisma.equipmentAsset.upsert({
+  // 4. Tạo Khu vực gắn mã QR (WP-1204 & AC-B02)
+  const pipeArea = await prisma.buildingArea.upsert({
     where: { qrCode: 'WP-1204' },
     update: {},
     create: {
       qrCode: 'WP-1204',
-      assetName: 'Đường ống nước bồn rửa',
+      areaName: 'Căn hộ A-1204',
       category: IncidentCategory.PLUMBING,
       locationLabel: 'Căn hộ A-1204 • Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -76,8 +76,8 @@ async function main() {
       title: 'Rò rỉ đường ống nước bồn rửa',
       description: 'Ống nước dưới bồn rửa bị nứt, nước chảy tràn ra sàn nhiều.',
       isVoiceInput: true,
-      locationNote: 'Căn hộ A-1204 • Thiết bị: WP-1204',
-      assetId: pipeAsset.id,
+      locationNote: 'Căn hộ A-1204 • Khu vực: WP-1204',
+      areaId: pipeArea.id,
       isQrScannedByRes: true,
       aiSummary: 'Vỡ đường ống cấp nước bồn rửa tại căn hộ A-1204, nguy cơ ngập sàn.',
       aiSuggestedCategory: IncidentCategory.PLUMBING,
