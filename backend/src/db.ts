@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
-
-// Reuse one connection pool across API routes and middleware.
-export const prisma = new PrismaClient();
+/**
+ * BACKWARD COMPATIBILITY BRIDGE
+ * Chuyển tiếp tới backend/src/config/database.ts
+ */
+export * from './config/database';
+export { prisma, default } from './config/database';

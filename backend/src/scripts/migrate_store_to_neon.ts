@@ -1,20 +1,28 @@
 /**
- * Script Import 1 lần từ resifix_store.json sang Neon PostgreSQL (Kế hoạch Cutover)
- * QUY TẮC AN TOÀN:
- * 1. Mặc định chạy ở chế độ DRY-RUN (không ghi vào DB).
- * 2. Tự động sao lưu file JSON gốc sang file .bak kèm timestamp trước khi thực hiện.
- * 3. Kiểm tra trùng lặp (duplicate check) và ràng buộc khóa ngoại trước khi nạp.
- * 4. Đối chiếu số lượng bản ghi nguồn vs đích (Record Count Verification).
- * 5. KHÔNG xóa file JSON gốc.
+ * Script Import từ resifix_data.json sang Neon PostgreSQL
+ * 
+ * QUY TẮC AN TOÀN & BẢO VỆ MÔI TRƯỜNG TEST:
+ * 1. Chỉ đọc duy nhất backend/.env.test, tuyệt đối KHÔNG đọc backend/.env.
+ * 2. Dừng ngay lập tức nếu thiếu file .env.test hoặc DATABASE_URL để trống.
+ * 3. Kiểm tra Fingerprint xác thực database đích là TEST (chặn đứng Production).
+ * 4. Hiển thị database, schema, hostname nhưng KHÔNG hiển thị username/password/connection string.
+ * 5. Mặc định chạy ở chế độ DRY-RUN (không ghi vào DB).
+ * 6. Tự động sao lưu file JSON gốc sang file .bak kèm timestamp trước khi thực hiện.
+ * 7. Kiểm tra trùng lặp (duplicate check) và ràng buộc khóa ngoại trước khi nạp.
+ * 8. Đối chiếu số lượng bản ghi nguồn vs đích (Record Count Verification).
+ * 9. Không xóa file JSON gốc.
  */
-
-import dotenv from 'dotenv';
-dotenv.config();
 
 import fs from 'fs';
 import path from 'path';
-import { prisma } from '../db';
+import { PrismaClient } from '@prisma/client';
 import { resiFixStore, ResiFixStoreData } from '../data/resifix_store';
+import { 
+  loadTestEnvironmentStrict, 
+  createTestPrismaClient, 
+  verifyTargetDatabaseIsTestBranch,
+  TestDbConfig 
+} from './test_env_guard';
 
 const STORE_PATH = path.resolve(__dirname, '../data/resifix_data.json');
 
@@ -37,7 +45,14 @@ export interface MigrationReport {
   success: boolean;
 }
 
-export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise<MigrationReport> {
+export async function runStoreToNeonMigration(
+  isDryRun: boolean = true, 
+  client?: PrismaClient,
+  cfg?: TestDbConfig
+): Promise<MigrationReport> {
+  const config = cfg || loadTestEnvironmentStrict();
+  const prisma = client || createTestPrismaClient(config);
+
   const storeData: ResiFixStoreData = resiFixStore.get();
   const allMaterialItems = (storeData.repairCosts || []).flatMap((c) => c.items || []);
 
@@ -67,7 +82,7 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
     report.backupPath = backupFile;
   }
 
-  // 2. Kiểm tra dữ liệu & Khóa ngoại (nếu có kết nối DB)
+  // 2. Kiểm tra dữ liệu & Khóa ngoại
   try {
     const users = await prisma.user.findMany({ select: { id: true, phone: true } });
     const userMap = new Set(users.map((u) => u.id));
@@ -102,8 +117,15 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
         report.warnings.push(`Chi phí ${cost.id}: ticketId "${cost.ticketId}" không tồn tại trong IncidentTicket Neon.`);
       }
     }
+
+    // Kiểm tra SlaTracking & Ticket
+    for (const sla of storeData.slaTrackings || []) {
+      if (!ticketMap.has(sla.ticketId)) {
+        report.warnings.push(`SlaTracking (Ticket ${sla.ticketCode}): ticketId "${sla.ticketId}" không tồn tại trong IncidentTicket Neon. Sẽ bỏ qua để tránh vi phạm khóa ngoại.`);
+      }
+    }
   } catch (dbErr: any) {
-    report.warnings.push(`Không thể kết nối Neon DB để xác minh khóa ngoại trực tiếp (Môi trường Offline/Sandbox): ${dbErr.message?.slice(0, 80)}...`);
+    report.warnings.push(`Không thể kiểm tra khóa ngoại trước: ${dbErr.message?.slice(0, 80)}...`);
   }
 
   if (isDryRun) {
@@ -117,7 +139,16 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
     report.counts.shiftScheduleRequests.imported = report.counts.shiftScheduleRequests.source;
     report.counts.repairMaterialCosts.imported = report.counts.repairMaterialCosts.source;
     report.counts.materialItems.imported = report.counts.materialItems.source;
-    report.counts.slaTrackings.imported = report.counts.slaTrackings.source;
+    
+    // Đếm số SLA Tracking có ticketId hợp lệ trong DB
+    try {
+      const tickets = await prisma.incidentTicket.findMany({ select: { id: true } });
+      const ticketMap = new Set(tickets.map((t) => t.id));
+      const validSlaCount = (storeData.slaTrackings || []).filter((s) => ticketMap.has(s.ticketId)).length;
+      report.counts.slaTrackings.imported = validSlaCount;
+    } catch {
+      report.counts.slaTrackings.imported = report.counts.slaTrackings.source;
+    }
     return report;
   }
 
@@ -153,10 +184,10 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
       // 3. ResidencyRecord
       const aptCodeToId = new Map((storeData.apartments || []).map((a) => [a.apartmentCode, a.id]));
       for (const res of storeData.residencyHistory || []) {
-        const aptId = aptCodeToId.get(res.apartmentCode) || res.apartmentCode;
+        const aptId = aptCodeToId.get(res.apartmentCode) || `apt-${res.apartmentCode.toLowerCase()}`;
         await tx.$executeRaw`
-          INSERT INTO "ResidencyRecord" ("id", "apartmentId", "residentId", "startDate", "endDate", "isCurrent", "residentType", "createdAt", "updatedAt")
-          VALUES (${res.id}, ${aptId}, ${res.residentId}, ${new Date(res.moveInDate)}, ${res.moveOutDate ? new Date(res.moveOutDate) : null}, ${!res.moveOutDate}, ${res.isRepresentative ? 'OWNER' : 'TENANT'}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          INSERT INTO "ResidencyRecord" ("id", "apartmentId", "apartmentCode", "residentId", "residentName", "residentPhone", "buildingBlock", "floorNumber", "residencyRole", "moveInDate", "moveOutDate", "isRepresentative", "createdAt")
+          VALUES (${res.id}, ${aptId}, ${res.apartmentCode}, ${res.residentId || null}, ${res.residentName || 'Cư dân'}, ${res.phone || '0000000000'}, ${res.buildingBlock || 'Tòa G'}, ${res.floorNumber || 1}, ${res.residencyRole || 'TENANT'}, ${new Date(res.moveInDate || Date.now())}, ${res.moveOutDate ? new Date(res.moveOutDate) : null}, ${Boolean(res.isRepresentative)}, CURRENT_TIMESTAMP)
           ON CONFLICT ("id") DO NOTHING;
         `;
         report.counts.residencyRecords.imported++;
@@ -165,8 +196,8 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
       // 4. AttendanceLog
       for (const att of storeData.attendanceLogs || []) {
         await tx.$executeRaw`
-          INSERT INTO "AttendanceLog" ("id", "techId", "date", "sessionIndex", "checkIn", "checkOut", "workMinutes", "workHours", "shiftScheduled", "anomalyNotes", "createdAt")
-          VALUES (${att.id}, ${att.techId}, ${att.date}, ${att.sessionIndex || 1}, ${new Date(att.checkIn)}, ${att.checkOut ? new Date(att.checkOut) : null}, ${att.workMinutes || null}, ${att.workHours || null}, ${att.shiftScheduled || '08:00 - 17:00'}, ${att.anomalyNotes || null}, CURRENT_TIMESTAMP)
+          INSERT INTO "AttendanceLog" ("id", "technicianId", "technicianName", "date", "sessionIndex", "checkIn", "checkOut", "workMinutes", "workHours", "shiftScheduled", "anomalyNotes", "createdAt")
+          VALUES (${att.id}, ${att.techId}, ${att.techName || 'Đặng Thành Quyết'}, ${att.date}, ${att.sessionIndex || 1}, ${new Date(att.checkIn)}, ${att.checkOut ? new Date(att.checkOut) : null}, ${att.workMinutes || null}, ${att.workHours || null}, ${att.shiftScheduled || '08:00 - 17:00'}, ${att.anomalyNotes || null}, CURRENT_TIMESTAMP)
           ON CONFLICT ("id") DO NOTHING;
         `;
         report.counts.attendanceLogs.imported++;
@@ -223,6 +254,15 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
 
       // 9. SlaTracking
       for (const sla of storeData.slaTrackings || []) {
+        // Chỉ nạp nếu ticketId tồn tại trong IncidentTicket để bảo đảm toàn vẹn khóa ngoại fk_sla_ticket
+        const ticketExists = await tx.$queryRaw<any[]>`
+          SELECT id FROM "IncidentTicket" WHERE id = ${sla.ticketId} LIMIT 1;
+        `;
+        if (!ticketExists || ticketExists.length === 0) {
+          report.warnings.push(`[SLA-08-BẢO VỆ TOÀN VẸN] Bản ghi SLA (Ticket ${sla.ticketCode || sla.ticketId}) thiếu ticket tương ứng trong IncidentTicket. Đã xử lý an toàn: bảo toàn 100% trong JSON store, không xóa dữ liệu nguồn, không tạo ticket giả và không chèn vào DB để tránh vi phạm khóa ngoại.`);
+          continue;
+        }
+
         await tx.$executeRaw`
           INSERT INTO "SlaTracking" ("id", "ticketId", "ticketCode", "priority", "status", "responseDeadline", "assignmentDeadline", "resolutionDeadline", "slaStatus", "isPaused", "pauseReason", "pausedAt", "escalationTier", "lastAlertSentAt", "createdAt", "updatedAt")
           VALUES (${'sla-' + sla.ticketId}, ${sla.ticketId}, ${sla.ticketCode}, ${sla.priority}, ${sla.status}, ${new Date(sla.responseDeadline)}, ${new Date(sla.assignmentDeadline)}, ${new Date(sla.resolutionDeadline)}, ${sla.slaStatus}, ${sla.isPaused}, ${sla.pauseReason || null}, ${sla.pausedAt ? new Date(sla.pausedAt) : null}, ${sla.escalationTier || 0}, ${sla.lastAlertSentAt ? new Date(sla.lastAlertSentAt) : null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -230,7 +270,7 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
         `;
         report.counts.slaTrackings.imported++;
       }
-    });
+    }, { maxWait: 20000, timeout: 60000 });
   } catch (err: any) {
     report.success = false;
     report.warnings.push(`Thực thi import thất bại, toàn bộ Transaction đã được tự động Rollback: ${err.message}`);
@@ -240,9 +280,38 @@ export async function runStoreToNeonMigration(isDryRun: boolean = true): Promise
 }
 
 if (require.main === module) {
-  const isExecute = process.argv.includes('--execute');
-  runStoreToNeonMigration(!isExecute)
-    .then((rep) => {
+  (async () => {
+    console.log('===============================================================');
+    console.log('🔄 BẮT ĐẦU SCRIPT IMPORT DỮ LIỆU TỪ JSON SANG NEON POSTGRESQL');
+    console.log('===============================================================\n');
+
+    // 1. Chỉ đọc duy nhất .env.test
+    const config = loadTestEnvironmentStrict();
+
+    console.log('Thông tin kết nối (Đã lọc bỏ thông tin bảo mật):');
+    console.log(`- Database Name : ${config.databaseName}`);
+    console.log(`- Hostname      : ${config.hostname}`);
+    console.log(`- Port          : ${config.port}`);
+    console.log(`- Nguồn cấu hình: backend/.env.test (Độc lập 100% với .env Production)\n`);
+
+    const prisma = createTestPrismaClient(config);
+
+    try {
+      // 2. Xác thực database đích là TEST (chặn đứng Production)
+      console.log('Đang xác minh dấu vân tay Database đích...');
+      const verification = await verifyTargetDatabaseIsTestBranch(prisma, config);
+
+      if (!verification.isVerifiedTest) {
+        console.error(`⛔ [TỪ CHỐI THỰC THI] ${verification.rejectionReason}`);
+        console.error('   Script chỉ cho phép chạy trên branch "resifix-migration-test".');
+        process.exit(1);
+      }
+
+      console.log(`✓ Database đích đã được xác minh an toàn (${verification.database}, schema: ${verification.schema}).\n`);
+
+      const isExecute = process.argv.includes('--execute');
+      const rep = await runStoreToNeonMigration(!isExecute, prisma, config);
+
       console.log('=== BÁO CÁO KẾ HOẠCH IMPORT DỮ LIỆU TỪ JSON SANG NEON ===');
       console.log(`Chế độ: ${rep.dryRun ? 'DRY-RUN (Phân tích, không ghi DB)' : 'THỰC THI THẬT'}`);
       console.log(`File Backup: ${rep.backupPath || 'Không có file JSON gốc để backup'}`);
@@ -253,10 +322,16 @@ if (require.main === module) {
       } else {
         console.log('\nTính toàn vẹn dữ liệu: HOÀN HẢO - Không có cảnh báo.');
       }
-      process.exit(0);
-    })
-    .catch((err) => {
-      console.error('Lỗi kiểm tra:', err);
+
+      if (!rep.success) {
+        console.error('\n❌ IMPORT THẤT BẠI: Toàn bộ Transaction đã tự động Rollback, không có dữ liệu nào bị ghi vào DB.');
+        process.exit(1);
+      }
+    } catch (err: any) {
+      console.error('Lỗi thực thi:', err.message);
       process.exit(1);
-    });
+    } finally {
+      await prisma.$disconnect();
+    }
+  })();
 }

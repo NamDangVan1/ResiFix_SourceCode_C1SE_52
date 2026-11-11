@@ -79,16 +79,22 @@ export function maskEmail(email: string): string {
 /**
  * Xây dựng nội dung email xác thực OTP bằng tiếng Việt
  */
-function buildOtpContent(otp: string, purpose: OtpPurpose): { subject: string; text: string; html: string } {
+function buildOtpContent(otp: string, purpose: OtpPurpose, role?: 'RESIDENT' | 'TECHNICIAN' | string): { subject: string; text: string; html: string } {
   const isActivation = purpose === 'ACCOUNT_ACTIVATION';
+  const isTechnician = role === 'TECHNICIAN';
+
+  const roleName = isTechnician ? 'Kỹ thuật viên' : 'Cư dân';
+  const greeting = isTechnician ? 'Quý Kỹ thuật viên' : 'Quý Cư dân';
 
   const title = isActivation
-    ? 'Xác thực kích hoạt tài khoản Cư dân'
-    : 'Xác thực đặt lại mật khẩu Cư dân';
+    ? `Xác thực kích hoạt tài khoản ${roleName}`
+    : `Xác thực đặt lại mật khẩu ${roleName}`;
 
   const introText = isActivation
-    ? 'Ban Quản lý tòa nhà ResiFix đã đăng ký thông tin cư dân cho bạn trên hệ thống. Dưới đây là mã xác thực OTP dùng để kích hoạt tài khoản và thiết lập mật khẩu cá nhân của bạn:'
-    : 'Hệ thống ResiFix nhận được yêu cầu đặt lại mật khẩu cho tài khoản cư dân của bạn. Dưới đây là mã xác thực OTP để tiến hành đổi mật khẩu mới:';
+    ? (isTechnician
+        ? 'Ban Quản lý tòa nhà ResiFix đã tạo tài khoản Kỹ thuật viên cho bạn trên hệ thống. Dưới đây là mã xác thực OTP dùng để kích hoạt tài khoản và thiết lập mật khẩu cá nhân của bạn:'
+        : 'Ban Quản lý tòa nhà ResiFix đã đăng ký thông tin cư dân cho bạn trên hệ thống. Dưới đây là mã xác thực OTP dùng để kích hoạt tài khoản và thiết lập mật khẩu cá nhân của bạn:')
+    : `Hệ thống ResiFix nhận được yêu cầu đặt lại mật khẩu cho tài khoản ${roleName.toLowerCase()} của bạn. Dưới đây là mã xác thực OTP để tiến hành đổi mật khẩu mới:`;
 
   const subject = `[ResiFix] ${title} - Mã OTP: ${otp.slice(0, 3)}***`;
 
@@ -97,7 +103,7 @@ function buildOtpContent(otp: string, purpose: OtpPurpose): { subject: string; t
 RESIFIX - HỆ THỐNG QUẢN LÝ TÒA NHÀ THÔNG MINH
 ==================================================
 
-Xin chào Quý Cư dân,
+Xin chào ${greeting},
 
 ${introText}
 
@@ -107,7 +113,7 @@ Thời hạn hiệu lực: 5 PHÚT kể từ thời điểm thư này được g
 
 LƯU Ý QUAN TRỌNG:
 - Mã OTP chỉ sử dụng một lần và có hiệu lực tối đa trong vòng 5 phút.
-- Tuyệt đối không cung cấp hoặc chia sẻ mã OTP này cho bất kỳ ai (kể cả nhân viên ban quản lý tòa nhà) để đảm bảo an toàn cho tài khoản và căn hộ của bạn.
+- Tuyệt đối không cung cấp hoặc chia sẻ mã OTP này cho bất kỳ ai (kể cả nhân viên ban quản lý tòa nhà) để đảm bảo an toàn cho tài khoản của bạn.
 - Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email hoặc liên hệ ngay với Ban Quản lý ResiFix để được hỗ trợ.
 
 Trân trọng,
@@ -148,7 +154,7 @@ Email hỗ trợ tự động - Vui lòng không trả lời thư này.
     </div>
     <div class="content">
       <h2 class="title">${title}</h2>
-      <p class="desc">Xin chào Quý Cư dân,<br/><br/>${introText}</p>
+      <p class="desc">Xin chào ${greeting},<br/><br/>${introText}</p>
       
       <div class="otp-box">
         <div class="otp-label">MÃ XÁC THỰC OTP</div>
@@ -175,15 +181,17 @@ Email hỗ trợ tự động - Vui lòng không trả lời thư này.
 /**
  * Gửi email chứa mã OTP đến địa chỉ email người nhận.
  * 
- * @param recipientEmail Địa chỉ email người nhận (Cư dân)
+ * @param recipientEmail Địa chỉ email người nhận (Cư dân / Kỹ thuật viên)
  * @param otp Mã xác thực 6 chữ số
  * @param purpose Mục đích gửi: 'ACCOUNT_ACTIVATION' | 'PASSWORD_RESET'
+ * @param role Vai trò người nhận: 'RESIDENT' | 'TECHNICIAN'
  * @returns Promise<SendOtpEmailResult> Kết quả gửi email (kèm messageId hoặc ném lỗi an toàn)
  */
 export async function sendOtpEmail(
   recipientEmail: string,
   otp: string,
-  purpose: OtpPurpose
+  purpose: OtpPurpose,
+  role?: 'RESIDENT' | 'TECHNICIAN' | string
 ): Promise<SendOtpEmailResult> {
   // 1. Kiểm tra đầu vào người nhận
   if (!recipientEmail || typeof recipientEmail !== 'string') {
@@ -213,7 +221,7 @@ export async function sendOtpEmail(
   // 4. Lấy cấu hình SMTP an toàn
   const config = getSmtpConfig();
   const transporter = createMailTransporter(config);
-  const { subject, text, html } = buildOtpContent(cleanOtp, purpose);
+  const { subject, text, html } = buildOtpContent(cleanOtp, purpose, role);
 
   try {
     const info = await transporter.sendMail({
@@ -261,10 +269,11 @@ export async function sendOtpEmail(
 export async function safeSendOtpEmail(
   recipientEmail: string,
   otp: string,
-  purpose: OtpPurpose
+  purpose: OtpPurpose,
+  role?: 'RESIDENT' | 'TECHNICIAN' | string
 ): Promise<SendOtpEmailResult> {
   try {
-    return await sendOtpEmail(recipientEmail, otp, purpose);
+    return await sendOtpEmail(recipientEmail, otp, purpose, role);
   } catch (error: any) {
     return {
       success: false,

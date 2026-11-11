@@ -7,6 +7,7 @@ import {
   Alert,
   Modal,
   Linking,
+  useWindowDimensions,
 } from 'react-native';
 import {
   UiActivityIndicator as ActivityIndicator,
@@ -22,6 +23,7 @@ import {
   useUiPreferences,
 } from './UiPreferences';
 import QrScannerModal from './QrScannerModal';
+import { QrCodeView, printQrCode, downloadQrSvg } from './QrCodeView';
 import { ScreenTransition, AnimatedModalContent } from './Transitions';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -310,7 +312,27 @@ function OutlineIcon({
   );
 }
 
+const calculateDistanceMeters = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number => {
+  const R = 6371e3;
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+};
+
 function AppContent() {
+  const { width: windowWidth } = useWindowDimensions();
+  const isMobileLayout = windowWidth < 900;
   const { t: translate } = useUiPreferences();
   // 1. State Xác thực & Chuyển đổi giao diện Login Web / Mobile (FR01)
   const [token, setToken] = useState<string | null>(null);
@@ -327,6 +349,13 @@ function AppContent() {
   const [dutyUpdating, setDutyUpdating] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  // State GPS Live & Quản trị tài khoản BMB thống nhất
+  const [techLiveLocation, setTechLiveLocation] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
+  const [techLocationError, setTechLocationError] = useState<string | null>(null);
+  const [techGpsRefreshing, setTechGpsRefreshing] = useState(false);
+  const [unifiedAccountModalVisible, setUnifiedAccountModalVisible] = useState(false);
+  const [selectedAccountType, setSelectedAccountType] = useState<'RESIDENT' | 'TECHNICIAN'>('RESIDENT');
+
   // 2. Điều hướng màn hình theo từng vai trò (Chuẩn 15 màn hình Figma)
   const [resScreen, setResScreen] = useState<
     'HOME' | 'CREATE_REPORT' | 'TICKET_DETAIL' | 'NOTI_PROFILE' | 'HISTORY'
@@ -339,9 +368,6 @@ function AppContent() {
   // Thông báo mở rộng / thu gọn
   const [showAllNotifications, setShowAllNotifications] = useState(false);
   const [showAllBmbNotifications, setShowAllBmbNotifications] = useState(false);
-
-  // Đăng nhập 3 vai trò
-  const [selectedLoginRole, setSelectedLoginRole] = useState<'RESIDENT' | 'TECHNICIAN' | 'BMB'>('RESIDENT');
 
   // Kỹ thuật viên bàn giao khi xóa
   const [handoverTechId, setHandoverTechId] = useState<string>('');
@@ -364,18 +390,40 @@ function AppContent() {
   const [residentsList, setResidentsList] = useState<any[]>([]);
   const [residentSearchQuery, setResidentSearchQuery] = useState('');
   const [residentModalMode, setResidentModalMode] = useState<'create' | 'edit' | 'reset_password' | null>(null);
+  const [residentModalError, setResidentModalError] = useState<string | null>(null);
+  const [residentModalBusy, setResidentModalBusy] = useState(false);
+  const [apartmentFilterBlock, setApartmentFilterBlock] = useState<'ALL' | 'G' | 'F' | 'E'>('ALL');
+  const [apartmentFilterFloor, setApartmentFilterFloor] = useState<number | 'ALL'>('ALL');
+  const [apartmentFilterStatus, setApartmentFilterStatus] = useState<'ALL' | 'OCCUPIED' | 'VACANT'>('ALL');
+  const [zoomQrApartment, setZoomQrApartment] = useState<any | null>(null);
   const [selectedResident, setSelectedResident] = useState<any | null>(null);
   const [residentForm, setResidentForm] = useState({
     fullName: '',
     phone: '',
     email: '',
-    apartmentCode: 'A-1204',
-    buildingBlock: 'Tòa S1',
-    floorNumber: 12,
-    password: '',
+    apartmentCode: 'G101',
+    buildingBlock: 'Tòa G',
+    floorNumber: 1,
+    residencyRole: 'TENANT' as 'OWNER' | 'TENANT' | 'MEMBER',
+    moveInDate: new Date().toISOString().slice(0, 10),
+    moveOutDate: '',
     isRepresentative: false,
   });
   const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [createdTempPasswordData, setCreatedTempPasswordData] = useState<{
+    temporaryPassword: string;
+    residentName: string;
+    apartmentCode: string;
+    phone: string;
+    isExistingUser?: boolean;
+  } | null>(null);
+
+  // Modal đổi mật khẩu lần đầu bắt buộc cho cư dân (đăng nhập bằng mật khẩu tạm)
+  const [showFirstLoginPasswordModal, setShowFirstLoginPasswordModal] = useState(false);
+  const [firstLoginCurrentPassword, setFirstLoginCurrentPassword] = useState('');
+  const [firstLoginNewPassword, setFirstLoginNewPassword] = useState('');
+  const [firstLoginConfirmPassword, setFirstLoginConfirmPassword] = useState('');
+  const [firstLoginBusy, setFirstLoginBusy] = useState(false);
 
   // Chấm công & Lương KTV
   const [myAttendanceLogs, setMyAttendanceLogs] = useState<any[]>([]);
@@ -493,6 +541,7 @@ function AppContent() {
   const [showForgotModal, setShowForgotModal] = useState(false);
   const [forgotStep, setForgotStep] = useState<1 | 2>(1);
   const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotMaskedEmail, setForgotMaskedEmail] = useState('');
   const [forgotOtp, setForgotOtp] = useState('');
   const [forgotNewPassword, setForgotNewPassword] = useState('');
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
@@ -500,12 +549,36 @@ function AppContent() {
   const [forgotBusy, setForgotBusy] = useState(false);
 
   const [showActivationModal, setShowActivationModal] = useState(false);
+  const [activationRole, setActivationRole] = useState<'RESIDENT' | 'TECHNICIAN' | 'BMB' | null>(null);
+  const [activationFullName, setActivationFullName] = useState('');
   const [activationEmail, setActivationEmail] = useState('');
   const [activationOtp, setActivationOtp] = useState('');
   const [activationNewPassword, setActivationNewPassword] = useState('');
   const [activationConfirmPassword, setActivationConfirmPassword] = useState('');
+  const [showActivationNewPass, setShowActivationNewPass] = useState(false);
+  const [showActivationConfirmPass, setShowActivationConfirmPass] = useState(false);
+  const [showBmbWebPassword, setShowBmbWebPassword] = useState(false);
   const [activationCooldown, setActivationCooldown] = useState(0);
   const [activationBusy, setActivationBusy] = useState(false);
+  const [activationError, setActivationError] = useState<string | null>(null);
+  const [activationOtpStatus, setActivationOtpStatus] = useState<'IDLE' | 'SENDING' | 'SENT' | 'FAILED' | 'EXPIRED' | 'SUCCESS'>('IDLE');
+  const [activationFieldErrors, setActivationFieldErrors] = useState<{
+    email?: string;
+    otp?: string;
+    password?: string;
+    confirmPassword?: string;
+  }>({});
+  const [loginFieldErrors, setLoginFieldErrors] = useState<{
+    identifier?: string;
+    password?: string;
+  }>({});
+
+  const maskEmailString = (email: string) => {
+    if (!email || !email.includes('@')) return email;
+    const [local, domain] = email.split('@');
+    if (local.length <= 2) return `${local[0]}***@${domain}`;
+    return `${local[0]}***${local[local.length - 1]}@${domain}`;
+  };
 
   useEffect(() => {
     if (forgotCooldown <= 0 && activationCooldown <= 0) return;
@@ -566,10 +639,22 @@ function AppContent() {
   const handleLogin = async (overrideId?: string, overridePass?: string) => {
     const id = (overrideId ?? phoneInput).trim();
     const pass = overridePass ?? passwordInput;
-    if (!id || !pass) {
+    const errors: { identifier?: string; password?: string } = {};
+
+    if (!id) {
+      errors.identifier = translate('Vui lòng nhập Số điện thoại hoặc Email');
+    }
+    if (!pass) {
+      errors.password = translate('Vui lòng nhập mật khẩu');
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setLoginFieldErrors(errors);
       showToast(translate('Vui lòng nhập đầy đủ thông tin đăng nhập.'));
       return;
     }
+    setLoginFieldErrors({});
+
     try {
       setLoading(true);
       const res = await fetch(`${API_BASE_URL}/auth/login`, {
@@ -586,29 +671,41 @@ function AppContent() {
       const data = await res.json();
       if (!res.ok || !data.success) {
         if (data.isPendingActivation) {
-          setActivationEmail(data.email || (id.includes('@') ? id : ''));
+          const rawRole = (data.role || data.user?.role || '').toString().toUpperCase().trim();
+          const resolvedRole: 'RESIDENT' | 'TECHNICIAN' | 'BMB' | null =
+            rawRole === 'TECHNICIAN' ? 'TECHNICIAN' : rawRole === 'RESIDENT' ? 'RESIDENT' : rawRole === 'BMB' ? 'BMB' : null;
+
+          if (!resolvedRole) {
+            showToast(data.message || translate('Không thể xác định vai trò của tài khoản để kích hoạt. Vui lòng liên hệ Ban Quản lý.'));
+            return;
+          }
+
+          setActivationRole(resolvedRole);
+          setActivationFullName(data.fullName || data.user?.fullName || '');
+          const targetEmail = data.email || data.user?.email || (id.includes('@') ? id : '');
+          setActivationEmail(targetEmail);
           setActivationOtp('');
           setActivationNewPassword('');
           setActivationConfirmPassword('');
+          setActivationError(null);
+          setActivationFieldErrors({});
+          setActivationBusy(false);
+          if (data.emailSent) {
+            setActivationOtpStatus('SENT');
+            setActivationCooldown(60);
+          } else {
+            setActivationOtpStatus('IDLE');
+            setActivationCooldown(0);
+          }
           setShowActivationModal(true);
-          showToast(data.message || 'Tài khoản chưa được kích hoạt. Vui lòng nhập mã OTP để kích hoạt.');
+          showToast(data.message || translate('Tài khoản chưa kích hoạt. Vui lòng xác thực OTP'));
           return;
         }
-        showToast(data.message || translate('Sai thông tin đăng nhập!'));
+        const errMsg = data.message || translate('Email/SĐT hoặc mật khẩu không chính xác');
+        showToast(errMsg);
         return;
       }
       const userRole = data.user?.role;
-      if (userRole !== selectedLoginRole) {
-        const roleLabels: Record<string, string> = {
-          BMB: 'BMB / Admin',
-          TECHNICIAN: 'Kỹ thuật viên',
-          RESIDENT: 'Cư dân',
-        };
-        showToast(
-          `Tài khoản thuộc vai trò ${roleLabels[userRole] || userRole}, không khớp với lựa chọn ${roleLabels[selectedLoginRole]}!`
-        );
-        return;
-      }
       setToken(data.token);
       setUser(data.user);
       if (userRole === 'BMB') {
@@ -619,6 +716,17 @@ function AppContent() {
       setResScreen('HOME');
       setTechScreen('HOME');
       setBmbNavTab('TICKETS');
+
+      // Nếu tài khoản có cờ đổi mật khẩu lần đầu (cư dân đăng nhập bằng mật khẩu tạm thời)
+      if (data.mustChangePassword === true || data.user?.mustChangePassword === true) {
+        setFirstLoginCurrentPassword(pass);
+        setFirstLoginNewPassword('');
+        setFirstLoginConfirmPassword('');
+        setShowFirstLoginPasswordModal(true);
+        showToast(translate('Vui lòng đổi mật khẩu mới ở lần đăng nhập đầu tiên để bảo vệ tài khoản.'));
+        return;
+      }
+
       if (rememberMe) {
         void AsyncStorage.setItem(
           AUTH_SESSION_STORAGE_KEY,
@@ -629,16 +737,78 @@ function AppContent() {
       }
       await fetchAllData(data.token, data.user);
     } catch {
-      showToast(translate(`Không kết nối được Backend (${API_BASE_URL}). Hãy đảm bảo cổng 5000 đang chạy!`));
+      showToast(translate('Không thể kết nối máy chủ. Vui lòng thử lại'));
     } finally {
       setLoading(false);
     }
   };
 
+  const handleChangePasswordFirstLogin = async () => {
+    const cur = firstLoginCurrentPassword.trim();
+    const newPwd = firstLoginNewPassword.trim();
+    const confirmPwd = firstLoginConfirmPassword.trim();
+
+    if (!cur) {
+      showToast(translate('Vui lòng nhập mật khẩu tạm thời hiện tại.'));
+      return;
+    }
+    if (newPwd.length < 6) {
+      showToast(translate('Mật khẩu mới tối thiểu 6 ký tự.'));
+      return;
+    }
+    if (newPwd !== confirmPwd) {
+      showToast(translate('Xác nhận mật khẩu mới không khớp.'));
+      return;
+    }
+    if (cur === newPwd) {
+      showToast(translate('Mật khẩu mới không được trùng với mật khẩu tạm thời.'));
+      return;
+    }
+
+    try {
+      setFirstLoginBusy(true);
+      const res = await fetch(`${API_BASE_URL}/auth/change-password-first-login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'bypass-tunnel-reminder': 'true',
+        },
+        body: JSON.stringify({
+          currentPassword: cur,
+          newPassword: newPwd,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        showToast(data.message || translate('Đổi mật khẩu thất bại.'));
+        return;
+      }
+      setToken(data.token);
+      setUser(data.user);
+      setShowFirstLoginPasswordModal(false);
+      setFirstLoginCurrentPassword('');
+      setFirstLoginNewPassword('');
+      setFirstLoginConfirmPassword('');
+      showToast(translate('✓ Đổi mật khẩu thành công! Chào mừng bạn đến với ResiFix.'));
+      if (rememberMe) {
+        void AsyncStorage.setItem(
+          AUTH_SESSION_STORAGE_KEY,
+          JSON.stringify({ token: data.token, user: data.user })
+        ).catch(() => undefined);
+      }
+      await fetchAllData(data.token, data.user);
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+    } finally {
+      setFirstLoginBusy(false);
+    }
+  };
+
   const handleRequestForgotOtp = async () => {
-    const cleanEmail = forgotEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      showToast('Vui lòng nhập địa chỉ email hợp lệ.');
+    const cleanInput = forgotEmail.trim();
+    if (!cleanInput) {
+      showToast(translate('Vui lòng nhập Email hoặc Số điện thoại đã đăng ký.'));
       return;
     }
     try {
@@ -646,40 +816,43 @@ function AppContent() {
       const res = await fetch(`${API_BASE_URL}/auth/otp/request-reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'bypass-tunnel-reminder': 'true' },
-        body: JSON.stringify({ email: cleanEmail }),
+        body: JSON.stringify({ identifier: cleanInput }),
       });
       const data = await res.json();
       if (!res.ok) {
-        showToast(data.message || 'Không thể yêu cầu mã OTP lúc này.');
+        showToast(data.message || translate('Không thể yêu cầu mã OTP lúc này.'));
         return;
       }
       setForgotStep(2);
       setForgotCooldown(60);
-      showToast(data.message || 'Mã OTP đã được gửi đến email của bạn.');
+      if (data.maskedEmail) {
+        setForgotMaskedEmail(data.maskedEmail);
+      }
+      showToast(data.message || translate('Mã OTP đã được gửi đến email đăng ký của bạn.'));
     } catch {
-      showToast('Không thể kết nối đến máy chủ.');
+      showToast(translate('Không thể kết nối đến máy chủ.'));
     } finally {
       setForgotBusy(false);
     }
   };
 
   const handleResetPassword = async () => {
-    const cleanEmail = forgotEmail.trim().toLowerCase();
+    const cleanInput = forgotEmail.trim();
     const cleanOtp = forgotOtp.trim();
-    if (!cleanEmail) {
-      showToast('Vui lòng nhập email.');
+    if (!cleanInput) {
+      showToast(translate('Vui lòng nhập Email hoặc Số điện thoại.'));
       return;
     }
     if (cleanOtp.length !== 6) {
-      showToast('Mã OTP phải gồm chính xác 6 chữ số.');
+      showToast(translate('Mã OTP phải gồm chính xác 6 chữ số.'));
       return;
     }
-    if (forgotNewPassword.length < 12 || forgotNewPassword.length > 128) {
-      showToast('Mật khẩu mới phải có độ dài từ 12 đến 128 ký tự.');
+    if (forgotNewPassword.length < 6 || forgotNewPassword.length > 128) {
+      showToast(translate('Mật khẩu mới phải có độ dài từ 6 đến 128 ký tự.'));
       return;
     }
     if (forgotNewPassword !== forgotConfirmPassword) {
-      showToast('Mật khẩu xác nhận không khớp.');
+      showToast(translate('Mật khẩu xác nhận không khớp.'));
       return;
     }
     try {
@@ -688,25 +861,26 @@ function AppContent() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'bypass-tunnel-reminder': 'true' },
         body: JSON.stringify({
-          email: cleanEmail,
+          identifier: cleanInput,
           otp: cleanOtp,
           newPassword: forgotNewPassword,
         }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        showToast(data.message || 'Đặt lại mật khẩu thất bại.');
+        showToast(data.message || translate('Đặt lại mật khẩu thất bại.'));
         return;
       }
-      showToast('✓ Đặt lại mật khẩu thành công! Vui lòng đăng nhập lại.');
+      showToast(translate('✓ Đặt lại mật khẩu thành công! Tất cả các phiên cũ đã đăng xuất. Vui lòng đăng nhập lại.'));
       setShowForgotModal(false);
       setForgotStep(1);
       setForgotOtp('');
       setForgotNewPassword('');
       setForgotConfirmPassword('');
+      setForgotMaskedEmail('');
       setPasswordInput('');
     } catch {
-      showToast('Không thể kết nối đến máy chủ.');
+      showToast(translate('Không thể kết nối đến máy chủ.'));
     } finally {
       setForgotBusy(false);
     }
@@ -715,25 +889,55 @@ function AppContent() {
   const handleRequestActivationOtp = async () => {
     const cleanEmail = activationEmail.trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@')) {
-      showToast('Vui lòng nhập địa chỉ email hợp lệ.');
+      const errMsg = translate('Email không khớp với tài khoản đã đăng ký');
+      setActivationFieldErrors((prev) => ({ ...prev, email: errMsg }));
+      setActivationError(errMsg);
+      showToast(errMsg);
       return;
     }
     try {
       setActivationBusy(true);
+      setActivationError(null);
+      setActivationOtpStatus('SENDING');
       const res = await fetch(`${API_BASE_URL}/auth/otp/request-activation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'bypass-tunnel-reminder': 'true' },
         body: JSON.stringify({ email: cleanEmail }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(data.message || 'Không thể gửi lại mã OTP lúc này.');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setActivationOtpStatus('FAILED');
+        setActivationCooldown(0);
+        const errMsg = data.message || translate('Không thể gửi mã OTP. Vui lòng thử lại');
+        if (data.code === 'OTP_COOLDOWN_ACTIVE') {
+          setActivationError(errMsg);
+        } else if (data.code === 'ACCOUNT_NOT_FOUND' || data.code === 'EMAIL_MISSING') {
+          setActivationFieldErrors((prev) => ({ ...prev, email: errMsg }));
+        } else {
+          setActivationError(errMsg);
+        }
+        showToast(errMsg);
         return;
       }
+      const rawRole = (data.role || data.user?.role || '').toString().toUpperCase().trim();
+      if (rawRole === 'TECHNICIAN' || rawRole === 'RESIDENT' || rawRole === 'BMB') {
+        setActivationRole(rawRole as 'RESIDENT' | 'TECHNICIAN' | 'BMB');
+      }
+      if (data.fullName || data.user?.fullName) {
+        setActivationFullName(data.fullName || data.user?.fullName);
+      }
       setActivationCooldown(60);
-      showToast(data.message || 'Đã gửi mã OTP kích hoạt đến email của bạn.');
+      setActivationOtpStatus('SENT');
+      setActivationFieldErrors({});
+      setActivationError(null);
+      const successMsg = data.message || translate('Mã OTP mới đã được gửi đến email của bạn');
+      showToast(successMsg);
     } catch {
-      showToast('Không thể kết nối đến máy chủ.');
+      setActivationOtpStatus('FAILED');
+      setActivationCooldown(0);
+      const errMsg = translate('Không thể kết nối máy chủ. Vui lòng thử lại');
+      setActivationError(errMsg);
+      showToast(errMsg);
     } finally {
       setActivationBusy(false);
     }
@@ -742,24 +946,41 @@ function AppContent() {
   const handleActivateAccount = async () => {
     const cleanEmail = activationEmail.trim().toLowerCase();
     const cleanOtp = activationOtp.trim();
+    const fieldErrs: { email?: string; otp?: string; password?: string; confirmPassword?: string } = {};
+
     if (!cleanEmail || !cleanEmail.includes('@')) {
-      showToast('Vui lòng nhập địa chỉ email hợp lệ.');
+      fieldErrs.email = translate('Email không khớp với tài khoản đã đăng ký');
+    }
+    if (!cleanOtp) {
+      fieldErrs.otp = translate('Vui lòng nhập đủ 6 chữ số OTP');
+    } else if (cleanOtp.length !== 6 || !/^\d{6}$/.test(cleanOtp)) {
+      fieldErrs.otp = translate('Vui lòng nhập đủ 6 chữ số OTP');
+    }
+    if (!activationNewPassword) {
+      fieldErrs.password = translate('Mật khẩu phải có ít nhất 6 ký tự');
+    } else if (activationNewPassword.length < 6) {
+      fieldErrs.password = translate('Mật khẩu phải có ít nhất 6 ký tự');
+    } else if (activationNewPassword.length > 128) {
+      fieldErrs.password = translate('Mật khẩu không được vượt quá 128 ký tự');
+    }
+    if (!activationConfirmPassword) {
+      fieldErrs.confirmPassword = translate('Mật khẩu xác nhận không trùng khớp');
+    } else if (activationNewPassword !== activationConfirmPassword) {
+      fieldErrs.confirmPassword = translate('Mật khẩu xác nhận không trùng khớp');
+    }
+
+    if (Object.keys(fieldErrs).length > 0) {
+      setActivationFieldErrors(fieldErrs);
+      const firstMsg = Object.values(fieldErrs)[0];
+      setActivationError(firstMsg);
+      showToast(firstMsg);
       return;
     }
-    if (cleanOtp.length !== 6) {
-      showToast('Mã OTP phải gồm chính xác 6 chữ số.');
-      return;
-    }
-    if (activationNewPassword.length < 12 || activationNewPassword.length > 128) {
-      showToast('Mật khẩu mới phải từ 12 đến 128 ký tự.');
-      return;
-    }
-    if (activationNewPassword !== activationConfirmPassword) {
-      showToast('Mật khẩu xác nhận không khớp.');
-      return;
-    }
+
+    setActivationFieldErrors({});
     try {
       setActivationBusy(true);
+      setActivationError(null);
       const res = await fetch(`${API_BASE_URL}/auth/otp/activate-account`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'bypass-tunnel-reminder': 'true' },
@@ -767,22 +988,57 @@ function AppContent() {
           email: cleanEmail,
           otp: cleanOtp,
           newPassword: activationNewPassword,
+          confirmPassword: activationConfirmPassword,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
-        showToast(data.message || 'Kích hoạt tài khoản thất bại.');
+        const errMsg = data.message || translate('Mã OTP không chính xác. Vui lòng kiểm tra lại');
+        if (data.code === 'EMAIL_MISMATCH') {
+          setActivationFieldErrors((prev) => ({ ...prev, email: errMsg }));
+        } else if (
+          data.code === 'OTP_MISMATCH' ||
+          data.code === 'OTP_NOT_FOUND' ||
+          errMsg.includes('không chính xác')
+        ) {
+          setActivationOtpStatus('FAILED');
+          setActivationFieldErrors((prev) => ({ ...prev, otp: errMsg }));
+        } else if (data.code === 'OTP_EXPIRED' || errMsg.includes('hết hạn')) {
+          setActivationOtpStatus('EXPIRED');
+          setActivationFieldErrors((prev) => ({ ...prev, otp: errMsg }));
+        } else if (data.code === 'OTP_ALREADY_USED' || errMsg.includes('đã được sử dụng')) {
+          setActivationFieldErrors((prev) => ({ ...prev, otp: errMsg }));
+        } else if (data.code === 'CONFIRM_PASSWORD_MISMATCH') {
+          setActivationFieldErrors((prev) => ({ ...prev, confirmPassword: errMsg }));
+        } else if (data.code === 'PASSWORD_TOO_SHORT' || data.code === 'PASSWORD_TOO_LONG') {
+          setActivationFieldErrors((prev) => ({ ...prev, password: errMsg }));
+        } else {
+          setActivationError(errMsg);
+        }
+        setActivationError(errMsg);
+        showToast(errMsg);
         return;
       }
-      showToast('✓ Kích hoạt tài khoản thành công! Bạn có thể đăng nhập ngay.');
+      setActivationOtpStatus('SUCCESS');
+      showToast(translate('Kích hoạt tài khoản thành công'));
       setShowActivationModal(false);
       setPasswordInput(activationNewPassword);
-      setPhoneInput(cleanEmail);
+      if (cleanEmail) {
+        setPhoneInput(cleanEmail);
+      }
+      setActivationRole(null);
+      setActivationFullName('');
       setActivationOtp('');
       setActivationNewPassword('');
       setActivationConfirmPassword('');
+      setActivationError(null);
+      setActivationFieldErrors({});
     } catch {
-      showToast('Không thể kết nối đến máy chủ.');
+      setActivationOtpStatus('FAILED');
+      setActivationCooldown(0);
+      const errMsg = translate('Không thể kết nối máy chủ. Vui lòng thử lại');
+      setActivationError(errMsg);
+      showToast(errMsg);
     } finally {
       setActivationBusy(false);
     }
@@ -921,26 +1177,28 @@ function AppContent() {
           console.warn('Lỗi khi tải danh sách kỹ thuật viên:', techErr);
         }
 
-        // Tải danh sách căn hộ & cư dân cho BMB (độc lập, không chặn luồng)
-        void Promise.allSettled([
-          fetch(`${API_BASE_URL}/management/apartments`, { headers })
-            .then((r) => r.json())
-            .then((d) => {
-              if (d?.apartments) {
-                setApartments(d.apartments);
-                if (!selectedApartment && d.apartments.length > 0) {
-                  setSelectedApartment(d.apartments[0]);
-                }
-              }
-            })
-            .catch(() => undefined),
-          fetch(`${API_BASE_URL}/management/residents`, { headers })
-            .then((r) => r.json())
-            .then((d) => {
-              if (d?.residents) setResidentsList(d.residents);
-            })
-            .catch(() => undefined),
-        ]);
+        // Tải danh sách căn hộ & cư dân cho BMB
+        try {
+          const [aptRes, resRes] = await Promise.all([
+            fetch(`${API_BASE_URL}/management/apartments`, { headers }),
+            fetch(`${API_BASE_URL}/management/residents`, { headers }),
+          ]);
+          const aptData = await aptRes.json().catch(() => null);
+          const resData = await resRes.json().catch(() => null);
+
+          if (aptData?.apartments) {
+            setApartments(aptData.apartments);
+            if (!selectedApartment && aptData.apartments.length > 0) {
+              setSelectedApartment(aptData.apartments[0]);
+            }
+          }
+          console.log(`[CLIENT_RESIDENT_LOG][${new Date().toISOString()}] GET /management/residents completed. Received: ${resData?.residents?.length ?? 0} records (source: fetchAllData)`);
+          if (resData?.residents) {
+            setResidentsList(resData.residents);
+          }
+        } catch {
+          // Bỏ qua lỗi nền khi tải căn hộ/cư dân
+        }
 
         // Tải bảng lương và chấm công BMB (độc lập)
         void fetch(`${API_BASE_URL}/payroll/admin/summary`, { headers })
@@ -1253,7 +1511,9 @@ function AppContent() {
     }
 
     const cleanEmail = technicianForm.email.trim();
-    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!cleanEmail) {
+      errors.email = translate('Email là bắt buộc để Kỹ thuật viên nhận mã OTP kích hoạt tài khoản.');
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       errors.email = translate('Email không đúng định dạng (ví dụ: email@domain.com).');
     }
 
@@ -1448,33 +1708,32 @@ function AppContent() {
   };
 
   const handleSaveResident = async () => {
+    setResidentModalError(null);
     const cleanName = residentForm.fullName.trim();
     const digitsOnly = residentForm.phone.replace(/[^\d]/g, '');
     const cleanEmail = residentForm.email.trim();
-    const cleanPass = residentForm.password.trim();
 
-    if (cleanName.length < 2 || !/^0\d{9}$/.test(digitsOnly)) {
-      showToast(translate('Vui lòng nhập họ tên (tối thiểu 2 ký tự) và SĐT hợp lệ (đúng 10 số, bắt đầu bằng 0).'));
+    if (cleanName.length < 2) {
+      setResidentModalError(translate('Vui lòng nhập họ tên cư dân (tối thiểu 2 ký tự).'));
       return;
     }
 
-    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      showToast(translate('Vui lòng nhập địa chỉ email hợp lệ để hệ thống gửi mã OTP kích hoạt tài khoản.'));
+    if (!/^0\d{9}$/.test(digitsOnly)) {
+      setResidentModalError(translate('Số điện thoại phải gồm đúng 10 chữ số và bắt đầu bằng số 0 (ví dụ: 0905123456).'));
       return;
     }
 
-    // Kiểm tra mật khẩu khi thêm cư dân:
-    // - Cho phép để trống để cư dân tự tạo mật khẩu qua OTP
-    // - Nếu BMB chủ động nhập: yêu cầu tối thiểu 12 ký tự
-    if (residentModalMode === 'create' && cleanPass) {
-      if (cleanPass.length < 12 || cleanPass.length > 128) {
-        showToast(translate('Mật khẩu ban đầu phải từ 12 đến 128 ký tự (hoặc để trống để cư dân tự tạo qua OTP).'));
-        return;
-      }
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setResidentModalError(translate('Vui lòng nhập địa chỉ email hợp lệ (ví dụ: resident@gmail.com).'));
+      return;
     }
+
+    const aptCode = residentForm.apartmentCode || 'G101';
+    const bBlock = residentForm.buildingBlock || 'Tòa G';
+    const fNum = residentForm.floorNumber || 1;
 
     try {
-      setLoading(true);
+      setResidentModalBusy(true);
       const isEdit = residentModalMode === 'edit' && selectedResident;
       const url = isEdit ? `${API_BASE_URL}/management/residents/${selectedResident.id}` : `${API_BASE_URL}/management/residents`;
       const res = await fetch(url, {
@@ -1485,47 +1744,54 @@ function AppContent() {
           'bypass-tunnel-reminder': 'true',
         },
         body: JSON.stringify({
-          ...residentForm,
           fullName: cleanName,
           phone: digitsOnly,
           email: cleanEmail || null,
-          password: cleanPass || undefined,
+          apartmentCode: aptCode,
+          buildingBlock: bBlock,
+          floorNumber: fNum,
+          residencyRole: residentForm.residencyRole || 'TENANT',
+          moveInDate: residentForm.moveInDate || new Date().toISOString().slice(0, 10),
+          moveOutDate: residentForm.moveOutDate || null,
+          isRepresentative: residentForm.residencyRole === 'OWNER',
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (data?.success) {
-        showToast(translate(isEdit ? 'Đã cập nhật thông tin cư dân.' : 'Đã thêm cư dân thành công.'));
+      if (res.ok && data?.success) {
         setResidentModalMode(null);
-        if (data.resident) {
-          setResidentsList((prev) => {
-            if (isEdit) {
-              return prev.map((item) => (item.id === data.resident.id ? { ...item, ...data.resident } : item));
-            }
-            return [data.resident, ...prev.filter((item) => item.id !== data.resident.id)];
+        setResidentModalError(null);
+        if (data.temporaryPassword) {
+          setCreatedTempPasswordData({
+            temporaryPassword: data.temporaryPassword,
+            residentName: cleanName,
+            apartmentCode: aptCode,
+            phone: digitsOnly,
+            isExistingUser: data.isExistingUser,
           });
+        } else {
+          showToast(translate(isEdit ? 'Đã cập nhật thông tin cư dân.' : (data.message || 'Đã liên kết cư dân thành công.')));
         }
+        console.log(`[CLIENT_RESIDENT_LOG][${new Date().toISOString()}] POST /management/residents success: residentId=${data.resident?.id}, apt=${data.resident?.apartmentCode}. Refreshing authoritative state via fetchAllData() (source: handleSaveResident)`);
         await fetchAllData();
       } else {
-        showToast(data?.message || translate('Lỗi khi lưu cư dân.'));
+        const errMsg = data?.message || translate(`Lỗi máy chủ (${res.status}). Không thể lưu thông tin.`);
+        setResidentModalError(errMsg);
+        showToast(errMsg);
       }
     } catch {
-      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+      const connErr = translate('Không kết nối được Backend. Vui lòng kiểm tra lại kết nối mạng hoặc Terminal Backend.');
+      setResidentModalError(connErr);
+      showToast(connErr);
     } finally {
-      setLoading(false);
+      setResidentModalBusy(false);
     }
   };
 
-
-
-
-
   const handleResetResidentPassword = async () => {
-    if (!selectedResident || newPasswordInput.trim().length < 12) {
-      showToast(translate('Mật khẩu mới tối thiểu 12 ký tự để đảm bảo an toàn.'));
-      return;
-    }
+    if (!selectedResident) return;
+    setResidentModalError(null);
     try {
-      setLoading(true);
+      setResidentModalBusy(true);
       const res = await fetch(`${API_BASE_URL}/management/residents/${selectedResident.id}/reset-password`, {
         method: 'POST',
         headers: {
@@ -1533,31 +1799,41 @@ function AppContent() {
           Authorization: `Bearer ${token}`,
           'bypass-tunnel-reminder': 'true',
         },
-        body: JSON.stringify({ newPassword: newPasswordInput.trim() }),
+        body: JSON.stringify({ newPassword: newPasswordInput.trim() || undefined }),
       });
       const data = await res.json().catch(() => ({}));
-      if (data?.success) {
-        showToast(translate(data.message || 'Đã đặt lại mật khẩu thành công!'));
+      if (res.ok && data?.success) {
         setResidentModalMode(null);
+        setResidentModalError(null);
         setNewPasswordInput('');
+        if (data.temporaryPassword) {
+          setCreatedTempPasswordData({
+            temporaryPassword: data.temporaryPassword,
+            residentName: selectedResident.fullName,
+            apartmentCode: selectedResident.apartmentCode || '',
+            phone: selectedResident.phone,
+          });
+        } else {
+          showToast(translate(data.message || 'Đã đặt lại mật khẩu thành công!'));
+        }
       } else {
-        showToast(data?.message || translate('Lỗi khi đặt lại mật khẩu.'));
+        const errMsg = data?.message || translate('Lỗi khi đặt lại mật khẩu.');
+        setResidentModalError(errMsg);
+        showToast(errMsg);
       }
     } catch {
-      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
+      const connErr = translate('Không kết nối được Backend. Vui lòng thử lại.');
+      setResidentModalError(connErr);
+      showToast(connErr);
     } finally {
-      setLoading(false);
+      setResidentModalBusy(false);
     }
   };
-
-
-
-
 
   const handleResidentDeparture = async (resId: string) => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/management/residents/${resId}/departure`, {
+      const res = await fetch(`${API_BASE_URL}/management/residents/${resId}/move-out`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1568,16 +1844,66 @@ function AppContent() {
       });
       const data = await res.json().catch(() => ({}));
       if (data?.success) {
-        showToast(data.message || translate('Đã cập nhật ngày rời phòng cho cư dân.'));
+        showToast(data.message || translate('Đã hoàn tất bàn giao / chuyển đi cho cư dân.'));
         await fetchAllData();
       } else {
-        showToast(data?.message || translate('Lỗi khi ghi nhận rời phòng.'));
+        showToast(data?.message || translate('Lỗi khi ghi nhận chuyển đi.'));
       }
     } catch {
       showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
+  };
+
+  const executeDeleteResident = async (resId: string, purge: boolean = true) => {
+    try {
+      setLoading(true);
+      const url = `${API_BASE_URL}/management/residents/${resId}${purge ? '?purge=true' : ''}`;
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'bypass-tunnel-reminder': 'true',
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data?.success) {
+        showToast(data.message || translate('Đã xóa tài khoản cư dân thành công.'));
+        await fetchAllData();
+      } else {
+        showToast(data?.message || translate('Lỗi khi xóa tài khoản cư dân.'));
+      }
+    } catch {
+      showToast(translate('Không kết nối được server.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteResident = (resId: string, residentName: string) => {
+    const confirmMessage = translate(`Bạn có chắc chắn muốn xóa tài khoản của cư dân ${residentName}? Toàn bộ lịch sử sự cố và dữ liệu liên quan sẽ được lưu vết an toàn trong database.`);
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm && window.confirm(confirmMessage)) {
+        void executeDeleteResident(resId, true);
+      }
+      return;
+    }
+
+    Alert.alert(
+      translate('Xóa tài khoản cư dân'),
+      confirmMessage,
+      [
+        { text: translate('Hủy'), style: 'cancel' },
+        {
+          text: translate('Xóa'),
+          style: 'destructive',
+          onPress: () => {
+            void executeDeleteResident(resId, true);
+          },
+        },
+      ]
+    );
   };
 
 
@@ -2288,6 +2614,134 @@ function AppContent() {
         </AnimatedModalContent>
       </View></Modal>
   );
+
+  const refreshTechLocation = async (): Promise<{ latitude: number; longitude: number; accuracy: number } | null> => {
+    setTechGpsRefreshing(true);
+    try {
+      const loc = await getDeviceLocation();
+      if (loc) {
+        setTechLiveLocation(loc);
+        setTechLocationError(null);
+      } else {
+        setTechLocationError(translate('Chưa thể lấy vị trí GPS hoặc quyền định vị bị từ chối.'));
+      }
+      return loc;
+    } catch (err: any) {
+      setTechLocationError(err?.message || translate('Lỗi khi truy xuất GPS.'));
+      return null;
+    } finally {
+      setTechGpsRefreshing(false);
+    }
+  };
+
+  const renderTechGpsWidget = () => {
+    const buildingLat = Number(bmbBuildingLocation?.latitude ?? 10.7324);
+    const buildingLng = Number(bmbBuildingLocation?.longitude ?? 106.6992);
+    const allowedRadius = Number(bmbBuildingLocation?.allowedRadiusMeters ?? 300);
+
+    const latestAtt = myAttendanceLogs && myAttendanceLogs.length > 0 ? myAttendanceLogs[0] : null;
+    const latestGps = latestAtt?.checkInGps || null;
+
+    if (techLiveLocation) {
+      const dist = calculateDistanceMeters(
+        techLiveLocation.latitude,
+        techLiveLocation.longitude,
+        buildingLat,
+        buildingLng
+      );
+      const isWithin = dist <= allowedRadius;
+      const accuracy = techLiveLocation.accuracy;
+
+      return (
+        <View style={{ backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginVertical: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: '#0F172A' }}>
+                📍 {translate("Vị trí GPS của bạn:")}
+              </Text>
+              <View style={[
+                styles.statusPill,
+                isWithin ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+              ]}>
+                <Text style={[
+                  styles.statusPillText,
+                  isWithin ? { color: '#15803D' } : { color: '#B91C1C' }
+                ]}>
+                  {isWithin ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              onPress={() => void refreshTechLocation()}
+              disabled={techGpsRefreshing}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+            >
+              <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '600' }}>
+                {techGpsRefreshing ? translate('Đang cập nhật...') : '🔄 ' + translate('Cập nhật GPS')}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Tọa độ chi tiết Latitude & Longitude */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 6, alignItems: 'center' }}>
+            <Text style={{ fontSize: 12, color: '#334155' }}>
+              <Text style={{ fontWeight: '600', color: '#64748B' }}>Lat:</Text> {techLiveLocation.latitude.toFixed(6)}
+            </Text>
+            <Text style={{ fontSize: 12, color: '#334155' }}>
+              <Text style={{ fontWeight: '600', color: '#64748B' }}>Long:</Text> {techLiveLocation.longitude.toFixed(6)}
+            </Text>
+            <Text style={{ fontSize: 11.5, color: '#64748B' }}>
+              (±{accuracy}m)
+            </Text>
+          </View>
+
+          {/* Khoảng cách & Bán kính */}
+          <View style={{ marginTop: 4, flexWrap: 'wrap' }}>
+            <Text style={{ fontSize: 12, color: '#334155' }}>
+              {translate("Khoảng cách đến tòa nhà:")} <Text style={{ fontWeight: '800', color: isWithin ? '#16A34A' : '#DC2626' }}>~{dist}m</Text> • {translate("Giới hạn cho phép:")} ≤ {allowedRadius}m
+            </Text>
+          </View>
+
+          {/* Cảnh báo nếu độ chính xác kém */}
+          {accuracy > 100 && (
+            <View style={{ backgroundColor: '#FEF3C7', borderRadius: 6, padding: 6, marginTop: 6, borderWidth: 1, borderColor: '#FDE68A' }}>
+              <Text style={{ fontSize: 11, color: '#B45309', fontWeight: '600' }}>
+                ⚠️ {translate("Độ chính xác GPS thấp (±")}{accuracy}m {translate("> 100m). Vui lòng ra nơi thoáng đãng để định vị chuẩn xác hơn.")}
+              </Text>
+            </View>
+          )}
+
+          {latestGps && (
+            <Text style={{ fontSize: 11, color: '#64748B', marginTop: 4 }}>
+              🕒 {translate("Check-in gần nhất:")} {latestGps.latitude?.toFixed(4)}, {latestGps.longitude?.toFixed(4)} (~{latestGps.distanceMeters ?? latestGps.distanceToBuildingMeters ?? 0}m)
+            </Text>
+          )}
+        </View>
+      );
+    }
+
+    return (
+      <View style={{ backgroundColor: '#FFFBEB', borderRadius: 10, padding: 12, marginVertical: 8, borderWidth: 1, borderColor: '#FDE68A' }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+          <Text style={{ fontSize: 12, color: '#B45309', fontWeight: '600', flex: 1 }}>
+            ⚠️ {techLocationError || translate('Chưa xác định tọa độ GPS hoặc chưa được cấp quyền vị trí.')}
+          </Text>
+          <TouchableOpacity
+            onPress={() => void refreshTechLocation()}
+            disabled={techGpsRefreshing}
+            style={[styles.primaryActionBtn, { paddingVertical: 5, paddingHorizontal: 10, backgroundColor: '#EA580C' }]}
+          >
+            <Text style={[styles.primaryActionBtnText, { fontSize: 11.5 }]}>
+              {techGpsRefreshing ? translate('Đang lấy...') : '📍 ' + translate('Lấy GPS')}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={{ fontSize: 11, color: '#78350F', marginTop: 4 }}>
+          * {translate("Hệ thống yêu cầu vị trí GPS để đối soát bán kính điểm danh với tòa nhà (≤ 300m).")}
+        </Text>
+      </View>
+    );
+  };
 
   const handleTechSubmitOvertime = async () => {
     if (!otHoursInput || isNaN(Number(otHoursInput)) || Number(otHoursInput) <= 0) {
@@ -3331,7 +3785,7 @@ function AppContent() {
                     style={styles.technicianFormInput}
                     value={forgotOtp}
                     onChangeText={setForgotOtp}
-                    placeholder="123456"
+                    placeholder=""
                     keyboardType="numeric"
                     maxLength={6}
                   />
@@ -3399,99 +3853,249 @@ function AppContent() {
             </AnimatedModalContent>
           </View></Modal>
 
-        {/* Modal Kích hoạt tài khoản cư dân */}
+        {/* Modal Kích hoạt tài khoản Cư dân, Kỹ thuật viên & Ban Quản Lý */}
         <Modal
           visible={showActivationModal}
           transparent
           animationType="fade"
-          onRequestClose={() => setShowActivationModal(false)}
+          onRequestClose={() => {
+            setActivationError(null);
+            setActivationFieldErrors({});
+            setShowActivationModal(false);
+          }}
         >
           <View style={styles.technicianModalOverlay}>
-            <AnimatedModalContent visible={showActivationModal} style={styles.technicianModalCard}>
-              <Text style={styles.technicianModalTitle}>{translate('Kích hoạt tài khoản Cư dân')}</Text>
-              <Text style={styles.technicianModalDescription}>
-                {translate('Vui lòng nhập mã OTP đã nhận qua email và thiết lập mật khẩu bảo mật (từ 12 đến 128 ký tự).')}
-              </Text>
-
-              <View style={{ marginTop: 12 }}>
-                <Text style={styles.fieldLabel}>{translate('Địa chỉ Email *')}</Text>
-                <TextInput
-                  style={styles.technicianFormInput}
-                  value={activationEmail}
-                  onChangeText={setActivationEmail}
-                  placeholder="cu_dan@resifix.vn"
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                />
-
-                <Text style={[styles.fieldLabel, { marginTop: 10 }]}>{translate('Mã OTP 6 chữ số *')}</Text>
-                <TextInput
-                  style={styles.technicianFormInput}
-                  value={activationOtp}
-                  onChangeText={setActivationOtp}
-                  placeholder="123456"
-                  keyboardType="numeric"
-                  maxLength={6}
-                />
-
-                <Text style={[styles.fieldLabel, { marginTop: 10 }]}>
-                  {translate('Mật khẩu mới (12-128 ký tự) *')}
+            <AnimatedModalContent visible={showActivationModal} style={[styles.technicianModalCard, { maxHeight: '94%' }]}>
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: 10 }}
+              >
+                <Text style={styles.technicianModalTitle}>
+                  {activationRole === 'TECHNICIAN'
+                    ? translate('Kích hoạt tài khoản Kỹ thuật viên')
+                    : activationRole === 'RESIDENT'
+                    ? translate('Kích hoạt tài khoản Cư dân')
+                    : activationRole === 'BMB'
+                    ? translate('Kích hoạt tài khoản Ban Quản Lý')
+                    : translate('Kích hoạt tài khoản')}
                 </Text>
-                <TextInput
-                  style={styles.technicianFormInput}
-                  value={activationNewPassword}
-                  onChangeText={setActivationNewPassword}
-                  secureTextEntry
-                  placeholder="Nhập tối thiểu 12 ký tự"
-                />
 
-                <Text style={[styles.fieldLabel, { marginTop: 10 }]}>
-                  {translate('Xác nhận mật khẩu mới *')}
-                </Text>
-                <TextInput
-                  style={styles.technicianFormInput}
-                  value={activationConfirmPassword}
-                  onChangeText={setActivationConfirmPassword}
-                  secureTextEntry
-                  placeholder="Nhập lại mật khẩu mới"
-                />
-
-                <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', marginTop: 12 }}>
-                  <TouchableOpacity
-                    onPress={handleRequestActivationOtp}
-                    disabled={activationCooldown > 0 || activationBusy}
-                  >
-                    <Text style={{ fontSize: 13, color: activationCooldown > 0 ? '#94A3B8' : '#0284C7', fontWeight: '600' }}>
-                      {activationCooldown > 0
-                        ? `${translate('Gửi lại mã OTP sau')} (${activationCooldown}s)`
-                        : translate('Gửi lại mã OTP')}
+                {activationFullName ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, marginBottom: 4, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 13, color: '#0F172A', fontWeight: '700' }}>
+                      {translate('Tài khoản:')} {activationFullName}
                     </Text>
-                  </TouchableOpacity>
+                    {activationRole ? (
+                      <View style={[styles.statusPill, {
+                        backgroundColor:
+                          activationRole === 'TECHNICIAN' ? '#E0F2FE' :
+                          activationRole === 'BMB' ? '#F3E8FF' : '#DCFCE7'
+                      }]}>
+                        <Text style={[styles.statusPillText, {
+                          color:
+                            activationRole === 'TECHNICIAN' ? '#0369A1' :
+                            activationRole === 'BMB' ? '#7E22CE' : '#15803D',
+                          fontWeight: '700'
+                        }]}>
+                          {activationRole === 'TECHNICIAN' ? translate('Kỹ thuật viên') :
+                           activationRole === 'BMB' ? translate('Kích hoạt tài khoản Ban Quản Lý') : translate('Cư dân')}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {/* Email nhận mã OTP & Thời hạn */}
+                {activationEmail ? (
+                  <View style={{ backgroundColor: '#EFF6FF', borderRadius: 8, padding: 10, marginVertical: 6, borderWidth: 1, borderColor: '#BFDBFE' }}>
+                    <Text style={{ fontSize: 12, color: '#1E40AF', fontWeight: '500' }}>
+                      ✉️ {translate('Email nhận mã OTP:')} <Text style={{ fontWeight: '700' }}>{maskEmailString(activationEmail)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#3B82F6', marginTop: 2 }}>
+                      ⏱️ {translate('Thời gian hiệu lực OTP: 5 phút')}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {/* Badge trạng thái OTP */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 4 }}>
+                  <View style={[styles.statusPill, {
+                    backgroundColor:
+                      activationOtpStatus === 'SENT' ? '#DCFCE7' :
+                      activationOtpStatus === 'SENDING' ? '#E0F2FE' :
+                      activationOtpStatus === 'FAILED' ? '#FEE2E2' :
+                      activationOtpStatus === 'EXPIRED' ? '#FEF3C7' : '#F1F5F9'
+                  }]}>
+                    <Text style={[styles.statusPillText, {
+                      color:
+                        activationOtpStatus === 'SENT' ? '#15803D' :
+                        activationOtpStatus === 'SENDING' ? '#0369A1' :
+                        activationOtpStatus === 'FAILED' ? '#DC2626' :
+                        activationOtpStatus === 'EXPIRED' ? '#B45309' : '#475569',
+                      fontWeight: '700'
+                    }]}>
+                      {activationOtpStatus === 'SENT' ? ('🟢 ' + translate('Đã gửi OTP')) :
+                       activationOtpStatus === 'SENDING' ? ('🔄 ' + translate('Đang gửi OTP')) :
+                       activationOtpStatus === 'FAILED' ? ('🔴 ' + translate('Gửi OTP thất bại')) :
+                       activationOtpStatus === 'EXPIRED' ? ('⚠️ ' + translate('OTP hết hạn')) :
+                       ('⚪ ' + translate('Chưa gửi OTP'))}
+                    </Text>
+                  </View>
                 </View>
 
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
-                  <TouchableOpacity
-                    style={[styles.technicianCancelButton, { flex: 1 }]}
-                    onPress={() => setShowActivationModal(false)}
-                    disabled={activationBusy}
-                  >
-                    <Text style={styles.technicianCancelButtonText}>{translate('Hủy')}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.bmbWebLoginBtn, { flex: 2 }, activationBusy && { opacity: 0.6 }]}
-                    onPress={handleActivateAccount}
-                    disabled={activationBusy}
-                  >
-                    {activationBusy ? (
-                      <ActivityIndicator color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.bmbWebLoginBtnText}>{translate('Kích hoạt ngay')}</Text>
-                    )}
-                  </TouchableOpacity>
+                <Text style={[styles.technicianModalDescription, { marginTop: 4 }]}>
+                  {translate('Vui lòng nhập mã OTP đã nhận qua email và thiết lập mật khẩu bảo mật (từ 6 đến 128 ký tự).')}
+                </Text>
+
+                <View style={{ marginTop: 10 }}>
+                  <Text style={styles.fieldLabel}>{translate('Địa chỉ Email *')}</Text>
+                  <TextInput
+                    style={styles.technicianFormInput}
+                    value={activationEmail}
+                    onChangeText={(val) => {
+                      setActivationError(null);
+                      setActivationFieldErrors((prev) => ({ ...prev, email: undefined }));
+                      setActivationEmail(val);
+                    }}
+                    placeholder={activationRole === 'TECHNICIAN' ? 'ky_thuat_vien@resifix.vn' : activationRole === 'RESIDENT' ? 'cu_dan@resifix.vn' : 'email@resifix.vn'}
+                    keyboardType="email-address"
+                    autoCapitalize="none"
+                  />
+                  {activationFieldErrors.email ? (
+                    <Text style={[styles.technicianFormError, { marginTop: 4 }]}>{activationFieldErrors.email}</Text>
+                  ) : null}
+
+                  <Text style={[styles.fieldLabel, { marginTop: 10 }]}>{translate('Mã OTP 6 chữ số *')}</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                    <TextInput
+                      style={[styles.technicianFormInput, { flex: 1, letterSpacing: 2, fontWeight: '700' }]}
+                      value={activationOtp}
+                      onChangeText={(val) => {
+                        setActivationError(null);
+                        setActivationFieldErrors((prev) => ({ ...prev, otp: undefined }));
+                        setActivationOtp(val);
+                      }}
+                      placeholder=""
+                      keyboardType="numeric"
+                      maxLength={6}
+                    />
+                    <TouchableOpacity
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 10,
+                        borderRadius: 8,
+                        backgroundColor: activationCooldown > 0 || activationBusy ? '#F1F5F9' : '#E0F2FE',
+                        borderWidth: 1,
+                        borderColor: activationCooldown > 0 || activationBusy ? '#E2E8F0' : '#BAE6FD',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      onPress={handleRequestActivationOtp}
+                      disabled={activationCooldown > 0 || activationBusy}
+                    >
+                      <Text style={{ fontSize: 12, color: activationCooldown > 0 ? '#94A3B8' : '#0369A1', fontWeight: '700' }}>
+                        {activationCooldown > 0
+                          ? `${translate('Gửi lại sau')} (${activationCooldown}s)`
+                          : activationOtpStatus === 'SENT' ? translate('Gửi lại mã OTP') : translate('Gửi mã kích hoạt')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {activationFieldErrors.otp ? (
+                    <Text style={[styles.technicianFormError, { marginTop: 4 }]}>{activationFieldErrors.otp}</Text>
+                  ) : null}
+
+                  <Text style={[styles.fieldLabel, { marginTop: 10 }]}>
+                    {translate('Mật khẩu mới (từ 6-128 ký tự) *')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', position: 'relative' }}>
+                    <TextInput
+                      style={[styles.technicianFormInput, { flex: 1, paddingRight: 48 }]}
+                      value={activationNewPassword}
+                      onChangeText={(val) => {
+                        setActivationError(null);
+                        setActivationFieldErrors((prev) => ({ ...prev, password: undefined }));
+                        setActivationNewPassword(val);
+                      }}
+                      secureTextEntry={!showActivationNewPass}
+                      placeholder="Nhập tối thiểu 6 ký tự"
+                    />
+                    <TouchableOpacity
+                      onPress={() => setShowActivationNewPass(!showActivationNewPass)}
+                      style={{ position: 'absolute', right: 10, padding: 6 }}
+                    >
+                      <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
+                        {showActivationNewPass ? translate('Ẩn') : translate('Hiện')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {activationFieldErrors.password ? (
+                    <Text style={[styles.technicianFormError, { marginTop: 4 }]}>{activationFieldErrors.password}</Text>
+                  ) : null}
+
+                  <Text style={[styles.fieldLabel, { marginTop: 10 }]}>
+                    {translate('Xác nhận mật khẩu mới *')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', position: 'relative' }}>
+                    <TextInput
+                      style={[styles.technicianFormInput, { flex: 1, paddingRight: 48 }]}
+                      value={activationConfirmPassword}
+                      onChangeText={(val) => {
+                        setActivationError(null);
+                        setActivationFieldErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                        setActivationConfirmPassword(val);
+                      }}
+                      secureTextEntry={!showActivationConfirmPass}
+                      placeholder="Nhập lại mật khẩu mới"
+                    />
+                    <TouchableOpacity
+                      onPress={() => setShowActivationConfirmPass(!showActivationConfirmPass)}
+                      style={{ position: 'absolute', right: 10, padding: 6 }}
+                    >
+                      <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
+                        {showActivationConfirmPass ? translate('Ẩn') : translate('Hiện')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {activationFieldErrors.confirmPassword ? (
+                    <Text style={[styles.technicianFormError, { marginTop: 4 }]}>{activationFieldErrors.confirmPassword}</Text>
+                  ) : null}
+
+                  {activationError && !Object.values(activationFieldErrors).some(Boolean) ? (
+                    <View style={{ backgroundColor: '#FEE2E2', borderRadius: 8, padding: 10, marginTop: 12, borderWidth: 1, borderColor: '#FCA5A5' }}>
+                      <Text style={[styles.technicianFormError, { color: '#B91C1C', marginTop: 0 }]}>{activationError}</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
+                    <TouchableOpacity
+                      style={[styles.technicianCancelButton, { flex: 1 }]}
+                      onPress={() => {
+                        setActivationError(null);
+                        setActivationFieldErrors({});
+                        setShowActivationModal(false);
+                      }}
+                      disabled={activationBusy}
+                    >
+                      <Text style={styles.technicianCancelButtonText}>{translate('Quay lại đăng nhập')}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.bmbWebLoginBtn, { flex: 2 }, activationBusy && { opacity: 0.6 }]}
+                      onPress={handleActivateAccount}
+                      disabled={activationBusy}
+                    >
+                      {activationBusy ? (
+                        <ActivityIndicator color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.bmbWebLoginBtnText}>{translate('Kích hoạt và tiếp tục')}</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              </View>
+              </ScrollView>
             </AnimatedModalContent>
-          </View></Modal>
+          </View>
+        </Modal>
       </>
     );
 
@@ -3557,39 +4161,9 @@ function AppContent() {
             {/* Cột phải màu trắng */}
             <View style={styles.bmbLoginRightWhite}>
               <Text style={styles.bmbLoginFormHeading}>{translate("Đăng nhập")}</Text>
-
-              <View style={[styles.loginRoleSelectorRow, { marginBottom: 14 }]}>
-                {[
-                  { key: 'BMB', label: 'BMB / Admin' },
-                  { key: 'TECHNICIAN', label: 'Kỹ thuật viên' },
-                  { key: 'RESIDENT', label: 'Cư dân' },
-                ].map((r) => (
-                  <TouchableOpacity
-                    key={r.key}
-                    style={[
-                      styles.loginRoleChip,
-                      selectedLoginRole === r.key && styles.loginRoleChipActive,
-                    ]}
-                    onPress={() => {
-                      setSelectedLoginRole(r.key as any);
-                      if (r.key === 'BMB') {
-                        setLoginMode('BMB_WEB');
-                        setPhoneInput('myhanh.bmb@resifix.vn');
-                      } else if (r.key === 'TECHNICIAN') {
-                        setLoginMode('MOBILE');
-                        setPhoneInput('0356166863');
-                      } else {
-                        setLoginMode('MOBILE');
-                        setPhoneInput('0905123456');
-                      }
-                    }}
-                  >
-                    <Text style={[styles.loginRoleChipText, selectedLoginRole === r.key && styles.loginRoleChipTextActive]}>
-                      {translate(r.label)}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+              <Text style={[styles.loginCardSub, { marginBottom: 16 }]}>
+                {translate("Hệ thống tự động nhận diện vai trò Ban Quản Lý (BMB), Kỹ thuật viên hoặc Cư dân.")}
+              </Text>
 
               {toastMsg && (
                 <View style={[styles.toastBanner, { marginHorizontal: 0, marginBottom: 12 }]}>
@@ -3601,20 +4175,46 @@ function AppContent() {
               <TextInput
                 style={styles.bmbWebInput}
                 value={phoneInput}
-                onChangeText={setPhoneInput}
+                onChangeText={(val) => {
+                  setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
+                  setPhoneInput(val);
+                }}
                 placeholder="myhanh.bmb@resifix.vn"
                 placeholderTextColor="#94A3B8"
               />
+              {loginFieldErrors.identifier ? (
+                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                  {loginFieldErrors.identifier}
+                </Text>
+              ) : null}
 
               <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
-              <TextInput
-                style={styles.bmbWebInput}
-                value={passwordInput}
-                onChangeText={setPasswordInput}
-                secureTextEntry
-                placeholder="••••••••••"
-                placeholderTextColor="#94A3B8"
-              />
+              <View style={{ flexDirection: 'row', alignItems: 'center', position: 'relative' }}>
+                <TextInput
+                  style={[styles.bmbWebInput, { flex: 1, paddingRight: 48 }]}
+                  value={passwordInput}
+                  onChangeText={(val) => {
+                    setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
+                    setPasswordInput(val);
+                  }}
+                  secureTextEntry={!showBmbWebPassword}
+                  placeholder="••••••••••"
+                  placeholderTextColor="#94A3B8"
+                />
+                <TouchableOpacity
+                  onPress={() => setShowBmbWebPassword(!showBmbWebPassword)}
+                  style={{ position: 'absolute', right: 12, padding: 6 }}
+                >
+                  <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
+                    {showBmbWebPassword ? translate('Ẩn') : translate('Hiện')}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              {loginFieldErrors.password ? (
+                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                  {loginFieldErrors.password}
+                </Text>
+              ) : null}
 
               <View style={[styles.rowBetween, { marginTop: 14, marginBottom: 16 }]}>
                 <TouchableOpacity
@@ -3643,10 +4243,17 @@ function AppContent() {
 
                   <TouchableOpacity
                     onPress={() => {
-                      setActivationEmail(phoneInput.includes('@') ? phoneInput : '');
+                      setActivationRole(null);
+                      setActivationFullName('');
+                      setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
                       setActivationOtp('');
                       setActivationNewPassword('');
                       setActivationConfirmPassword('');
+                      setActivationError(null);
+                      setActivationFieldErrors({});
+                      setActivationCooldown(0);
+                      setActivationBusy(false);
+                      setActivationOtpStatus('IDLE');
                       setShowActivationModal(true);
                     }}
                   >
@@ -3669,24 +4276,15 @@ function AppContent() {
                 )}
               </TouchableOpacity>
 
-              {/* Thanh chuyển nhanh sang giao diện Mobile App để tiện Demo trên cùng 1 máy */}
-              <View style={[styles.demoSwitchRow, { marginTop: 20 }]}>
+              {/* Chuyển đổi linh hoạt giữa giao diện Web và Mobile khi thử nghiệm trên trình duyệt */}
+              <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 20 }]}>
                 <TouchableOpacity
-                  style={styles.demoChip}
+                  style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
                   onPress={() => {
                     setLoginMode('MOBILE');
                   }}
                 >
-                  <Text style={styles.demoChipText}>{translate("Xem giao diện Mobile")}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.demoChip}
-                  onPress={() => {
-                    setPhoneInput('myhanh.bmb@resifix.vn');
-                    handleLogin('myhanh.bmb@resifix.vn', '123456');
-                  }}
-                >
-                  <Text style={styles.demoChipText}>{translate("Vào nhanh BMB Web")}</Text>
+                  <Text style={styles.demoChipText}>📱 {translate("Chuyển sang giao diện Mobile App")}</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -3723,61 +4321,39 @@ function AppContent() {
             <View style={styles.loginCard}>
               <Text style={styles.loginCardTitle}>{translate("Đăng nhập tài khoản")}</Text>
 
-              <View style={[styles.loginRoleSelectorRow, { marginBottom: 14 }]}>
-                {[
-                  { key: 'RESIDENT', label: 'Cư dân' },
-                  { key: 'TECHNICIAN', label: 'Kỹ thuật viên' },
-                  { key: 'BMB', label: 'BMB / Admin' },
-                ].map((r) => (
-                  <TouchableOpacity
-                    key={r.key}
-                    style={[
-                      styles.loginRoleChip,
-                      selectedLoginRole === r.key && styles.loginRoleChipActive,
-                    ]}
-                    onPress={() => {
-                      setSelectedLoginRole(r.key as any);
-                      if (r.key === 'BMB') {
-                        setLoginMode('BMB_WEB');
-                        setPhoneInput('myhanh.bmb@resifix.vn');
-                      } else if (r.key === 'TECHNICIAN') {
-                        setLoginMode('MOBILE');
-                        setPhoneInput('0356166863');
-                      } else {
-                        setLoginMode('MOBILE');
-                        setPhoneInput('0905123456');
-                      }
-                    }}
-                  >
-                    <Text style={[styles.loginRoleChipText, selectedLoginRole === r.key && styles.loginRoleChipTextActive]}>
-                      {translate(r.label)}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
               <Text style={styles.loginCardSub}>
-                {translate("Sử dụng số điện thoại đã đăng ký với Ban quản lý tòa nhà")}</Text>
+                {translate("Nhập Số điện thoại hoặc Email. Hệ thống tự động nhận diện vai trò Cư dân, Kỹ thuật viên hoặc Ban Quản Lý.")}
+              </Text>
 
-              <Text style={styles.fieldLabel}>{translate("Số điện thoại *")}</Text>
+              <Text style={styles.fieldLabel}>{translate("Số điện thoại hoặc Email *")}</Text>
               <View style={styles.inputWrapper}>
                 <TextInput
                   style={styles.textInputField}
                   value={phoneInput}
-                  onChangeText={(val) => setPhoneInput(val.replace(/[^\d]/g, '').slice(0, 10))}
-                  placeholder="0905 xxx xxx"
+                  onChangeText={(val) => {
+                    setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
+                    setPhoneInput(val);
+                  }}
+                  placeholder="0905 xxx xxx hoặc email@domain.com"
                   placeholderTextColor="#94A3B8"
-                  keyboardType="phone-pad"
-                  maxLength={10}
+                  autoCapitalize="none"
                 />
               </View>
+              {loginFieldErrors.identifier ? (
+                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                  {loginFieldErrors.identifier}
+                </Text>
+              ) : null}
 
               <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
               <View style={styles.inputWrapper}>
                 <TextInput
                   style={styles.textInputField}
                   value={passwordInput}
-                  onChangeText={setPasswordInput}
+                  onChangeText={(val) => {
+                    setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
+                    setPasswordInput(val);
+                  }}
                   secureTextEntry={!showPassword}
                   placeholder="••••••••"
                   placeholderTextColor="#94A3B8"
@@ -3786,6 +4362,11 @@ function AppContent() {
                   <Text style={styles.eyeIconText}>{showPassword ? translate('Ẩn') : translate('Hiện')}</Text>
                 </TouchableOpacity>
               </View>
+              {loginFieldErrors.password ? (
+                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                  {loginFieldErrors.password}
+                </Text>
+              ) : null}
 
               <View style={styles.rememberRow}>
                 <TouchableOpacity
@@ -3813,10 +4394,17 @@ function AppContent() {
 
               <TouchableOpacity
                 onPress={() => {
-                  setActivationEmail(phoneInput.includes('@') ? phoneInput : '');
+                  setActivationRole(null);
+                  setActivationFullName('');
+                  setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
                   setActivationOtp('');
                   setActivationNewPassword('');
                   setActivationConfirmPassword('');
+                  setActivationError(null);
+                  setActivationFieldErrors({});
+                  setActivationCooldown(0);
+                  setActivationBusy(false);
+                  setActivationOtpStatus('IDLE');
                   setShowActivationModal(true);
                 }}
                 style={{ marginTop: 2, marginBottom: 16, alignItems: 'center' }}
@@ -3839,41 +4427,16 @@ function AppContent() {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.demoSwitchRow}>
-              <TouchableOpacity
-                style={styles.demoChip}
-                onPress={() => {
-                  setSelectedLoginRole('RESIDENT');
-                  setLoginMode('MOBILE');
-                  setPhoneInput('0905123456');
-                  handleLogin('0905123456', '123456');
-                }}
-              >
-                <Text style={styles.demoChipText}>Cư dân A-1204</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.demoChip}
-                onPress={() => {
-                  setSelectedLoginRole('TECHNICIAN');
-                  setLoginMode('MOBILE');
-                  setPhoneInput('0356166863');
-                  handleLogin('0356166863', '123456');
-                }}
-              >
-                <Text style={styles.demoChipText}>KTV Nam</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.demoChip}
-                onPress={() => {
-                  setSelectedLoginRole('BMB');
-                  setLoginMode('BMB_WEB');
-                  setPhoneInput('myhanh.bmb@resifix.vn');
-                  handleLogin('myhanh.bmb@resifix.vn', '123456');
-                }}
-              >
-                <Text style={styles.demoChipText}>BMB Web</Text>
-              </TouchableOpacity>
-            </View>
+            {Platform.OS === 'web' && (
+              <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 16 }]}>
+                <TouchableOpacity
+                  style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
+                  onPress={() => setLoginMode('BMB_WEB')}
+                >
+                  <Text style={styles.demoChipText}>🖥️ {translate("Chuyển sang giao diện BMB Web")}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         </ScrollView>
         {renderAuthModals()}
@@ -3937,7 +4500,7 @@ function AppContent() {
                 <View style={{ flex: 1, paddingRight: 8 }}>
                   <Text style={styles.aptSmallLabel}>{translate("Thông tin căn hộ")}</Text>
                   <Text style={styles.aptBigTitle}>
-                    Căn hộ {user.apartmentCode || 'A-1204'} • {user.buildingBlock || 'Tòa S1'}
+                    Căn hộ {user.apartmentCode || '---'} • {user.buildingBlock || '---'}
                   </Text>
                 </View>
                 <View style={styles.rowCenter}>
@@ -3975,20 +4538,40 @@ function AppContent() {
 
               <View style={styles.ctaHeroCard}>
                 <View style={styles.ctaTitleRow}>
-                  <Text style={styles.ctaHeroTitle}>{translate("Phát hiện sự cố tòa nhà?")}</Text>
+                  <Text style={styles.ctaHeroTitle}>{translate("Cần sửa chữa thiết bị trong căn hộ?")}</Text>
                 </View>
                 <Text style={styles.ctaHeroDesc}>
-                  {translate("Báo cáo nhanh sự cố với hình ảnh hiện trường hoặc quét mã QR thiết bị.")}</Text>
+                  {translate("Chụp ảnh hoặc quét mã QR để Ban Quản Lý tiếp nhận và cử thợ đến hỗ trợ nhanh chóng.")}
+                </Text>
                 <TouchableOpacity
                   style={styles.ctaPrimaryBtn}
                   onPress={() => setResScreen('CREATE_REPORT')}
                 >
-                  <Text style={styles.ctaPrimaryBtnText}>{translate("+ Báo cáo sự cố")}</Text>
+                  <Text style={styles.ctaPrimaryBtnText}>📸 {translate("+ Gửi yêu cầu sửa chữa mới")}</Text>
                 </TouchableOpacity>
+
+                {/* Thanh tiến trình 4 bước đơn giản, thân thiện với người không biết IT */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(37, 99, 235, 0.15)' }}>
+                  <View style={{ alignItems: 'center', flex: 1 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>1. {translate("Gửi ảnh")}</Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                  <View style={{ alignItems: 'center', flex: 1 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>2. {translate("Tiếp nhận")}</Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                  <View style={{ alignItems: 'center', flex: 1 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>3. {translate("Sửa chữa")}</Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                  <View style={{ alignItems: 'center', flex: 1 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>4. {translate("Nghiệm thu")}</Text>
+                  </View>
+                </View>
               </View>
 
               <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitleText}>{translate("Sự cố của tôi")}</Text>
+                <Text style={styles.sectionTitleText}>{translate("Yêu cầu sửa chữa của tôi")}</Text>
                 <TouchableOpacity onPress={() => setResScreen('HISTORY')}>
                   <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
                 </TouchableOpacity>
@@ -4133,7 +4716,7 @@ function AppContent() {
                     ) : (
                       <View style={styles.cardFooterGrayBar}>
                         <Text style={styles.cardFooterGrayText}>
-                          KTV: {t.assignedTech?.fullName || 'Đặng Văn Nam'} • 15 phút trước
+                          KTV: {t.assignedTech?.fullName || translate('Chưa phân công')} • {translate('15 phút trước')}
                         </Text>
                       </View>
                     )}
@@ -4154,10 +4737,13 @@ function AppContent() {
                   <TouchableOpacity onPress={() => setResScreen('HOME')}>
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle}>{translate("Tạo báo cáo sự cố")}</Text>
+                  <Text style={styles.subScreenTitle}>{translate("Gửi yêu cầu sửa chữa")}</Text>
                 </View>
 
-                <Text style={styles.stepTitle}>{translate("1. Vị trí & Thiết bị gặp sự cố *")}</Text>
+                <Text style={styles.stepTitle}>{translate("1. Vị trí & Khu vực gặp sự cố *")}</Text>
+                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                  {translate("Quét mã QR dán tại thiết bị hoặc khu vực để xác nhận vị trí chính xác.")}
+                </Text>
                 <TouchableOpacity
                   style={styles.qrDashedBtn}
                   onPress={() => setQrModalVisible(true)}
@@ -4188,7 +4774,10 @@ function AppContent() {
                   </View>
                 )}
 
-                <Text style={styles.stepTitle}>2. Hình ảnh hiện trường (Tối đa 3 ảnh)</Text>
+                <Text style={styles.stepTitle}>{translate("2. Hình ảnh hiện trường (Tối đa 3 ảnh)")}</Text>
+                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                  {translate("Chụp rõ vị trí hư hỏng để kỹ thuật viên chuẩn bị sẵn linh kiện và đồ nghề.")}
+                </Text>
                 <View style={styles.photoGridRow}>
                   {reportPhotos.map((item, idx) => (
                     <View key={idx} style={styles.photoSlotCard}>
@@ -4233,7 +4822,10 @@ function AppContent() {
                   )}
                 </View>
 
-                <Text style={styles.stepTitle}>{translate("3. Mô tả sự cố *")}</Text>
+                <Text style={styles.stepTitle}>{translate("3. Mô tả chi tiết sự cố *")}</Text>
+                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                  {translate("Mô tả hiện tượng sự cố (ví dụ: bồn rửa rỉ nước, quạt thông gió kêu to, đèn không sáng...)")}
+                </Text>
                 <View style={styles.descBoxContainer}>
                   <TextInput
                     style={styles.descTextArea}
@@ -4285,7 +4877,7 @@ function AppContent() {
                   {loading ? (
                     <ActivityIndicator color="#FFF" />
                   ) : (
-                    <Text style={styles.loginSubmitText}>{translate("Gửi báo cáo sự cố")}</Text>
+                    <Text style={styles.loginSubmitText}>🚀 {translate("Gửi yêu cầu sửa chữa ngay")}</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -4325,7 +4917,7 @@ function AppContent() {
                     <View style={[styles.timelineDot, { backgroundColor: '#16A34A' }]} />
                     <Text style={[styles.timelineText, { color: '#15803D', fontWeight: '700' }]}>
                       10:30 - Hoàn thành sửa chữa (KTV{' '}
-                      {activeTicket.assignedTech?.fullName || 'Đặng Văn Nam'} đã gửi ảnh)
+                      {activeTicket.assignedTech?.fullName || translate('Kỹ thuật viên')} đã gửi ảnh)
                     </Text>
                   </View>
                   <View style={styles.timelineLine} />
@@ -4797,26 +5389,56 @@ function AppContent() {
                 </View>
               </View>
 
-              <TouchableOpacity
-                activeOpacity={0.85}
-                style={styles.techDutyCard}
-                onPress={handleToggleOnDuty}
-                disabled={dutyUpdating}
-              >
+              {/* Thẻ Điểm danh & Trạng thái Ca trực (Chấm công GPS + Camera) */}
+              <View style={styles.whiteSectionCard}>
                 <View style={styles.cardTopRow}>
-                  <Text style={styles.techDutyTitle}>
-                    {translate("Trạng thái ca trực")}
-                  </Text>
-                  <View style={[styles.statusPill, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#F1F5F9' }]}>
-                    <Text style={[styles.statusPillText, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { color: '#15803D' } : { color: '#64748B' }]}>
-                      {dutyUpdating ? translate('Đang cập nhật...') : (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? translate('Đang trực') : translate('Ngoài ca')}
+                  <View>
+                    <Text style={styles.sectionTitleText}>{translate("Điểm danh & Chấm công ca trực")}</Text>
+                    <Text style={[styles.cardLocationText, { marginTop: 2 }]}>
+                      ⏰ {translate("Giờ chuẩn:")} {new Date().toLocaleDateString('vi-VN')} • Ca: {user.shiftName || '07:00 - 15:00'}
                     </Text>
                   </View>
+                  <TouchableOpacity
+                    style={[styles.statusPill, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#F1F5F9' }]}
+                    onPress={handleToggleOnDuty}
+                    disabled={dutyUpdating}
+                  >
+                    <Text style={[styles.statusPillText, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { color: '#15803D' } : { color: '#64748B' }]}>
+                      {dutyUpdating ? translate('Đang cập nhật...') : (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? '● ' + translate('Đang trực') : '○ ' + translate('Ngoài ca')}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-                <Text style={styles.techDutySub}>
-                  {translate("Sự cố cần xử lý:")} {assignedCount + inProgressCount} • {translate("Đã hoàn thành:")} {completedCount}
-                </Text>
-              </TouchableOpacity>
+
+                {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
+                {renderTechGpsWidget()}
+
+                {/* 2 Nút Điểm danh To Rõ 46px */}
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                  <TouchableOpacity
+                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', height: 46, borderRadius: 10 }]}
+                    onPress={handleTechCheckIn}
+                    disabled={loading}
+                  >
+                    <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🟢 {translate("Bắt đầu ca làm (Check-in)")}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', height: 46, borderRadius: 10 }]}
+                    onPress={handleTechCheckOut}
+                    disabled={loading}
+                  >
+                    <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🔴 {translate("Kết thúc ca làm (Check-out)")}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={[styles.cardTopRow, { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#F1F5F9' }]}>
+                  <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
+                    {translate("Sự cố cần xử lý:")} <Text style={{ fontWeight: '700', color: '#0F172A' }}>{assignedCount + inProgressCount}</Text> • {translate("Đã xong:")} <Text style={{ fontWeight: '700', color: '#16A34A' }}>{completedCount}</Text>
+                  </Text>
+                  <TouchableOpacity onPress={() => setTechScreen('PAYROLL')}>
+                    <Text style={styles.seeHistoryLink}>{translate("Bảng lương & Lịch sử >")}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
 
               <View style={styles.sectionHeaderRow}>
                 <Text style={styles.sectionTitleText}>{translate("Công việc được giao")}</Text>
@@ -5017,11 +5639,11 @@ function AppContent() {
                 <View style={styles.whiteSectionCard}>
                   <Text style={styles.cardBlockTitle}>{translate("Thông tin kỹ thuật")}</Text>
                   <Text style={styles.techInfoLine}>
-                    {translate("Vị trí:")} {activeTicket.locationNote || 'Căn hộ A-1204 (Tòa S1 - Tầng 12)'}
+                    {translate("Vị trí:")} {activeTicket.locationNote || translate('Vị trí sự cố')}
                   </Text>
                   <Text style={styles.techInfoLine}>
                     {translate("Mã thiết bị:")}{' '}
-                    {activeTicket.asset?.qrCode || 'WP-1204 - Đường ống bồn rửa'}
+                    {activeTicket.asset?.qrCode || '---'}
                   </Text>
                   <Text style={[styles.techInfoLine, { marginBottom: 0 }]}>
                     {translate("Độ ưu tiên:")} {translate(PRIORITY_VN[activeTicket.finalPriority || activeTicket.aiSuggestedPriority] || 'Bình thường')} • {translate("Danh mục:")}{' '}
@@ -5499,6 +6121,9 @@ function AppContent() {
                   {translate("Thời gian chuẩn máy chủ:")} {new Date().toLocaleDateString('vi-VN')}
                 </Text>
 
+                {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
+                {renderTechGpsWidget()}
+
                 <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
                   <TouchableOpacity
                     style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A' }]}
@@ -5602,10 +6227,35 @@ function AppContent() {
                             </Text>
 
                             {log.checkInGps && (
-                              <Text style={[styles.cardLocationText, { fontSize: 11.5, marginTop: 2 }]}>
-                                📍 Check-in cách tòa nhà: ~{log.checkInGps.distanceMeters}m (±{log.checkInGps.accuracy}m)
-                                {log.checkInGps.isWithinAllowedRadius ? ' • Trong bán kính hợp lệ' : ' • ⚠️ Ngoài bán kính 300m'}
-                              </Text>
+                              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, marginTop: 6, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <Text style={{ fontSize: 11.5, color: '#0F172A', fontWeight: '600' }}>
+                                  📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
+                                </Text>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                                  <Text style={{ fontSize: 11.5, color: '#334155' }}>
+                                    Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                  </Text>
+                                  <View style={[
+                                    styles.statusPill,
+                                    (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.statusPillText,
+                                      (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                    ]}>
+                                      {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
+                                    </Text>
+                                  </View>
+                                  <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                    (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
+                                  </Text>
+                                </View>
+                                {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
+                                  <Text style={{ fontSize: 11, color: '#D97706', marginTop: 2 }}>
+                                    ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
+                                  </Text>
+                                )}
+                              </View>
                             )}
 
                             {log.anomalyNotes && (
@@ -6163,7 +6813,7 @@ function AppContent() {
 
   return (
     <SafeAreaView style={styles.bmbWebRoot}>
-      <View style={styles.bmbDesktopLayout}>
+      <View style={[styles.bmbDesktopLayout, isMobileLayout && { flexDirection: 'column' }]}>
         {dataLoadError && (
           <TouchableOpacity
             style={[styles.toastBanner, { position: 'absolute', zIndex: 100, top: 8, right: 8 }]}
@@ -6175,7 +6825,83 @@ function AppContent() {
         {/* ==================================================================== */}
         {/* CỘT 1: SIDEBAR TRÁI CỐ ĐỊNH CHUẨN FIGMA BMB 01, 02, 03               */}
         {/* ==================================================================== */}
-        <View style={styles.bmbSidebar}>
+        {isMobileLayout ? (
+          /* THANH ĐIỀU HƯỚNG TRÊN CÙNG & TAB CUỘN NGANG CHO MOBILE / MÀN HÌNH HẸP */
+          <View style={{ backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', paddingHorizontal: 16, paddingTop: 10, paddingBottom: 8, zIndex: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <ResiFixLogoMark size={24} />
+                <Text style={{ fontSize: 16, fontWeight: '800', color: '#2563EB', letterSpacing: -0.3 }}>ResiFix BMB</Text>
+                <View style={{ backgroundColor: '#EFF6FF', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                  <Text style={{ fontSize: 11, color: '#1D4ED8', fontWeight: '700' }}>Admin</Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                onPress={handleLogout}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#FEE2E2' }}
+              >
+                <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#DC2626' }}>🚪 {translate('Đăng xuất')}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingTop: 10, paddingBottom: 2 }}>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'TICKETS' && { backgroundColor: '#2563EB' }]}
+                onPress={() => setBmbNavTab('TICKETS')}
+              >
+                <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'TICKETS' && { color: '#FFFFFF', fontWeight: '700' }]}>📋 {translate('Sự cố')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'TECHNICIANS' && { backgroundColor: '#2563EB' }]}
+                onPress={() => setBmbNavTab('TECHNICIANS')}
+              >
+                <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'TECHNICIANS' && { color: '#FFFFFF', fontWeight: '700' }]}>👷 {translate('Kỹ thuật viên')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'APARTMENTS' && { backgroundColor: '#2563EB' }]}
+                onPress={() => setBmbNavTab('APARTMENTS')}
+              >
+                <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'APARTMENTS' && { color: '#FFFFFF', fontWeight: '700' }]}>🏢 {translate('Căn hộ & Cư dân')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'ATTENDANCE' && { backgroundColor: '#2563EB' }]}
+                onPress={() => {
+                  setBmbNavTab('ATTENDANCE');
+                  void fetchBmbAttendance();
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'ATTENDANCE' && { color: '#FFFFFF', fontWeight: '700' }]}>📍 {translate('Chấm công')}</Text>
+                  {bmbAttendanceStats.pendingReviewCount > 0 && (
+                    <View style={{ backgroundColor: '#EF4444', borderRadius: 8, paddingHorizontal: 5, paddingVertical: 1 }}>
+                      <Text style={{ color: '#FFFFFF', fontSize: 10, fontWeight: '700' }}>{bmbAttendanceStats.pendingReviewCount}</Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'PAYROLL' && { backgroundColor: '#2563EB' }]}
+                onPress={() => setBmbNavTab('PAYROLL')}
+              >
+                <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'PAYROLL' && { color: '#FFFFFF', fontWeight: '700' }]}>💰 {translate('Tính lương')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, backgroundColor: '#F1F5F9' }, bmbNavTab === 'NOTIFICATIONS' && { backgroundColor: '#2563EB' }]}
+                onPress={() => setBmbNavTab('NOTIFICATIONS')}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Text style={[{ fontSize: 12, fontWeight: '600', color: '#475569' }, bmbNavTab === 'NOTIFICATIONS' && { color: '#FFFFFF', fontWeight: '700' }]}>🔔 {translate('Thông báo')}</Text>
+                  {unreadCount > 0 && (
+                    <View style={{ backgroundColor: '#EF4444', borderRadius: 8, paddingHorizontal: 5, paddingVertical: 1 }}>
+                      <Text style={{ color: '#FFFFFF', fontSize: 10, fontWeight: '700' }}>{unreadCount}</Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        ) : (
+          <View style={styles.bmbSidebar}>
           <ScrollView
             style={styles.bmbSidebarNavigation}
             contentContainerStyle={{ paddingBottom: 8 }}
@@ -6361,16 +7087,18 @@ function AppContent() {
             </View>
           </View>
         </View>
+        )}
 
         {/* ==================================================================== */}
         {/* MÀN HÌNH 01 BMB: QUẢN LÝ SỰ CỐ (DANH SÁCH GIỮA + CHI TIẾT AI PHẢI)   */}
         {/* ==================================================================== */}
-        <ScreenTransition transitionKey={bmbNavTab} style={{ flex: 1, flexDirection: 'row' }}>
+        <ScreenTransition transitionKey={bmbNavTab} style={{ flex: 1, flexDirection: isMobileLayout ? 'column' : 'row' }}>
         {bmbNavTab === 'TICKETS' && (
-          <View style={styles.bmbContentTwoCols}>
-            {/* CỘT GIỮA: DANH SÁCH SỰ CỐ TÒA NHÀ */}
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+            {/* CỘT GIỮA: DANH SÁCH SỰ CỐ TÒA NHÀ - HIỂN THỊ KHI DESKTOP HOẶC CHƯA CHỌN TICKET */}
+            {(!isMobileLayout || !bmbSelectedTicket) && (
             <ScrollView
-              style={styles.bmbCenterColumn}
+              style={[styles.bmbCenterColumn, isMobileLayout && { flex: 1 }]}
               showsVerticalScrollIndicator={false}
             >
               {toastMsg && (
@@ -6587,19 +7315,33 @@ function AppContent() {
                 </View>
               </View>
             </ScrollView>
+            )}
 
             {/* CỘT PHẢI: CHI TIẾT SỰ CỐ & TRỢ LÝ QUYẾT ĐỊNH GEMINI FLASH AI */}
+            {(!isMobileLayout || bmbSelectedTicket) && (
             <ScrollView
-              style={styles.bmbRightInspector}
+              style={[styles.bmbRightInspector, isMobileLayout && { flex: 1, borderRadius: 10, padding: 14 }]}
               showsVerticalScrollIndicator={false}
             >
-              {bmbSelectedTicket && (
+              {bmbSelectedTicket ? (
                 <View>
+                  {isMobileLayout && (
+                    <TouchableOpacity
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#EFF6FF', borderRadius: 8, alignSelf: 'flex-start' }}
+                      onPress={() => setBmbSelectedTicket(null)}
+                    >
+                      <Text style={{ fontSize: 13.5, fontWeight: '700', color: '#2563EB' }}>
+                        ← {translate('Quay lại danh sách sự cố')}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                   <View style={styles.cardTopRow}>
                     <Text style={styles.bmbInspectorTitle}>
                       {translate("Chi tiết sự cố ")}{bmbSelectedTicket.ticketCode}
                     </Text>
-                    <Text style={{ fontSize: 16, color: '#64748B' }}>✕</Text>
+                    <TouchableOpacity onPress={() => setBmbSelectedTicket(null)}>
+                      <Text style={{ fontSize: 18, color: '#64748B', fontWeight: '700', padding: 4 }}>✕</Text>
+                    </TouchableOpacity>
                   </View>
 
                   <View style={[styles.cardTopRow, { marginBottom: 14 }]}>
@@ -6740,7 +7482,7 @@ function AppContent() {
                           }}
                         >
                           <Text style={[styles.bmbDropdownValue, !isSelTechEligible && { color: '#DC2626' }]}>
-                            {selTech?.fullName || 'Đặng Văn Nam'}{' '}
+                            {selTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa có KTV'))}{' '}
                             ({selTech?.shiftName || 'Ca sáng'})
                             {!isSelTechEligible ? ' [Ngoài ca / Đã kết thúc]' : ' [Đang trực]'}
                           </Text>
@@ -6772,8 +7514,19 @@ function AppContent() {
                     );
                   })()}
                 </View>
+              ) : (
+                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 60 }}>
+                  <Text style={{ fontSize: 32, marginBottom: 12 }}>📋</Text>
+                  <Text style={{ fontSize: 15, fontWeight: '700', color: '#334155' }}>
+                    {translate('Chưa chọn sự cố nào')}
+                  </Text>
+                  <Text style={{ fontSize: 13, color: '#64748B', textAlign: 'center', marginTop: 4, maxWidth: 260 }}>
+                    {translate('Vui lòng bấm chọn một sự cố từ danh sách bên trái để xem chi tiết và phê duyệt.')}
+                  </Text>
+                </View>
               )}
             </ScrollView>
+            )}
           </View>
         )}
 
@@ -6781,7 +7534,7 @@ function AppContent() {
         {/* MÀN HÌNH 02 BMB: KỸ THUẬT VIÊN CA TRỰC & WORKLOAD (FIGMA 02 BMB)     */}
         {/* ==================================================================== */}
         {bmbNavTab === 'TECHNICIANS' && (
-          <View style={styles.bmbContentTwoCols}>
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
             {/* CỘT GIỮA: DANH SÁCH KỸ THUẬT VIÊN & TẢI CÔNG VIỆC */}
             <ScrollView
               style={styles.bmbCenterColumn}
@@ -6813,43 +7566,14 @@ function AppContent() {
                 </View>
               </View>
 
-              {(technicians.length > 0
-                ? technicians
-                : [
-                  {
-                    id: 'tech-1',
-                    fullName: 'Đặng Văn Nam',
-                    phone: '0356 166 863',
-                    specialtyLabel: 'Điện - Nước (Plumbing)',
-                    isOnDuty: true,
-                    workloadCount: 1,
-                  },
-                  {
-                    id: 'tech-2',
-                    fullName: 'Đặng Thanh Nguyên',
-                    phone: '0943 792 466',
-                    specialtyLabel: 'Thang máy & Cơ khí',
-                    isOnDuty: true,
-                    workloadCount: 3,
-                  },
-                  {
-                    id: 'tech-3',
-                    fullName: 'Đặng Văn Tùng',
-                    phone: '0969 595 478',
-                    specialtyLabel: 'Điện & Chiếu sáng',
-                    isOnDuty: true,
-                    workloadCount: 0,
-                  },
-                  {
-                    id: 'tech-4',
-                    fullName: 'Đặng Thanh Quyết',
-                    phone: '0913 402 803',
-                    specialtyLabel: 'An ninh & Thẻ từ',
-                    isOnDuty: false,
-                    workloadCount: 0,
-                  },
-                ]
-              ).map((tech: any, idx: number) => {
+              {technicians.length === 0 ? (
+                <View style={{ padding: 32, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 12, marginTop: 16 }}>
+                  <Text style={{ color: '#64748B', fontSize: 13, fontWeight: '500' }}>
+                    {translate('Chưa có kỹ thuật viên nào đang hoạt động trong hệ thống.')}
+                  </Text>
+                </View>
+              ) : (
+                technicians.map((tech: any, idx: number) => {
                 const activeJobsCount =
                   tech.assignedTickets?.length ??
                   (idx === 0 ? 1 : idx === 1 ? 3 : 0);
@@ -7014,7 +7738,7 @@ function AppContent() {
                     </View>
                   </View>
                 );
-              })}
+              }))}
             </ScrollView>
 
             {/* CỘT PHẢI: 2 KHỐI XẾP DỌC (GIAO VIỆC MỚI + VIỆC ĐANG LÀM CỦA KTV) */}
@@ -7026,7 +7750,7 @@ function AppContent() {
               <View style={styles.bmbBlueOutlinePanel}>
                 <Text style={styles.bmbPanelBlueTitle}>
                   {translate("Giao việc cho:")}{' '}
-                  {bmbAssignTargetTech?.fullName || 'Đặng Văn Nam'}
+                  {bmbAssignTargetTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa chọn KTV'))}
                 </Text>
                 <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 12 }}>
                   {translate("Chuyên môn:")}{' '}
@@ -7141,7 +7865,7 @@ function AppContent() {
         {/* MÀN HÌNH 03 BMB: TRUNG TÂM THÔNG BÁO & CLOUD STATUS (FIGMA 03 BMB)   */}
         {/* ==================================================================== */}
         {bmbNavTab === 'NOTIFICATIONS' && (
-          <View style={styles.bmbContentTwoCols}>
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
             {/* CỘT GIỮA: TRUNG TÂM THÔNG BÁO & NHẬT KÝ HỆ THỐNG */}
             <ScrollView
               style={styles.bmbCenterColumn}
@@ -7339,7 +8063,7 @@ function AppContent() {
         {/* MÀN HÌNH 04 BMB: QUẢN LÝ CĂN HỘ & CƯ DÂN                             */}
         {/* ==================================================================== */}
         {bmbNavTab === 'APARTMENTS' && (
-          <View style={styles.bmbContentTwoCols}>
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
             {/* CỘT TRÁI: DANH SÁCH CĂN HỘ & LỊCH SỬ SỬA CHỮA */}
             <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
               <View style={styles.cardTopRow}>
@@ -7351,43 +8075,275 @@ function AppContent() {
                 </View>
               </View>
 
-              {/* Danh sách thẻ căn hộ */}
-              <View style={[styles.chipWrapRow, { marginVertical: 12 }]}>
-                {apartments.map((apt) => {
-                  const isSel = selectedApartment?.apartmentCode === apt.apartmentCode;
-                  return (
-                    <TouchableOpacity
-                      key={apt.apartmentCode}
-                      style={[
-                        styles.bmbRadioTicketBox,
-                        isSel && styles.bmbRadioTicketBoxSelected,
-                        { minWidth: 200, flex: 1, margin: 4 }
-                      ]}
-                      onPress={() => handleSelectApartment(apt)}
-                    >
-                      <View style={styles.cardTopRow}>
-                        <Text style={{ fontWeight: '800', fontSize: 15, color: '#2563EB' }}>
-                          Căn {apt.apartmentCode}
+              {/* Bộ lọc Tòa (G, F, E), Tầng (1..5) và Trạng thái */}
+              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginVertical: 10, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
+                    🏢 {translate("Hệ thống 75 Căn hộ")} • {translate("Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng")}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: '#64748B' }}>
+                    {apartments.filter((a) => a.residents && a.residents.length > 0).length}/{apartments.length || 75} {translate("phòng đang ở")}
+                  </Text>
+                </View>
+
+                {/* Hàng 1: Lọc theo Tòa */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tòa:")}</Text>
+                  {(['ALL', 'G', 'F', 'E'] as const).map((b) => {
+                    const isSel = apartmentFilterBlock === b;
+                    const label = b === 'ALL' ? 'Tất cả 3 tòa (75)' : `Tòa ${b} (25)`;
+                    return (
+                      <TouchableOpacity
+                        key={b}
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                          borderRadius: 6,
+                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                          borderWidth: 1,
+                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                        }}
+                        onPress={() => setApartmentFilterBlock(b)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                          {translate(label)}
                         </Text>
-                        <View style={[styles.statusPill, { backgroundColor: '#DCFCE7' }]}>
-                          <Text style={[styles.statusPillText, { color: '#15803D', fontSize: 11 }]}>
-                            {translate("Đang ở")}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={styles.cardLocationText}>
-                        {apt.buildingBlock} • Tầng {apt.floorNumber}
-                      </Text>
-                      <Text style={[styles.cardLocationText, { color: '#7C3AED', fontWeight: '700' }]}>
-                        Mã QR Phòng: {apt.qrCode}
-                      </Text>
-                      <Text style={[styles.techInfoLine, { marginTop: 4 }]}>
-                        Chủ hộ: {apt.representative?.fullName || 'Chưa gán'} ({apt.residents?.length || 0} người)
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* Hàng 2: Lọc theo Tầng */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tầng:")}</Text>
+                  {(['ALL', 1, 2, 3, 4, 5] as const).map((fl) => {
+                    const isSel = apartmentFilterFloor === fl;
+                    const label = fl === 'ALL' ? 'Tất cả tầng' : `Tầng ${fl}`;
+                    return (
+                      <TouchableOpacity
+                        key={String(fl)}
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                          borderRadius: 6,
+                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                          borderWidth: 1,
+                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                        }}
+                        onPress={() => setApartmentFilterFloor(fl)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                          {translate(label)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* Hàng 3: Lọc theo Trạng thái */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Trạng thái:")}</Text>
+                  {(['ALL', 'OCCUPIED', 'VACANT'] as const).map((st) => {
+                    const isSel = apartmentFilterStatus === st;
+                    const label = st === 'ALL' ? 'Tất cả' : st === 'OCCUPIED' ? 'Đang ở' : 'Còn trống';
+                    return (
+                      <TouchableOpacity
+                        key={st}
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                          borderRadius: 6,
+                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                          borderWidth: 1,
+                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                        }}
+                        onPress={() => setApartmentFilterStatus(st)}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                          {translate(label)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
               </View>
+
+              {/* Danh sách thẻ căn hộ hiển thị mã QR thật và thông tin chuẩn */}
+              <View style={[styles.chipWrapRow, { marginVertical: 8 }]}>
+                {apartments
+                  .filter((apt) => {
+                    if (apartmentFilterBlock !== 'ALL' && !apt.apartmentCode.startsWith(apartmentFilterBlock)) return false;
+                    if (apartmentFilterFloor !== 'ALL' && apt.floorNumber !== apartmentFilterFloor) return false;
+                    const hasResidents = apt.residents && apt.residents.length > 0;
+                    if (apartmentFilterStatus === 'OCCUPIED' && !hasResidents) return false;
+                    if (apartmentFilterStatus === 'VACANT' && hasResidents) return false;
+                    return true;
+                  })
+                  .map((apt) => {
+                    const isSel = selectedApartment?.apartmentCode === apt.apartmentCode;
+                    const hasResidents = apt.residents && apt.residents.length > 0;
+                    const qrVal = apt.roomQrCode || apt.qrCode || `ROOM:${apt.apartmentCode}`;
+                    return (
+                      <TouchableOpacity
+                        key={apt.apartmentCode}
+                        style={[
+                          styles.bmbRadioTicketBox,
+                          isSel && styles.bmbRadioTicketBoxSelected,
+                          { minWidth: 260, flex: 1, margin: 4, padding: 12 }
+                        ]}
+                        onPress={() => handleSelectApartment(apt)}
+                      >
+                        {/* Hàng trên: Tên phòng và Huy hiệu trạng thái */}
+                        <View style={styles.cardTopRow}>
+                          <Text style={{ fontWeight: '900', fontSize: 16, color: '#1E40AF' }}>
+                            Căn {apt.apartmentCode}
+                          </Text>
+                          <View style={[styles.statusPill, { backgroundColor: hasResidents ? '#DCFCE7' : '#F1F5F9' }]}>
+                            <Text style={[styles.statusPillText, { color: hasResidents ? '#15803D' : '#64748B', fontSize: 11 }]}>
+                              {translate(hasResidents ? `Đang ở (${apt.residents.length})` : 'Còn trống')}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {/* Thân thẻ: Thông tin bên trái, Mã QR đen trắng bên phải */}
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+                          <View style={{ flex: 1, paddingRight: 8 }}>
+                            <Text style={[styles.cardLocationText, { fontWeight: '700', color: '#0F172A' }]}>
+                              {apt.buildingBlock} • Tầng {apt.floorNumber}
+                            </Text>
+                            <Text style={[styles.cardLocationText, { fontSize: 11.5, color: '#64748B', marginTop: 2 }]} numberOfLines={1}>
+                              {apt.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
+                            </Text>
+                            <Text style={[styles.techInfoLine, { marginTop: 4, fontSize: 12 }]}>
+                              Chủ hộ: {apt.representative?.fullName || 'Chưa gán'}
+                            </Text>
+                            <Text style={{ fontSize: 11, color: '#7C3AED', fontWeight: '700', marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }}>
+                              {qrVal}
+                            </Text>
+                          </View>
+
+                          {/* Mã QR thật dạng pixel matrix độc lập */}
+                          <View style={{ alignItems: 'center' }}>
+                            <View style={{ borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 6, padding: 2, backgroundColor: '#FFFFFF' }}>
+                              <QrCodeView value={qrVal} size={58} quietZone={1} />
+                            </View>
+                            <TouchableOpacity
+                              style={{
+                                marginTop: 4,
+                                backgroundColor: '#EFF6FF',
+                                borderWidth: 1,
+                                borderColor: '#BFDBFE',
+                                paddingHorizontal: 6,
+                                paddingVertical: 2,
+                                borderRadius: 4,
+                              }}
+                              onPress={() => setZoomQrApartment(apt)}
+                            >
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#1D4ED8' }}>
+                                🔍 {translate("Phóng to & In")}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+              </View>
+
+              {/* Modal Phóng to Mã QR Căn hộ & In / Tải file SVG */}
+              {zoomQrApartment && (
+                <Modal
+                  visible={zoomQrApartment !== null}
+                  transparent
+                  animationType="fade"
+                  onRequestClose={() => setZoomQrApartment(null)}
+                >
+                  <View style={styles.technicianModalOverlay}>
+                    <View style={[styles.technicianModalCard, { maxWidth: 420, alignItems: 'center' }]}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#2563EB', letterSpacing: 1, textTransform: 'uppercase' }}>
+                        {translate("Tem mã QR Căn hộ chính thức")}
+                      </Text>
+                      <Text style={{ fontSize: 26, fontWeight: '900', color: '#0F172A', marginTop: 4 }}>
+                        Căn {zoomQrApartment.apartmentCode}
+                      </Text>
+                      <Text style={{ fontSize: 13, color: '#475569', marginTop: 2, textAlign: 'center' }}>
+                        {zoomQrApartment.buildingBlock} • Tầng {zoomQrApartment.floorNumber}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: '#64748B', marginTop: 2, textAlign: 'center' }}>
+                        {zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
+                      </Text>
+
+                      {/* Khung QR to sắc nét */}
+                      <View style={{
+                        width: 236,
+                        height: 236,
+                        marginVertical: 14,
+                        padding: 8,
+                        backgroundColor: '#FFFFFF',
+                        borderWidth: 2,
+                        borderColor: '#0284C7',
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        shadowColor: '#000',
+                        shadowOpacity: 0.08,
+                        shadowRadius: 10,
+                        elevation: 4,
+                      }}>
+                        <QrCodeView
+                          value={zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
+                          size={220}
+                          quietZone={3}
+                        />
+                      </View>
+
+                      {/* Huy hiệu mã QR */}
+                      <View style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4, marginBottom: 8 }}>
+                        <Text style={{ fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontWeight: '800', fontSize: 14, color: '#1E293B' }}>
+                          {zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
+                        </Text>
+                      </View>
+
+                      <Text style={{ fontSize: 12, color: '#166534', backgroundColor: '#DCFCE7', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, marginBottom: 16 }}>
+                        ✓ {translate("Mã QR hoạt động hợp lệ • Gắn liền vĩnh viễn với phòng")}
+                      </Text>
+
+                      {/* Các nút hành động: In, Tải SVG, Đóng */}
+                      <View style={{ width: '100%', gap: 8 }}>
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <TouchableOpacity
+                            style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0284C7', paddingVertical: 10 }]}
+                            onPress={() => {
+                              const bAddress = zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
+                              const locStr = `${zoomQrApartment.buildingBlock} • Tầng ${zoomQrApartment.floorNumber}`;
+                              printQrCode(zoomQrApartment.apartmentCode, locStr, bAddress);
+                            }}
+                          >
+                            <Text style={styles.primaryActionBtnText}>🖨️ {translate("In tem QR")}</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0F766E', paddingVertical: 10 }]}
+                            onPress={() => {
+                              downloadQrSvg(zoomQrApartment.apartmentCode);
+                              showToast(translate(`Đã tải file SVG mã QR căn ${zoomQrApartment.apartmentCode}`));
+                            }}
+                          >
+                            <Text style={styles.primaryActionBtnText}>⬇️ {translate("Tải file SVG")}</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <TouchableOpacity
+                          style={[styles.technicianCancelButton, { width: '100%', paddingVertical: 9, alignItems: 'center' }]}
+                          onPress={() => setZoomQrApartment(null)}
+                        >
+                          <Text style={styles.technicianCancelButtonText}>{translate("Đóng")}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                </Modal>
+              )}
 
               {/* Lịch sử sửa chữa của căn hộ được chọn */}
               {selectedApartment && (
@@ -7444,14 +8400,17 @@ function AppContent() {
                   style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12 }]}
                   onPress={() => {
                     setSelectedResident(null);
+                    setResidentModalError(null);
                     setResidentForm({
                       fullName: '',
                       phone: '',
                       email: '',
-                      apartmentCode: selectedApartment?.apartmentCode || 'A-1204',
-                      buildingBlock: 'Tòa S1',
-                      floorNumber: 12,
-                      password: '',
+                      apartmentCode: selectedApartment?.apartmentCode || 'G101',
+                      buildingBlock: selectedApartment?.buildingBlock || 'Tòa G',
+                      floorNumber: selectedApartment?.floorNumber || 1,
+                      residencyRole: 'TENANT',
+                      moveInDate: new Date().toISOString().slice(0, 10),
+                      moveOutDate: '',
                       isRepresentative: false,
                     });
                     setResidentModalMode('create');
@@ -7476,69 +8435,97 @@ function AppContent() {
                   r.phone?.includes(residentSearchQuery) ||
                   r.apartmentCode?.toLowerCase().includes(residentSearchQuery.toLowerCase())
                 )
-                .map((res) => (
-                  <View key={res.id} style={[styles.bmbRadioTicketBox, { marginBottom: 8 }]}>
-                    <View style={styles.cardTopRow}>
-                      <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                        {res.fullName} {res.isRepresentative && '⭐ (Chủ hộ)'}
-                      </Text>
-                      <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
-                        <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
-                          {res.isActive ? 'Hoạt động' : 'Đã khóa'}
-                        </Text>
+                .map((res) => {
+                  const roleLabel = res.residencyRole === 'OWNER' ? 'Chủ sở hữu' : res.residencyRole === 'MEMBER' ? 'Thành viên hộ' : 'Khách thuê';
+                  const roleColor = res.residencyRole === 'OWNER' ? '#D97706' : res.residencyRole === 'MEMBER' ? '#7C3AED' : '#2563EB';
+                  const roleBg = res.residencyRole === 'OWNER' ? '#FEF3C7' : res.residencyRole === 'MEMBER' ? '#F3E8FF' : '#EFF6FF';
+
+                  return (
+                    <View key={res.id} style={[styles.bmbRadioTicketBox, { marginBottom: 8 }]}>
+                      <View style={styles.cardTopRow}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                            {res.fullName}
+                          </Text>
+                          <View style={[styles.statusPill, { backgroundColor: roleBg }]}>
+                            <Text style={[styles.statusPillText, { color: roleColor, fontWeight: '600' }]}>{roleLabel}</Text>
+                          </View>
+                        </View>
+                        <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
+                          <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
+                            {res.isActive ? 'Hoạt động' : 'Đã khóa'}
+                          </Text>
+                        </View>
                       </View>
-                    </View>
-                    <Text style={styles.cardLocationText}>
-                      SĐT: {res.phone} • Căn: {res.apartmentCode || 'Chưa gán'}
-                    </Text>
-
-                    <View style={[styles.rowBetween, { marginTop: 8 }]}>
-                      <TouchableOpacity
-                        style={styles.technicianEditButton}
-                        onPress={() => {
-                          setSelectedResident(res);
-                          setResidentForm({
-                            fullName: res.fullName,
-                            phone: res.phone,
-                            email: res.email || '',
-                            apartmentCode: res.apartmentCode || 'A-1204',
-                            buildingBlock: res.buildingBlock || 'Tòa S1',
-                            floorNumber: res.floorNumber || 12,
-                            password: '',
-                            isRepresentative: Boolean(res.isRepresentative),
-                          });
-                          setResidentModalMode('edit');
-                        }}
-                      >
-                        <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        style={[styles.technicianEditButton, { borderColor: '#D97706' }]}
-                        onPress={() => {
-                          setSelectedResident(res);
-                          setNewPasswordInput('');
-                          setResidentModalMode('reset_password');
-                        }}
-                      >
-                        <Text style={[styles.technicianEditButtonText, { color: '#D97706' }]}>
-                          {translate('Đặt lại MK')}
+                      <Text style={styles.cardLocationText}>
+                        SĐT: {res.phone} • {res.email ? `Email: ${res.email} • ` : ''}Căn: {res.apartmentCode || 'Chưa gán'}
+                      </Text>
+                      {res.moveInDate && (
+                        <Text style={[styles.cardLocationText, { fontSize: 11, color: '#64748B', marginTop: 2 }]}>
+                          Ngày vào: {res.moveInDate} {res.moveOutDate ? `• Rời: ${res.moveOutDate}` : ''}
                         </Text>
-                      </TouchableOpacity>
+                      )}
 
-                      {res.apartmentCode && (
+                      <View style={[styles.rowBetween, { marginTop: 8 }]}>
                         <TouchableOpacity
-                          style={[styles.technicianDeleteButton, { borderColor: '#64748B' }]}
-                          onPress={() => handleResidentDeparture(res.id)}
+                          style={styles.technicianEditButton}
+                          onPress={() => {
+                            setSelectedResident(res);
+                            setResidentModalError(null);
+                            setResidentForm({
+                              fullName: res.fullName,
+                              phone: res.phone,
+                              email: res.email || '',
+                              apartmentCode: res.apartmentCode || 'G101',
+                              buildingBlock: res.buildingBlock || 'Tòa G',
+                              floorNumber: res.floorNumber || 1,
+                              residencyRole: res.residencyRole || (res.isRepresentative ? 'OWNER' : 'TENANT'),
+                              moveInDate: res.moveInDate || new Date().toISOString().slice(0, 10),
+                              moveOutDate: res.moveOutDate || '',
+                              isRepresentative: Boolean(res.isRepresentative),
+                            });
+                            setResidentModalMode('edit');
+                          }}
                         >
-                          <Text style={[styles.technicianDeleteButtonText, { color: '#64748B' }]}>
-                            {translate('Rời phòng')}
+                          <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.technicianEditButton, { borderColor: '#D97706' }]}
+                          onPress={() => {
+                            setSelectedResident(res);
+                            setNewPasswordInput('');
+                            setResidentModalMode('reset_password');
+                          }}
+                        >
+                          <Text style={[styles.technicianEditButtonText, { color: '#D97706' }]}>
+                            {translate('Đặt lại MK')}
                           </Text>
                         </TouchableOpacity>
-                      )}
+
+                        {res.apartmentCode && (
+                          <TouchableOpacity
+                            style={[styles.technicianDeleteButton, { borderColor: '#D97706' }]}
+                            onPress={() => handleResidentDeparture(res.id)}
+                          >
+                            <Text style={[styles.technicianDeleteButtonText, { color: '#D97706' }]}>
+                              {translate('Chuyển đi')}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+
+                        <TouchableOpacity
+                          style={[styles.technicianDeleteButton, { borderColor: '#EF4444', backgroundColor: '#FEF2F2' }]}
+                          onPress={() => handleDeleteResident(res.id, res.fullName)}
+                        >
+                          <Text style={[styles.technicianDeleteButtonText, { color: '#DC2626' }]}>
+                            {translate('Xóa tài khoản')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
                     </View>
-                  </View>
-                ))}
+                  );
+                })}
             </ScrollView>
           </View>
         )}
@@ -7547,7 +8534,7 @@ function AppContent() {
         {/* MÀN HÌNH 04B BMB: QUẢN LÝ CHẤM CÔNG KỸ THUẬT VIÊN (GPS & CAMERA)      */}
         {/* ==================================================================== */}
         {bmbNavTab === 'ATTENDANCE' && (
-          <View style={styles.bmbContentTwoCols}>
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
             <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
               {/* Tiêu đề & Nút làm mới */}
               <View style={styles.cardTopRow}>
@@ -7833,337 +8820,390 @@ function AppContent() {
                 </View>
               </View>
 
-              {/* DANH SÁCH CHI TIẾT CÁC CA CHẤM CÔNG */}
-              <View style={styles.whiteSectionCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={styles.cardBlockTitle}>
-                    {translate("Danh sách ca chấm công")} ({bmbAttendanceLogs.length} {translate("bản ghi")})
-                  </Text>
-                  <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
-                    * {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix'} ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính hợp lệ: ≤ {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
-                  </Text>
-                </View>
+              {/* DANH SÁCH CHI TIẾT CÁC CA CHẤM CÔNG (GRID RESPONSIVE CHUYÊN NGHIỆP) */}
+              {(() => {
+                const displayedAttendanceLogs = bmbAttendanceLogs.filter((log: any) => {
+                  if (bmbAttendanceFilterTech !== 'ALL' && log.techId !== bmbAttendanceFilterTech) {
+                    return false;
+                  }
+                  return true;
+                });
 
-                {bmbAttendanceLogs.length === 0 ? (
-                  <View style={{ paddingVertical: 32, alignItems: 'center' }}>
-                    <Text style={{ fontSize: 14, color: '#64748B' }}>{translate("Không tìm thấy dữ liệu chấm công phù hợp bộ lọc.")}</Text>
-                  </View>
-                ) : (
-                  bmbAttendanceLogs.map((log: any) => {
-                    const punctuality = log.punctualityStatus || 'ON_TIME';
-                    const verification = log.verificationStatus || 'VERIFIED';
-                    const hasAnom = Boolean(log.anomalyNotes);
-                    return (
-                      <View
-                        key={log.id}
-                        style={[
-                          styles.notiBlueItem,
-                          {
-                            padding: 14,
-                            marginBottom: 12,
-                            borderColor: hasAnom || verification === 'PENDING_REVIEW' ? '#F59E0B' : '#E2E8F0',
-                            borderWidth: 1,
-                            backgroundColor: verification === 'PENDING_REVIEW' ? '#FFFDF7' : '#FFFFFF',
-                          }
-                        ]}
-                      >
-                        {/* Hàng 1: Thông tin KTV, Ca trực & Badges */}
-                        <View style={styles.cardTopRow}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' }}>
-                              <Text style={{ fontSize: 16 }}>👷</Text>
-                            </View>
-                            <View>
-                              <Text style={{ fontWeight: '800', fontSize: 15, color: '#0F172A' }}>
-                                {log.techName}
-                              </Text>
-                              <Text style={styles.cardLocationText}>
-                                📞 {log.techPhone || '0901234567'} • 🏢 {log.buildingBlock || 'Tòa S1'} • 📅 {log.date}
-                              </Text>
-                            </View>
-                          </View>
+                return (
+                  <View style={[styles.whiteSectionCard, { width: '100%', maxWidth: '100%' }]}>
+                    <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6, marginBottom: 12 }]}>
+                      <Text style={styles.cardBlockTitle}>
+                        {translate("Danh sách ca chấm công")} ({displayedAttendanceLogs.length} {translate("bản ghi")})
+                      </Text>
+                      <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
+                        * {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix'} ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính hợp lệ: ≤ {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
+                      </Text>
+                    </View>
 
-                          <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
-                            {/* Badge Xác minh */}
-                            <View style={[
-                              styles.statusPill,
-                              verification === 'VERIFIED' ? { backgroundColor: '#DCFCE7' } :
-                              verification === 'APPROVED' ? { backgroundColor: '#DBEAFE' } :
-                              verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } :
-                              verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                            ]}>
-                              <Text style={[
-                                styles.statusPillText,
-                                verification === 'VERIFIED' ? { color: '#15803D' } :
-                                verification === 'APPROVED' ? { color: '#1D4ED8' } :
-                                verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } :
-                                verification === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                              ]}>
-                                {verification === 'VERIFIED' ? '✓ Tự động hợp lệ' :
-                                 verification === 'APPROVED' ? '✓ BMB đã duyệt' :
-                                 verification === 'NEEDS_EXPLANATION' ? '💬 Yêu cầu giải trình' :
-                                 verification === 'REJECTED' ? '✕ Bị từ chối' : '⏳ Chờ BMB duyệt'}
-                              </Text>
-                            </View>
-
-                            {/* Badge Đúng giờ / Muộn */}
-                            <View style={[
-                              styles.statusPill,
-                              punctuality === 'ON_TIME' ? { backgroundColor: '#F0FDF4' } :
-                              punctuality === 'ON_TRACK' ? { backgroundColor: '#EFF6FF' } : { backgroundColor: '#FFEDD5' }
-                            ]}>
-                              <Text style={[
-                                styles.statusPillText,
-                                punctuality === 'ON_TIME' ? { color: '#16A34A' } :
-                                punctuality === 'ON_TRACK' ? { color: '#2563EB' } : { color: '#C2410C' }
-                              ]}>
-                                {punctuality === 'ON_TIME' ? '🟢 Đúng giờ' :
-                                 punctuality === 'LATE' ? `⚠️ Đi muộn ${log.lateMinutes || 0}p` :
-                                 punctuality === 'EARLY_LEAVE' ? `⚠️ Về sớm ${log.earlyMinutes || 0}p` :
-                                 punctuality === 'LATE_AND_EARLY' ? `⚠️ Muộn ${log.lateMinutes || 0}p & Về sớm ${log.earlyMinutes || 0}p` :
-                                 '🔵 Đang trực'}
-                              </Text>
-                            </View>
-                          </View>
-                        </View>
-
-                        {/* Ca trực phân công */}
-                        <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, marginVertical: 8 }}>
-                          <Text style={{ fontSize: 12, color: '#475569' }}>
-                            🕒 <Text style={{ fontWeight: '700' }}>{translate("Lịch phân công:")}</Text> {log.shiftScheduled || '07:00 - 15:00'} (Ca làm việc chính thức)
-                          </Text>
-                        </View>
-
-                        {/* Hàng 2: Chi tiết Check-in & Check-out (2 cột) */}
-                        <View style={{ flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 12, marginVertical: 6 }}>
-                          {/* Cột Check-in */}
-                          <View style={{ flex: 1, backgroundColor: '#FAFAFA', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#F1F5F9' }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', fontSize: 13, color: '#16A34A' }}>🟢 CHECK-IN</Text>
-                              <Text style={{ fontSize: 11, color: '#64748B' }}>{formatDateTime(log.checkIn)}</Text>
-                            </View>
-
-                            {/* GPS Snapshot */}
-                            {log.checkInGps ? (
-                              <View style={{ marginTop: 6 }}>
-                                <Text style={{ fontSize: 12, color: '#334155' }}>
-                                  📍 Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters}m</Text> (Độ chính xác: ±{log.checkInGps.accuracy}m)
-                                </Text>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                                  <View style={[
-                                    styles.statusPill,
-                                    log.checkInGps.isWithinAllowedRadius ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
-                                  ]}>
-                                    <Text style={[
-                                      styles.statusPillText,
-                                      log.checkInGps.isWithinAllowedRadius ? { color: '#15803D' } : { color: '#B91C1C' }
-                                    ]}>
-                                      {log.checkInGps.isWithinAllowedRadius ? '✓ Trong bán kính 300m' : '⚠️ Vượt bán kính cho phép'}
-                                    </Text>
-                                  </View>
-                                  {log.checkInMapUrl && (
-                                    <TouchableOpacity onPress={() => Linking.openURL(log.checkInMapUrl)}>
-                                      <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
-                                    </TouchableOpacity>
-                                  )}
-                                </View>
-                              </View>
-                            ) : (
-                              <Text style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 4 }}>📍 Không có dữ liệu GPS</Text>
-                            )}
-
-                            {/* Ảnh Check-in */}
-                            {log.checkInPhotoUrl ? (
-                              <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                <TouchableOpacity
-                                  onPress={() => setViewingPhotoModal({
-                                    url: log.checkInPhotoUrl,
-                                    title: `Ảnh Check-in - ${log.techName}`,
-                                    meta: { time: log.checkIn, gps: log.checkInGps, techName: log.techName, date: log.date }
-                                  })}
-                                >
-                                  <Image
-                                    source={{ uri: log.checkInPhotoUrl }}
-                                    style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
-                                  />
-                                </TouchableOpacity>
-                                <View>
-                                  <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-in</Text>
-                                  <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
-                                </View>
-                              </View>
-                            ) : null}
-                          </View>
-
-                          {/* Cột Check-out */}
-                          <View style={{ flex: 1, backgroundColor: '#FAFAFA', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#F1F5F9' }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', fontSize: 13, color: log.checkOut ? '#DC2626' : '#64748B' }}>
-                                🔴 CHECK-OUT
-                              </Text>
-                              <Text style={{ fontSize: 11, color: '#64748B' }}>
-                                {log.checkOut ? formatDateTime(log.checkOut) : 'Chưa check-out'}
-                              </Text>
-                            </View>
-
-                            {/* GPS Snapshot */}
-                            {log.checkOutGps ? (
-                              <View style={{ marginTop: 6 }}>
-                                <Text style={{ fontSize: 12, color: '#334155' }}>
-                                  📍 Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkOutGps.distanceMeters}m</Text> (Độ chính xác: ±{log.checkOutGps.accuracy}m)
-                                </Text>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                                  <View style={[
-                                    styles.statusPill,
-                                    log.checkOutGps.isWithinAllowedRadius ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
-                                  ]}>
-                                    <Text style={[
-                                      styles.statusPillText,
-                                      log.checkOutGps.isWithinAllowedRadius ? { color: '#15803D' } : { color: '#B91C1C' }
-                                    ]}>
-                                      {log.checkOutGps.isWithinAllowedRadius ? '✓ Trong bán kính 300m' : '⚠️ Vượt bán kính cho phép'}
-                                    </Text>
-                                  </View>
-                                  {log.checkOutMapUrl && (
-                                    <TouchableOpacity onPress={() => Linking.openURL(log.checkOutMapUrl)}>
-                                      <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
-                                    </TouchableOpacity>
-                                  )}
-                                </View>
-                              </View>
-                            ) : (
-                              <Text style={{ fontSize: 11.5, color: '#94A3B8', marginTop: 4 }}>
-                                {log.checkOut ? '📍 Không có dữ liệu GPS' : '⏳ KTV đang trong ca trực'}
-                              </Text>
-                            )}
-
-                            {/* Ảnh Check-out */}
-                            {log.checkOutPhotoUrl ? (
-                              <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                <TouchableOpacity
-                                  onPress={() => setViewingPhotoModal({
-                                    url: log.checkOutPhotoUrl,
-                                    title: `Ảnh Check-out - ${log.techName}`,
-                                    meta: { time: log.checkOut, gps: log.checkOutGps, techName: log.techName, date: log.date }
-                                  })}
-                                >
-                                  <Image
-                                    source={{ uri: log.checkOutPhotoUrl }}
-                                    style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
-                                  />
-                                </TouchableOpacity>
-                                <View>
-                                  <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-out</Text>
-                                  <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
-                                </View>
-                              </View>
-                            ) : null}
-                          </View>
-                        </View>
-
-                        {/* Hàng 3: Bóc tách giờ làm & Tiền lương chuẩn 50.000 VNĐ/giờ */}
-                        <View style={{ backgroundColor: '#F0F9FF', borderRadius: 8, padding: 10, marginVertical: 6, borderWidth: 1, borderColor: '#BAE6FD' }}>
-                          <View style={styles.cardTopRow}>
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#0369A1' }}>
-                              ⏱️ Giờ công: {log.workHours || 0}h thực tế • {log.billableHours ?? log.workHours ?? 0}h tính lương
-                              {log.nightHours ? ` (Trong đó: ${log.nightHours}h ca đêm 22h-6h)` : ''}
-                            </Text>
-                            <Text style={{ fontSize: 14, fontWeight: '800', color: '#0284C7' }}>
-                              Ước tính: {Number(((log.regularHours ?? (log.billableHours ?? log.workHours ?? 0)) * 50000) + ((log.nightHours || 0) * 50000 * 1.3)).toLocaleString('vi-VN')} đ
-                            </Text>
-                          </View>
-                          <Text style={{ fontSize: 11, color: '#0284C7', marginTop: 2 }}>
-                            * Đơn giá: 50.000 VNĐ/giờ tiêu chuẩn • Ca đêm (22:00 - 06:00) phụ trội +30% (65.000 VNĐ/giờ).
-                          </Text>
-                        </View>
-
-                        {/* Ngoại lệ / Bất thường phát hiện tự động */}
-                        {log.anomalyNotes && (
-                          <View style={{ backgroundColor: '#FFFBEB', borderRadius: 8, padding: 8, marginVertical: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 12, color: '#B45309', fontWeight: '700' }}>
-                              ⚠️ Ghi chú ngoại lệ: {log.anomalyNotes}
-                            </Text>
-                          </View>
-                        )}
-
-                        {/* Giải trình từ Kỹ thuật viên */}
-                        {log.explanationText && (
-                          <View style={{ backgroundColor: '#F5F3FF', borderRadius: 8, padding: 8, marginVertical: 4, borderWidth: 1, borderColor: '#DDD6FE' }}>
-                            <Text style={{ fontSize: 12, color: '#6D28D9', fontWeight: '700' }}>
-                              💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>"{log.explanationText}"</Text>
-                            </Text>
-                          </View>
-                        )}
-
-                        {/* Ghi chú duyệt của BMB */}
-                        {log.reviewNote && (
-                          <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, marginVertical: 4 }}>
-                            <Text style={{ fontSize: 12, color: '#334155' }}>
-                              📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> "{log.reviewNote}" ({formatDateTime(log.reviewedAt)})
-                            </Text>
-                          </View>
-                        )}
-
-                        {/* Lịch sử xác minh & chỉnh sửa (Audit Trail) */}
-                        {Array.isArray(log.auditLogs) && log.auditLogs.length > 0 && (
-                          <View style={{ marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#F1F5F9' }}>
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 4 }}>
-                              📜 Lịch sử xác minh & Audit log:
-                            </Text>
-                            {log.auditLogs.map((al: any, aIdx: number) => (
-                              <Text key={aIdx} style={{ fontSize: 11, color: '#64748B', marginLeft: 6 }}>
-                                • [{formatDateTime(al.timestamp)}] <Text style={{ fontWeight: '600' }}>{al.actorName}</Text> ({al.action}): {al.note}
-                              </Text>
-                            ))}
-                          </View>
-                        )}
-
-                        {/* Hàng nút bấm Hành động dành cho BMB */}
-                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                          <TouchableOpacity
-                            style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#16A34A' }]}
-                            onPress={() => {
-                              setSelectedAttendanceForReview(log);
-                              setBmbReviewAction('APPROVE');
-                              setBmbAdjustedHours(String(log.workHours || 8));
-                              setBmbReviewNote('Đã kiểm tra minh chứng, hợp lệ tính công.');
-                              setShowAttendanceReviewModal(true);
-                            }}
-                          >
-                            <Text style={[styles.primaryActionBtnText, { fontSize: 12 }]}>✓ {translate("Phê duyệt tính lương")}</Text>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#8B5CF6' }]}
-                            onPress={() => {
-                              setSelectedAttendanceForReview(log);
-                              setBmbReviewAction('REQUEST_EXPLANATION');
-                              setBmbAdjustedHours('');
-                              setBmbReviewNote('Yêu cầu giải trình rõ lý do chênh lệch vị trí GPS / đi muộn.');
-                              setShowAttendanceReviewModal(true);
-                            }}
-                          >
-                            <Text style={[styles.primaryActionBtnText, { fontSize: 12 }]}>💬 {translate("Yêu cầu giải trình")}</Text>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#DC2626' }]}
-                            onPress={() => {
-                              setSelectedAttendanceForReview(log);
-                              setBmbReviewAction('REJECT');
-                              setBmbAdjustedHours('0');
-                              setBmbReviewNote('Chấm công không hợp lệ hoặc không có mặt tại tòa nhà.');
-                              setShowAttendanceReviewModal(true);
-                            }}
-                          >
-                            <Text style={[styles.primaryActionBtnText, { fontSize: 12 }]}>✕ {translate("Từ chối tính công")}</Text>
-                          </TouchableOpacity>
-                        </View>
+                    {displayedAttendanceLogs.length === 0 ? (
+                      <View style={{ paddingVertical: 40, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 10, marginVertical: 8 }}>
+                        <Text style={{ fontSize: 24, marginBottom: 8 }}>📋</Text>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: '#475569' }}>
+                          {translate("Không tìm thấy dữ liệu chấm công phù hợp bộ lọc.")}
+                        </Text>
+                        <Text style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
+                          {translate("Hãy chọn 'Tất cả KTV' hoặc thay đổi mốc thời gian để xem các ca trực khác.")}
+                        </Text>
                       </View>
-                    );
-                  })
-                )}
-              </View>
+                    ) : (
+                      displayedAttendanceLogs.map((log: any) => {
+                        const punctuality = log.punctualityStatus || 'ON_TIME';
+                        const verification = log.verificationStatus || 'VERIFIED';
+                        const hasAnom = Boolean(log.anomalyNotes);
+                        const isPendingReview = verification === 'PENDING_REVIEW' || verification === 'NEEDS_EXPLANATION';
+
+                        return (
+                          <View
+                            key={log.id}
+                            style={{
+                              width: '100%',
+                              maxWidth: '100%',
+                              flexDirection: 'column',
+                              backgroundColor: isPendingReview ? '#FFFDF7' : '#FFFFFF',
+                              borderRadius: 14,
+                              borderWidth: 1.5,
+                              borderColor: hasAnom || isPendingReview ? '#F59E0B' : '#E2E8F0',
+                              padding: 16,
+                              marginBottom: 16,
+                              shadowColor: '#0F172A',
+                              shadowOffset: { width: 0, height: 2 },
+                              shadowOpacity: 0.04,
+                              shadowRadius: 4,
+                              elevation: 2,
+                            }}
+                          >
+                            {/* KHU VỰC 1: THÔNG TIN NHÂN VIÊN & TRẠNG THÁI (ĐẦU THẺ) */}
+                            <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 10, marginBottom: 10, alignItems: 'flex-start' }]}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 260 }}>
+                                <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#BFDBFE' }}>
+                                  <Text style={{ fontSize: 20 }}>👷</Text>
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                    <Text style={{ fontWeight: '800', fontSize: 16, color: '#0F172A' }}>
+                                      {log.techName}
+                                    </Text>
+                                    <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#475569' }}>KTV</Text>
+                                    </View>
+                                  </View>
+                                  <Text style={[styles.cardLocationText, { marginTop: 2, fontSize: 12.5 }]}>
+                                    📞 {log.techPhone || '0913 402 803'} • 🏢 {log.buildingBlock || 'Tòa nhà ResiFix'} • 📅 {log.date}
+                                  </Text>
+                                </View>
+                              </View>
+
+                              {/* Badges trạng thái */}
+                              <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                {/* Badge Xác minh */}
+                                <View style={[
+                                  styles.statusPill,
+                                  verification === 'VERIFIED' ? { backgroundColor: '#DCFCE7' } :
+                                  verification === 'APPROVED' ? { backgroundColor: '#DBEAFE' } :
+                                  verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } :
+                                  verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                                ]}>
+                                  <Text style={[
+                                    styles.statusPillText,
+                                    verification === 'VERIFIED' ? { color: '#15803D' } :
+                                    verification === 'APPROVED' ? { color: '#1D4ED8' } :
+                                    verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } :
+                                    verification === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                  ]}>
+                                    {verification === 'VERIFIED' ? '✓ Tự động hợp lệ' :
+                                     verification === 'APPROVED' ? '✓ BMB đã duyệt' :
+                                     verification === 'NEEDS_EXPLANATION' ? '💬 Yêu cầu giải trình' :
+                                     verification === 'REJECTED' ? '✕ Bị từ chối' : '⏳ Chờ BMB duyệt'}
+                                  </Text>
+                                </View>
+
+                                {/* Badge Đúng giờ / Muộn */}
+                                <View style={[
+                                  styles.statusPill,
+                                  punctuality === 'ON_TIME' ? { backgroundColor: '#F0FDF4' } :
+                                  punctuality === 'ON_TRACK' ? { backgroundColor: '#EFF6FF' } : { backgroundColor: '#FFEDD5' }
+                                ]}>
+                                  <Text style={[
+                                    styles.statusPillText,
+                                    punctuality === 'ON_TIME' ? { color: '#16A34A' } :
+                                    punctuality === 'ON_TRACK' ? { color: '#2563EB' } : { color: '#C2410C' }
+                                  ]}>
+                                    {punctuality === 'ON_TIME' ? '🟢 Đúng giờ' :
+                                     punctuality === 'LATE' ? `⚠️ Đi muộn ${log.lateMinutes || 0}p` :
+                                     punctuality === 'EARLY_LEAVE' ? `⚠️ Về sớm ${log.earlyMinutes || 0}p` :
+                                     punctuality === 'LATE_AND_EARLY' ? `⚠️ Muộn ${log.lateMinutes || 0}p & Về sớm ${log.earlyMinutes || 0}p` :
+                                     '🔵 Đang trực'}
+                                  </Text>
+                                </View>
+                              </View>
+                            </View>
+
+                            {/* Ca làm việc phân công */}
+                            <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1, borderColor: '#F1F5F9' }}>
+                              <Text style={{ fontSize: 12.5, color: '#334155' }}>
+                                🕒 <Text style={{ fontWeight: '700' }}>{translate("Ca phân công:")}</Text> {log.shiftScheduled || '07:00 - 15:00'} (Ca trực chính thức)
+                              </Text>
+                            </View>
+
+                            {/* KHU VỰC 2: GRID CHECK-IN VÀ CHECK-OUT (BỐ TRÍ GRID TRÊN DESKTOP, XẾP DỌC TRÊN MOBILE) */}
+                            <View style={{ flexDirection: windowWidth > 860 ? 'row' : 'column', gap: 12, marginBottom: 12, width: '100%' }}>
+                              {/* Cột Check-in */}
+                              <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
+                                  <Text style={{ fontWeight: '800', fontSize: 13.5, color: '#16A34A' }}>🟢 CHECK-IN</Text>
+                                  <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>{formatDateTime(log.checkIn)}</Text>
+                                </View>
+
+                                {/* GPS Snapshot */}
+                                {log.checkInGps ? (
+                                  <View style={{ marginTop: 4 }}>
+                                    <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
+                                      📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
+                                    </Text>
+                                    <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
+                                      Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                    </Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                                      <View style={[
+                                        styles.statusPill,
+                                        (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                      ]}>
+                                        <Text style={[
+                                          styles.statusPillText,
+                                          (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                        ]}>
+                                          {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
+                                        </Text>
+                                      </View>
+                                      <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                        (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
+                                      </Text>
+                                      {log.checkInMapUrl && (
+                                        <TouchableOpacity onPress={() => Linking.openURL(log.checkInMapUrl)}>
+                                          <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
+                                        </TouchableOpacity>
+                                      )}
+                                    </View>
+                                    {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
+                                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
+                                        ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
+                                      </Text>
+                                    )}
+                                  </View>
+                                ) : (
+                                  <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>📍 Không có dữ liệu GPS</Text>
+                                )}
+
+                                {/* Ảnh Check-in */}
+                                {log.checkInPhotoUrl ? (
+                                  <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                    <TouchableOpacity
+                                      onPress={() => setViewingPhotoModal({
+                                        url: log.checkInPhotoUrl,
+                                        title: `Ảnh Check-in - ${log.techName}`,
+                                        meta: { time: log.checkIn, gps: log.checkInGps, techName: log.techName, date: log.date }
+                                      })}
+                                    >
+                                      <Image
+                                        source={{ uri: log.checkInPhotoUrl }}
+                                        style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
+                                      />
+                                    </TouchableOpacity>
+                                    <View>
+                                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-in</Text>
+                                      <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
+                                    </View>
+                                  </View>
+                                ) : null}
+                              </View>
+
+                              {/* Cột Check-out */}
+                              <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
+                                  <Text style={{ fontWeight: '800', fontSize: 13.5, color: log.checkOut ? '#DC2626' : '#64748B' }}>
+                                    🔴 CHECK-OUT
+                                  </Text>
+                                  <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>
+                                    {log.checkOut ? formatDateTime(log.checkOut) : 'Chưa check-out'}
+                                  </Text>
+                                </View>
+
+                                {/* GPS Snapshot */}
+                                {log.checkOutGps ? (
+                                  <View style={{ marginTop: 4 }}>
+                                    <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
+                                      📍 Tọa độ GPS: {log.checkOutGps.latitude?.toFixed(6)}, {log.checkOutGps.longitude?.toFixed(6)}
+                                    </Text>
+                                    <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
+                                      Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkOutGps.distanceMeters ?? log.checkOutGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                    </Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                                      <View style={[
+                                        styles.statusPill,
+                                        (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                      ]}>
+                                        <Text style={[
+                                          styles.statusPillText,
+                                          (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                        ]}>
+                                          {(log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Vượt bán kính cho phép'}
+                                        </Text>
+                                      </View>
+                                      <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                        (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters ?? 10}m)
+                                      </Text>
+                                      {log.checkOutMapUrl && (
+                                        <TouchableOpacity onPress={() => Linking.openURL(log.checkOutMapUrl)}>
+                                          <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
+                                        </TouchableOpacity>
+                                      )}
+                                    </View>
+                                    {(log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters) > 100 && (
+                                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
+                                        ⚠️ Độ chính xác GPS thấp (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters}m &gt; 100m)
+                                      </Text>
+                                    )}
+                                  </View>
+                                ) : (
+                                  <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>
+                                    {log.checkOut ? '📍 Không có dữ liệu GPS' : '⏳ KTV đang trong ca trực'}
+                                  </Text>
+                                )}
+
+                                {/* Ảnh Check-out */}
+                                {log.checkOutPhotoUrl ? (
+                                  <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                    <TouchableOpacity
+                                      onPress={() => setViewingPhotoModal({
+                                        url: log.checkOutPhotoUrl,
+                                        title: `Ảnh Check-out - ${log.techName}`,
+                                        meta: { time: log.checkOut, gps: log.checkOutGps, techName: log.techName, date: log.date }
+                                      })}
+                                    >
+                                      <Image
+                                        source={{ uri: log.checkOutPhotoUrl }}
+                                        style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
+                                      />
+                                    </TouchableOpacity>
+                                    <View>
+                                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-out</Text>
+                                      <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
+                                    </View>
+                                  </View>
+                                ) : null}
+                              </View>
+                            </View>
+
+                            {/* KHU VỰC 3: GIỜ CÔNG & TIỀN LƯƠNG TÍNH TOÁN */}
+                            <View style={{ backgroundColor: '#F0F9FF', borderRadius: 10, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#BAE6FD' }}>
+                              <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6 }]}>
+                                <Text style={{ fontSize: 13, fontWeight: '700', color: '#0369A1' }}>
+                                  ⏱️ Giờ công: {log.workHours || 0}h thực tế • {log.billableHours ?? log.workHours ?? 0}h tính lương
+                                  {log.nightHours ? ` (Trong đó: ${log.nightHours}h ca đêm 22h-6h)` : ''}
+                                </Text>
+                                <Text style={{ fontSize: 14, fontWeight: '800', color: '#0284C7' }}>
+                                  Ước tính: {Number(((log.regularHours ?? (log.billableHours ?? log.workHours ?? 0)) * 50000) + ((log.nightHours || 0) * 50000 * 1.3)).toLocaleString('vi-VN')} đ
+                                </Text>
+                              </View>
+                              <Text style={{ fontSize: 11, color: '#0284C7', marginTop: 3 }}>
+                                * Đơn giá: 50.000 VNĐ/giờ tiêu chuẩn • Ca đêm (22:00 - 06:00) phụ trội +30% (65.000 VNĐ/giờ).
+                              </Text>
+                            </View>
+
+                            {/* Ngoại lệ / Bất thường phát hiện tự động */}
+                            {log.anomalyNotes && (
+                              <View style={{ backgroundColor: '#FFFBEB', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#FDE68A' }}>
+                                <Text style={{ fontSize: 12.5, color: '#B45309', fontWeight: '700' }}>
+                                  ⚠️ Ghi chú ngoại lệ: {log.anomalyNotes}
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Giải trình từ Kỹ thuật viên */}
+                            {log.explanationText && (
+                              <View style={{ backgroundColor: '#F5F3FF', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#DDD6FE' }}>
+                                <Text style={{ fontSize: 12.5, color: '#6D28D9', fontWeight: '700' }}>
+                                  💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>"{log.explanationText}"</Text>
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Ghi chú duyệt của BMB */}
+                            {log.reviewNote && (
+                              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <Text style={{ fontSize: 12.5, color: '#334155' }}>
+                                  📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> "{log.reviewNote}" ({formatDateTime(log.reviewedAt)})
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Lịch sử xác minh & chỉnh sửa (Audit Trail) */}
+                            {Array.isArray(log.auditLogs) && log.auditLogs.length > 0 && (
+                              <View style={{ marginBottom: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#F1F5F9' }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 4 }}>
+                                  📜 Lịch sử xác minh & Audit log:
+                                </Text>
+                                {log.auditLogs.map((al: any, aIdx: number) => (
+                                  <Text key={aIdx} style={{ fontSize: 11, color: '#64748B', marginLeft: 6 }}>
+                                    • [{formatDateTime(al.timestamp)}] <Text style={{ fontWeight: '600' }}>{al.actorName}</Text> ({al.action}): {al.note}
+                                  </Text>
+                                ))}
+                              </View>
+                            )}
+
+                            {/* KHU VỰC 4: NÚT THAO TÁC BMB (PHÊ DUYỆT / YÊU CẦU GIẢI TRÌNH / TỪ CHỐI) */}
+                            <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                              <TouchableOpacity
+                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#16A34A', borderRadius: 8 }]}
+                                onPress={() => {
+                                  setSelectedAttendanceForReview(log);
+                                  setBmbReviewAction('APPROVE');
+                                  setBmbAdjustedHours(String(log.workHours || 8));
+                                  setBmbReviewNote('Đã kiểm tra minh chứng, hợp lệ tính công.');
+                                  setShowAttendanceReviewModal(true);
+                                }}
+                              >
+                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✓ {translate("Phê duyệt tính lương")}</Text>
+                              </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#8B5CF6', borderRadius: 8 }]}
+                                onPress={() => {
+                                  setSelectedAttendanceForReview(log);
+                                  setBmbReviewAction('REQUEST_EXPLANATION');
+                                  setBmbAdjustedHours('');
+                                  setBmbReviewNote('Yêu cầu giải trình rõ lý do chênh lệch vị trí GPS / đi muộn.');
+                                  setShowAttendanceReviewModal(true);
+                                }}
+                              >
+                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>💬 {translate("Yêu cầu giải trình")}</Text>
+                              </TouchableOpacity>
+
+                              <TouchableOpacity
+                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#DC2626', borderRadius: 8 }]}
+                                onPress={() => {
+                                  setSelectedAttendanceForReview(log);
+                                  setBmbReviewAction('REJECT');
+                                  setBmbAdjustedHours('0');
+                                  setBmbReviewNote('Không công nhận ca trực do vi phạm quy chế chấm công.');
+                                  setShowAttendanceReviewModal(true);
+                                }}
+                              >
+                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✕ {translate("Từ chối ca trực")}</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
+                  </View>
+                );
+              })()}
             </ScrollView>
           </View>
         )}
@@ -8172,7 +9212,7 @@ function AppContent() {
         {/* MÀN HÌNH 05 BMB: CHẤM CÔNG & TÍNH LƯƠNG KỸ THUẬT VIÊN                 */}
         {/* ==================================================================== */}
         {bmbNavTab === 'PAYROLL' && (
-          <View style={styles.bmbContentTwoCols}>
+          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
             {/* CỘT TRÁI: BẢNG LƯƠNG & DUYỆT TĂNG CA */}
             <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
               <View style={styles.cardTopRow}>
@@ -8826,8 +9866,38 @@ function AppContent() {
             ) : (
               <>
                 <Text style={styles.technicianModalTitle}>
-                  {translate(technicianDialogMode === 'edit' ? 'Sửa kỹ thuật viên' : 'Thêm kỹ thuật viên')}
+                  {translate(technicianDialogMode === 'edit' ? 'Sửa kỹ thuật viên' : 'Thêm tài khoản mới')}
                 </Text>
+                {technicianDialogMode === 'create' && (
+                  <View style={{ flexDirection: 'row', backgroundColor: '#F1F5F9', borderRadius: 8, padding: 3, marginBottom: 12 }}>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 }}
+                      onPress={() => {
+                        setTechnicianDialogMode(null);
+                        setResidentForm({
+                          fullName: '',
+                          phone: '',
+                          email: '',
+                          apartmentCode: 'G101',
+                          buildingBlock: 'Tòa G',
+                          floorNumber: 1,
+                          residencyRole: 'OWNER',
+                          moveInDate: new Date().toISOString().slice(0, 10),
+                          moveOutDate: '',
+                          isRepresentative: true,
+                        });
+                        setResidentModalMode('create');
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: '#64748B' }}>🏢 {translate('Cư dân')}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: '#FFFFFF', borderRadius: 6, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 2, elevation: 1 }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: '#2563EB' }}>👷 {translate('Kỹ thuật viên')}</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
                 <ScrollView
                   style={styles.technicianFormScroll}
                   keyboardShouldPersistTaps="handled"
@@ -9166,13 +10236,13 @@ function AppContent() {
                 <Text style={styles.technicianModalDescription}>
                   {translate('Cư dân:')} {selectedResident?.fullName} ({selectedResident?.phone})
                 </Text>
-                <Text style={styles.fieldLabel}>{translate('Mật khẩu mới (tối thiểu 12 ký tự) *')}</Text>
+                <Text style={styles.fieldLabel}>{translate('Mật khẩu mới (tùy chọn, để trống để tự sinh mật khẩu tạm)')}</Text>
                 <TextInput
                   style={styles.technicianFormInput}
                   value={newPasswordInput}
                   onChangeText={setNewPasswordInput}
                   secureTextEntry
-                  placeholder="••••••••"
+                  placeholder="Để trống để tự tạo mật khẩu tạm thời 10 ký tự"
                   placeholderTextColor="#94A3B8"
                 />
                 <View style={styles.technicianModalActions}>
@@ -9193,14 +10263,51 @@ function AppContent() {
             ) : (
               <>
                 <Text style={styles.technicianModalTitle}>
-                  {translate(residentModalMode === 'edit' ? 'Sửa thông tin cư dân' : 'Thêm cư dân mới')}
+                  {translate(residentModalMode === 'edit' ? 'Sửa thông tin cư dân' : 'Thêm tài khoản mới')}
                 </Text>
+                {residentModalMode === 'create' && (
+                  <View style={{ flexDirection: 'row', backgroundColor: '#F1F5F9', borderRadius: 8, padding: 3, marginBottom: 12 }}>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: '#FFFFFF', borderRadius: 6, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 2, elevation: 1 }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: '#2563EB' }}>🏢 {translate('Cư dân')}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 }}
+                      onPress={() => {
+                        setResidentModalMode(null);
+                        openCreateTechnician();
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: '#64748B' }}>👷 {translate('Kỹ thuật viên')}</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
                 <ScrollView style={styles.technicianFormScroll} showsVerticalScrollIndicator={false}>
+                  {residentModalMode === 'create' && (
+                    <View style={{ backgroundColor: '#EFF6FF', borderRadius: 8, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#BFDBFE' }}>
+                      <Text style={{ fontSize: 13, color: '#1E40AF', lineHeight: 18 }}>
+                        {translate('ℹ️ Hệ thống sẽ tự động tạo mật khẩu tạm thời an toàn. Sau khi bấm "Lưu thông tin", mật khẩu sẽ được hiển thị để bạn bàn giao cho cư dân.')}
+                      </Text>
+                    </View>
+                  )}
+
+                  {residentModalError && (
+                    <View style={{ backgroundColor: '#FEE2E2', borderWidth: 1, borderColor: '#F87171', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                      <Text style={{ color: '#B91C1C', fontSize: 13, fontWeight: '700', lineHeight: 18 }}>
+                        ⚠️ {residentModalError}
+                      </Text>
+                    </View>
+                  )}
+
                   <Text style={styles.technicianFieldLabel}>{translate('Họ và tên *')}</Text>
                   <TextInput
                     style={styles.technicianFormInput}
                     value={residentForm.fullName}
-                    onChangeText={(val) => setResidentForm((f) => ({ ...f, fullName: val }))}
+                    onChangeText={(val) => {
+                      setResidentModalError(null);
+                      setResidentForm((f) => ({ ...f, fullName: val }));
+                    }}
                     placeholder="Nguyễn Văn A"
                     placeholderTextColor="#94A3B8"
                   />
@@ -9209,99 +10316,356 @@ function AppContent() {
                   <TextInput
                     style={styles.technicianFormInput}
                     value={residentForm.phone}
-                    onChangeText={(val) => setResidentForm((f) => ({ ...f, phone: val.replace(/[^\d]/g, '').slice(0, 10) }))}
+                    onChangeText={(val) => {
+                      setResidentModalError(null);
+                      setResidentForm((f) => ({ ...f, phone: val.replace(/[^\d]/g, '').slice(0, 10) }));
+                    }}
                     keyboardType="phone-pad"
                     maxLength={10}
                     placeholder="0905123456"
                     placeholderTextColor="#94A3B8"
                   />
-<Text style={styles.technicianFieldLabel}>
-  {translate('Email cư dân (để nhận OTP kích hoạt) *')}
-</Text>
-<TextInput
-  style={styles.technicianFormInput}
-  value={residentForm.email}
-  onChangeText={(val) =>
-    setResidentForm((f) => ({ ...f, email: val }))
-  }
-  keyboardType="email-address"
-  autoCapitalize="none"
-  placeholder="email@example.com"
-/>
 
-{residentModalMode === 'create' && (
-  <>
-    <Text style={styles.technicianFieldLabel}>
-      {translate('Mật khẩu ban đầu (không bắt buộc)')}
-    </Text>
-    <TextInput
-      style={styles.technicianFormInput}
-      value={residentForm.password}
-      onChangeText={(val) =>
-        setResidentForm((f) => ({ ...f, password: val }))
-      }
-      secureTextEntry
-      autoCapitalize="none"
-      placeholder={translate('Để trống nếu cư dân tự tạo qua OTP, hoặc nhập tối thiểu 12 ký tự')}
-      placeholderTextColor="#94A3B8"
-    />
-  </>
-)}
-                  <Text style={styles.technicianFieldLabel}>{translate('Mã căn hộ *')}</Text>
+                  <Text style={styles.technicianFieldLabel}>{translate('Email cư dân (dùng để khôi phục mật khẩu khi quên)')}</Text>
                   <TextInput
                     style={styles.technicianFormInput}
-                    value={residentForm.apartmentCode}
-                    onChangeText={(val) => setResidentForm((f) => ({ ...f, apartmentCode: val.toUpperCase() }))}
-                    placeholder="A-1204"
+                    value={residentForm.email}
+                    onChangeText={(val) => {
+                      setResidentModalError(null);
+                      setResidentForm((f) => ({ ...f, email: val }));
+                    }}
+                    keyboardType="email-address"
+                    autoCapitalize="none"
+                    placeholder="email@example.com"
                     placeholderTextColor="#94A3B8"
                   />
 
-                  <Text style={styles.technicianFieldLabel}>{translate('Tòa / Khối *')}</Text>
+                  {/* LỰA CHỌN CĂN HỘ PHÂN CẤP (TÒA -> TẦNG -> PHÒNG) */}
+                  <Text style={[styles.technicianFieldLabel, { marginTop: 14 }]}>
+                    {translate('Căn hộ cư trú (Hệ thống 75 phòng Tòa G, F, E) *')}
+                  </Text>
+
+                  {/* 1. Chọn Tòa: G, F, E */}
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', marginTop: 4, marginBottom: 4 }}>
+                    {translate('1. Tòa nhà:')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    {(['G', 'F', 'E'] as const).map((blockCode) => {
+                      const isSel = residentForm.buildingBlock.includes(blockCode) || residentForm.apartmentCode.startsWith(blockCode);
+                      return (
+                        <TouchableOpacity
+                          key={blockCode}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 8,
+                            borderRadius: 6,
+                            alignItems: 'center',
+                            backgroundColor: isSel ? '#2563EB' : '#F1F5F9',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => {
+                            setResidentModalError(null);
+                            const newBlock = `Tòa ${blockCode}`;
+                            const fl = residentForm.floorNumber || 1;
+                            const currRoomNum = residentForm.apartmentCode.slice(2) || '01';
+                            const newCode = `${blockCode}${fl}${currRoomNum}`;
+                            setResidentForm((f) => ({
+                              ...f,
+                              buildingBlock: newBlock,
+                              apartmentCode: newCode,
+                            }));
+                          }}
+                        >
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            Tòa {blockCode}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* 2. Chọn Tầng: 1..5 */}
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', marginTop: 8, marginBottom: 4 }}>
+                    {translate('2. Tầng số:')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {[1, 2, 3, 4, 5].map((fl) => {
+                      const isSel = residentForm.floorNumber === fl;
+                      return (
+                        <TouchableOpacity
+                          key={fl}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 8,
+                            borderRadius: 6,
+                            alignItems: 'center',
+                            backgroundColor: isSel ? '#2563EB' : '#F1F5F9',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => {
+                            setResidentModalError(null);
+                            const bCode = residentForm.apartmentCode[0] || 'G';
+                            const currRoomNum = residentForm.apartmentCode.slice(2) || '01';
+                            const newCode = `${bCode}${fl}${currRoomNum}`;
+                            setResidentForm((f) => ({
+                              ...f,
+                              floorNumber: fl,
+                              apartmentCode: newCode,
+                            }));
+                          }}
+                        >
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            Tầng {fl}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* 3. Chọn Phòng: 01..05 */}
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', marginTop: 8, marginBottom: 4 }}>
+                    {translate('3. Số phòng:')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {[1, 2, 3, 4, 5].map((rm) => {
+                      const rmStr = String(rm).padStart(2, '0');
+                      const bCode = residentForm.apartmentCode[0] || 'G';
+                      const fl = residentForm.floorNumber || 1;
+                      const targetCode = `${bCode}${fl}${rmStr}`;
+                      const isSel = residentForm.apartmentCode === targetCode;
+                      return (
+                        <TouchableOpacity
+                          key={rm}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 8,
+                            borderRadius: 6,
+                            alignItems: 'center',
+                            backgroundColor: isSel ? '#2563EB' : '#F1F5F9',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => {
+                            setResidentModalError(null);
+                            setResidentForm((f) => ({
+                              ...f,
+                              apartmentCode: targetCode,
+                            }));
+                          }}
+                        >
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            Phòng {rmStr}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Thẻ hiển thị xác nhận phòng đã chọn */}
+                  <View style={{ backgroundColor: '#F0FDF4', borderColor: '#86EFAC', borderWidth: 1, borderRadius: 8, padding: 12, marginTop: 10, marginBottom: 6 }}>
+                    <Text style={{ fontWeight: '800', color: '#166534', fontSize: 14 }}>
+                      ✓ Căn hộ đã chọn: Căn {residentForm.apartmentCode} ({residentForm.buildingBlock}, Tầng {residentForm.floorNumber})
+                    </Text>
+                    <Text style={{ color: '#15803D', fontSize: 12, marginTop: 4 }}>
+                      🏢 Địa chỉ: Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng
+                    </Text>
+                    <Text style={{ color: '#7C3AED', fontSize: 12, fontWeight: '700', marginTop: 2 }}>
+                      Mã QR phòng cố định: ROOM:{residentForm.apartmentCode}
+                    </Text>
+                  </View>
+
+                  {/* Vai trò cư trú */}
+                  <Text style={[styles.technicianFieldLabel, { marginTop: 12 }]}>{translate('Vai trò cư trú *')}</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                    {(['OWNER', 'TENANT', 'MEMBER'] as const).map((r) => {
+                      const label = r === 'OWNER' ? 'Chủ sở hữu' : r === 'TENANT' ? 'Khách thuê' : 'Thành viên';
+                      const isSel = (residentForm.residencyRole || 'TENANT') === r;
+                      return (
+                        <TouchableOpacity
+                          key={r}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 10,
+                            borderRadius: 6,
+                            alignItems: 'center',
+                            backgroundColor: isSel ? '#2563EB' : '#F1F5F9',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => setResidentForm((f) => ({ ...f, residencyRole: r, isRepresentative: r === 'OWNER' }))}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '600', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            {translate(label)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <Text style={[styles.technicianFieldLabel, { marginTop: 12 }]}>{translate('Ngày chuyển vào *')}</Text>
                   <TextInput
                     style={styles.technicianFormInput}
-                    value={residentForm.buildingBlock}
-                    onChangeText={(val) => setResidentForm((f) => ({ ...f, buildingBlock: val }))}
-                    placeholder="Tòa S1"
+                    value={residentForm.moveInDate}
+                    onChangeText={(val) => setResidentForm((f) => ({ ...f, moveInDate: val }))}
+                    placeholder="YYYY-MM-DD"
                     placeholderTextColor="#94A3B8"
                   />
 
-                  <Text style={styles.technicianFieldLabel}>{translate('Tầng số *')}</Text>
+                  <Text style={styles.technicianFieldLabel}>{translate('Ngày chuyển đi dự kiến (tùy chọn)')}</Text>
                   <TextInput
                     style={styles.technicianFormInput}
-                    value={String(residentForm.floorNumber)}
-                    onChangeText={(val) => setResidentForm((f) => ({ ...f, floorNumber: Number(val) || 1 }))}
-                    keyboardType="numeric"
-                    placeholder="12"
+                    value={residentForm.moveOutDate}
+                    onChangeText={(val) => setResidentForm((f) => ({ ...f, moveOutDate: val }))}
+                    placeholder="YYYY-MM-DD (để trống nếu chưa xác định)"
                     placeholderTextColor="#94A3B8"
                   />
-
-                  <TouchableOpacity
-                    style={[styles.checkboxRow, { marginTop: 10 }]}
-                    onPress={() => setResidentForm((f) => ({ ...f, isRepresentative: !f.isRepresentative }))}
-                  >
-                    <View style={[styles.checkbox, residentForm.isRepresentative && styles.checkboxChecked]}>
-                      {residentForm.isRepresentative && <Text style={styles.checkMark}>✓</Text>}
-                    </View>
-                    <Text style={styles.rememberText}>{translate('Người đại diện căn hộ (Chủ hộ)')}</Text>
-                  </TouchableOpacity>
                 </ScrollView>
 
                 <View style={styles.technicianModalActions}>
                   <TouchableOpacity
                     style={styles.technicianCancelButton}
-                    onPress={() => setResidentModalMode(null)}
+                    onPress={() => {
+                      setResidentModalError(null);
+                      setResidentModalMode(null);
+                    }}
                   >
                     <Text style={styles.technicianCancelButtonText}>{translate('Hủy')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.primaryActionBtn, { flex: 1, paddingVertical: 10 }]}
+                    style={[styles.primaryActionBtn, { flex: 1, paddingVertical: 10, opacity: residentModalBusy ? 0.7 : 1 }]}
+                    disabled={residentModalBusy}
                     onPress={handleSaveResident}
                   >
-                    <Text style={styles.primaryActionBtnText}>{translate('Lưu thông tin')}</Text>
+                    {residentModalBusy ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : (
+                      <Text style={styles.primaryActionBtnText}>{translate('Lưu thông tin')}</Text>
+                    )}
                   </TouchableOpacity>
                 </View>
               </>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal Thông báo Mật khẩu tạm thời cho BMB */}
+      <Modal
+        visible={createdTempPasswordData !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCreatedTempPasswordData(null)}
+      >
+        <View style={styles.technicianModalOverlay}>
+          <View style={styles.technicianModalCard}>
+            <Text style={styles.technicianModalTitle}>{translate('Mật khẩu tạm thời của Cư dân')}</Text>
+            <Text style={styles.technicianModalDescription}>
+              {translate('Tài khoản đã được cập nhật trên hệ thống. Hãy sao chép mật khẩu bên dưới và bàn giao trực tiếp cho cư dân:')}
+            </Text>
+            <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 12, marginVertical: 10, borderWidth: 1, borderColor: '#E2E8F0' }}>
+              <Text style={{ fontSize: 13, color: '#334155' }}>
+                <Text style={{ fontWeight: '700' }}>Cư dân:</Text> {createdTempPasswordData?.residentName} ({createdTempPasswordData?.phone})
+              </Text>
+              <Text style={{ fontSize: 13, color: '#334155', marginTop: 4 }}>
+                <Text style={{ fontWeight: '700' }}>Căn hộ:</Text> {createdTempPasswordData?.apartmentCode}
+              </Text>
+            </View>
+
+            <View style={{ backgroundColor: '#EFF6FF', borderRadius: 8, padding: 16, alignItems: 'center', borderWidth: 1, borderColor: '#BFDBFE', marginVertical: 8 }}>
+              <Text style={{ fontSize: 12, color: '#1E40AF', fontWeight: '600', marginBottom: 4 }}>
+                {translate('MẬT KHẨU TẠM THỜI (HIỂN THỊ 1 LẦN DUY NHẤT)')}
+              </Text>
+              <Text style={{ fontSize: 24, fontWeight: '800', letterSpacing: 2, color: '#1D4ED8', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }}>
+                {createdTempPasswordData?.temporaryPassword}
+              </Text>
+              <TouchableOpacity
+                style={{ marginTop: 10, backgroundColor: '#2563EB', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6 }}
+                onPress={() => {
+                  if (createdTempPasswordData?.temporaryPassword) {
+                    if (typeof navigator !== 'undefined' && (navigator as any).clipboard) {
+                      (navigator as any).clipboard.writeText(createdTempPasswordData.temporaryPassword);
+                    }
+                    showToast(translate('✓ Đã sao chép mật khẩu vào bộ nhớ tạm!'));
+                  }
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 13 }}>📋 {translate('Sao chép mật khẩu')}</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 12, color: '#B45309', backgroundColor: '#FEF3C7', padding: 10, borderRadius: 6, marginVertical: 6 }}>
+              {translate('⚠️ Vì lý do an toàn, mật khẩu tạm thời này chỉ hiển thị một lần. Cư dân sẽ bắt buộc đổi mật khẩu mới ở lần đăng nhập đầu tiên.')}
+            </Text>
+
+            <TouchableOpacity
+              style={[styles.primaryActionBtn, { marginTop: 12, paddingVertical: 12 }]}
+              onPress={() => setCreatedTempPasswordData(null)}
+            >
+              <Text style={styles.primaryActionBtnText}>{translate('Đã ghi nhận & Đóng')}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal Đổi mật khẩu lần đầu bắt buộc cho Cư dân */}
+      <Modal
+        visible={showFirstLoginPasswordModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {}}
+      >
+        <View style={styles.technicianModalOverlay}>
+          <View style={styles.technicianModalCard}>
+            <Text style={styles.technicianModalTitle}>{translate('Đổi mật khẩu lần đầu')}</Text>
+            <Text style={styles.technicianModalDescription}>
+              {translate('Để bảo vệ an toàn cho tài khoản, quý cư dân vui lòng thiết lập mật khẩu mới trước khi bắt đầu sử dụng ứng dụng.')}
+            </Text>
+
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.fieldLabel}>{translate('Mật khẩu tạm thời hiện tại *')}</Text>
+              <TextInput
+                style={styles.technicianFormInput}
+                value={firstLoginCurrentPassword}
+                onChangeText={setFirstLoginCurrentPassword}
+                secureTextEntry
+                placeholder={translate('Nhập mật khẩu tạm đã nhận')}
+                placeholderTextColor="#94A3B8"
+              />
+
+              <Text style={[styles.fieldLabel, { marginTop: 10 }]}>{translate('Mật khẩu mới (tối thiểu 6 ký tự) *')}</Text>
+              <TextInput
+                style={styles.technicianFormInput}
+                value={firstLoginNewPassword}
+                onChangeText={setFirstLoginNewPassword}
+                secureTextEntry
+                placeholder={translate('Nhập mật khẩu mới')}
+                placeholderTextColor="#94A3B8"
+              />
+
+              <Text style={[styles.fieldLabel, { marginTop: 10 }]}>{translate('Xác nhận mật khẩu mới *')}</Text>
+              <TextInput
+                style={styles.technicianFormInput}
+                value={firstLoginConfirmPassword}
+                onChangeText={setFirstLoginConfirmPassword}
+                secureTextEntry
+                placeholder={translate('Nhập lại mật khẩu mới')}
+                placeholderTextColor="#94A3B8"
+              />
+
+              <TouchableOpacity
+                style={[styles.primaryActionBtn, { marginTop: 20, paddingVertical: 12 }, firstLoginBusy && { opacity: 0.6 }]}
+                onPress={handleChangePasswordFirstLogin}
+                disabled={firstLoginBusy}
+              >
+                {firstLoginBusy ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.primaryActionBtnText}>{translate('Xác nhận & Bắt đầu sử dụng')}</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -10044,10 +11408,10 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   bmbPageTitle: {
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: '800',
     color: '#0F172A',
-    letterSpacing: -0.3,
+    letterSpacing: -0.4,
   },
   bmbPageSubtitle: {
     fontSize: 12.5,
@@ -10619,7 +11983,7 @@ const styles = StyleSheet.create({
   },
   loginSubmitBtn: {
     backgroundColor: '#2563EB',
-    height: 46,
+    height: 48,
     borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
@@ -10725,15 +12089,15 @@ const styles = StyleSheet.create({
   },
   ctaPrimaryBtn: {
     backgroundColor: '#2563EB',
-    height: 42,
-    borderRadius: 8,
+    height: 48,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#2563EB',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.12,
-    shadowRadius: 3,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.16,
+    shadowRadius: 4,
+    elevation: 3,
   },
   ctaPrimaryBtnText: {
     color: '#FFFFFF',
@@ -10747,7 +12111,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   sectionTitleText: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '800',
     color: '#0F172A',
   },

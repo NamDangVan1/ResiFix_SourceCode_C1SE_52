@@ -22,14 +22,15 @@ async function main() {
     },
   });
 
-  // 2. Tạo tài khoản Kỹ thuật viên (Đặng Văn Nam - Điện Nước)
-  const techNam = await prisma.user.upsert({
-    where: { phone: '0356166863' },
+  // 2. Tạo tài khoản Kỹ thuật viên (Đặng Thành Quyết)
+  const techQuyet = await prisma.user.upsert({
+    where: { phone: '0913402803' },
     update: {},
     create: {
-      phone: '0356166863',
+      phone: '0913402803',
+      email: 'thanhquyet100105@gmail.com',
       passwordHash: defaultPassword,
-      fullName: 'Đặng Văn Nam',
+      fullName: 'Đặng Thành Quyết',
       role: Role.TECHNICIAN,
       specialty: IncidentCategory.PLUMBING,
       specialtyLabel: 'Kỹ thuật viên Điện - Nước',
@@ -38,18 +39,19 @@ async function main() {
     },
   });
 
-  // 3. Tạo tài khoản Cư dân (Căn hộ A-1204)
+  // 3. Tạo tài khoản Cư dân chính thức (Cristiano Ronaldo - Căn hộ G103)
   const resident = await prisma.user.upsert({
-    where: { phone: '0905123456' },
+    where: { phone: '0913400800' },
     update: {},
     create: {
-      phone: '0905123456',
+      phone: '0913400800',
+      email: 'dtq12305@gmail.com',
       passwordHash: defaultPassword,
-      fullName: 'Nguyễn Văn Cư Dân',
+      fullName: 'Cristiano Ronaldo',
       role: Role.RESIDENT,
-      apartmentCode: 'A-1204',
-      buildingBlock: 'Tòa S1',
-      floorNumber: 12,
+      apartmentCode: 'G103',
+      buildingBlock: 'Tòa G',
+      floorNumber: 1,
     },
   });
 
@@ -86,7 +88,7 @@ async function main() {
       finalCategory: IncidentCategory.PLUMBING,
       finalPriority: PriorityLevel.HIGH,
       bmbApprovedById: bmbAdmin.id,
-      assignedTechId: techNam.id,
+      assignedTechId: techQuyet.id,
       status: TicketStatus.COMPLETED,
       techRepairNote: 'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.',
       residentId: resident.id,
@@ -94,8 +96,8 @@ async function main() {
         create: [
           { toStatus: TicketStatus.PENDING, title: 'Đã tiếp nhận (Pending)', note: 'Gemini AI tự động phân loại: Điện - Nước', changedById: resident.id },
           { fromStatus: TicketStatus.PENDING, toStatus: TicketStatus.ASSIGNED, title: 'Đã phân công (Assigned)', note: 'BMB đã duyệt gợi ý AI & giao việc', changedById: bmbAdmin.id },
-          { fromStatus: TicketStatus.ASSIGNED, toStatus: TicketStatus.IN_PROGRESS, title: 'Đang xử lý (In Progress)', note: 'KTV đã xác nhận và bắt đầu sửa', changedById: techNam.id },
-          { fromStatus: TicketStatus.IN_PROGRESS, toStatus: TicketStatus.COMPLETED, title: 'Hoàn thành sửa chữa', note: 'KTV Đặng Văn Nam đã gửi ảnh nghiệm thu', changedById: techNam.id },
+          { fromStatus: TicketStatus.ASSIGNED, toStatus: TicketStatus.IN_PROGRESS, title: 'Đang xử lý (In Progress)', note: 'KTV đã xác nhận và bắt đầu sửa', changedById: techQuyet.id },
+          { fromStatus: TicketStatus.IN_PROGRESS, toStatus: TicketStatus.COMPLETED, title: 'Hoàn thành sửa chữa', note: 'KTV Đặng Thành Quyết đã gửi ảnh nghiệm thu', changedById: techQuyet.id },
         ],
       },
     },

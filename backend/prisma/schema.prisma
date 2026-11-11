@@ -65,6 +65,7 @@ model User {
   role          Role              @default(RESIDENT)
   isActive      Boolean           @default(true)
   isActivated   Boolean           @default(false) // Cờ kích hoạt tài khoản qua OTP (Tài khoản mới tạo mặc định false)
+  mustChangePassword Boolean      @default(false) // Bắt buộc đổi mật khẩu ở lần đăng nhập đầu tiên (mật khẩu tạm)
   tokenVersion  Int               @default(0)     // Phiên bản token (dùng để thu hồi token cũ khi đổi mật khẩu)
 
   // Trường dành riêng cho CƯ DÂN
@@ -292,6 +293,7 @@ model ResidencyRecord {
   apartmentCode    String
   buildingBlock    String
   floorNumber      Int
+  residencyRole    String    @default("TENANT") // OWNER, TENANT, MEMBER
   moveInDate       DateTime  @default(now())
   moveOutDate      DateTime?
   isRepresentative Boolean   @default(false)

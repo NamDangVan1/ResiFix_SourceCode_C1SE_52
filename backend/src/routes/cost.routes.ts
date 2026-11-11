@@ -2,7 +2,6 @@ import { Router, Response } from 'express';
 import { Role, TicketStatus } from '@prisma/client';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../db';
-import { resiFixStore, MaterialItem, TicketRepairCost } from '../data/resifix_store';
 
 const router = Router();
 
@@ -10,6 +9,52 @@ const getParamAsString = (param: string | string[] | undefined): string => {
   if (Array.isArray(param)) return param[0] || '';
   return String(param || '');
 };
+
+function formatCostRecord(c: any) {
+  if (!c) return null;
+  return {
+    id: c.id,
+    ticketId: c.ticketId,
+    ticketCode: c.ticketCode,
+    proposedById: c.proposedById,
+    proposedByName: c.proposedByName,
+    status: c.status,
+    otherCost: Number(c.otherCost || 0),
+    totalCost: Number(c.totalCost || 0),
+    receiptProofUrl: c.receiptProofUrl || null,
+    reviewNote: c.reviewNote || null,
+    reviewedBy: c.reviewedByName || (c.reviewedBy ? c.reviewedBy.fullName : null),
+    reviewedAt: c.reviewedAt ? new Date(c.reviewedAt).toISOString() : null,
+    createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : new Date().toISOString(),
+    updatedAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : new Date().toISOString(),
+    items: (c.items || []).map((it: any) => ({
+      id: it.id,
+      materialCode: it.materialCode,
+      materialName: it.materialName,
+      unit: it.unit,
+      quantity: it.quantity,
+      unitPrice: Number(it.unitPrice || 0),
+      totalPrice: Number(it.totalPrice || 0),
+      notes: it.notes || null,
+    })),
+  };
+}
+
+async function getCostConfig(): Promise<{ anomalyThresholdVnd: number; requireReceiptThresholdVnd: number }> {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'cost_config' } });
+    if (setting?.value && typeof setting.value === 'object') {
+      const val = setting.value as any;
+      return {
+        anomalyThresholdVnd: Number(val.anomalyThresholdVnd) || 5000000,
+        requireReceiptThresholdVnd: Number(val.requireReceiptThresholdVnd) || 500000,
+      };
+    }
+  } catch (err) {
+    console.warn('[COST_CONFIG_READ_ERROR]', err);
+  }
+  return { anomalyThresholdVnd: 5000000, requireReceiptThresholdVnd: 500000 };
+}
 
 // ============================================================================
 // 1. KỸ THUẬT VIÊN & CƯ DÂN: XEM VÀ ĐỀ XUẤT CHI PHÍ SỬA CHỮA THEO TICKET
@@ -54,8 +99,12 @@ router.get(
         return;
       }
 
-      const store = resiFixStore.get();
-      const costRecord = store.repairCosts.find((c) => c.ticketId === ticketId);
+      const dbCost = await prisma.repairMaterialCost.findUnique({
+        where: { ticketId },
+        include: { items: true },
+      });
+
+      const costRecord = formatCostRecord(dbCost);
 
       // Nếu là cư dân: Chỉ hiển thị chi phí khi đã được BMB duyệt (APPROVED)
       if (userRole === Role.RESIDENT && costRecord && costRecord.status !== 'APPROVED') {
@@ -111,38 +160,32 @@ router.post(
         return;
       }
 
-      // Validate và tính toán tiền chính xác ở Backend (VND không có số lẻ)
-      const sanitizedItems: MaterialItem[] = [];
-      const seenCodes = new Set<string>();
+      // Validate chi tiết từng vật tư
+      const sanitizedItems: Array<{
+        materialCode: string;
+        materialName: string;
+        unit: string;
+        quantity: number;
+        unitPrice: number;
+        totalPrice: number;
+        notes: string | null;
+      }> = [];
 
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
-        const code = typeof it.materialCode === 'string' ? it.materialCode.trim().toUpperCase() : `VT-${i + 1}`;
+        if (!it || typeof it !== 'object') continue;
         const name = typeof it.materialName === 'string' ? it.materialName.trim() : '';
-        const unit = typeof it.unit === 'string' ? it.unit.trim() : 'Cái';
-        const qty = Number(it.quantity);
-        const price = Math.round(Number(it.unitPrice));
+        const code = typeof it.materialCode === 'string' && it.materialCode.trim() ? it.materialCode.trim().toUpperCase() : `VT-${i + 1}`;
+        const unit = typeof it.unit === 'string' && it.unit.trim() ? it.unit.trim() : 'Cái';
+        const qty = Math.max(1, Math.round(Number(it.quantity) || 1));
+        const price = Math.max(0, Math.round(Number(it.unitPrice) || 0));
 
         if (!name || name.length < 2) {
-          res.status(400).json({ success: false, message: `Tên vật tư ở dòng ${i + 1} không hợp lệ.` });
+          res.status(400).json({ success: false, message: `Vật tư dòng ${i + 1} phải có tên hợp lệ (tối thiểu 2 ký tự).` });
           return;
         }
-        if (isNaN(qty) || qty <= 0 || qty > 1000) {
-          res.status(400).json({ success: false, message: `Số lượng vật tư "${name}" phải từ 1 đến 1000.` });
-          return;
-        }
-        if (isNaN(price) || price < 0 || price > 500000000) {
-          res.status(400).json({ success: false, message: `Đơn giá vật tư "${name}" không hợp lệ (VND).` });
-          return;
-        }
-        if (seenCodes.has(code)) {
-          res.status(400).json({ success: false, message: `Trùng lặp mã vật tư "${code}" trong cùng một đề xuất.` });
-          return;
-        }
-        seenCodes.add(code);
 
         sanitizedItems.push({
-          id: `item-${Date.now()}-${i}`,
           materialCode: code,
           materialName: name,
           unit,
@@ -162,14 +205,11 @@ router.post(
         select: { fullName: true },
       });
 
-      const store = resiFixStore.get();
-      let costRecord = store.repairCosts.find((c) => c.ticketId === ticketId);
-
       const isSubmitting = Boolean(submitForApproval);
-      const nowIso = new Date().toISOString();
 
       // Kiểm tra yêu cầu hóa đơn chứng từ theo ngưỡng cấu hình BMB
-      const receiptThreshold = store.costConfig?.requireReceiptThresholdVnd || 500000;
+      const costConfig = await getCostConfig();
+      const receiptThreshold = costConfig.requireReceiptThresholdVnd;
       if (isSubmitting && totalCost >= receiptThreshold && !receiptProofUrl) {
         res.status(400).json({
           success: false,
@@ -178,47 +218,85 @@ router.post(
         return;
       }
 
-      if (costRecord) {
-        if (costRecord.status === 'APPROVED') {
-          res.status(400).json({ success: false, message: 'Chi phí sự cố này đã được duyệt, không thể chỉnh sửa thêm.' });
-          return;
+      const result = await prisma.$transaction(async (tx) => {
+        const existing = await tx.repairMaterialCost.findUnique({
+          where: { ticketId },
+          include: { items: true },
+        });
+
+        if (existing && existing.status === 'APPROVED') {
+          throw new Error('APPROVED_CANNOT_EDIT');
         }
-        costRecord.items = sanitizedItems;
-        costRecord.otherCost = numOtherCost;
-        costRecord.totalCost = totalCost;
-        if (receiptProofUrl) costRecord.receiptProofUrl = String(receiptProofUrl);
-        costRecord.status = isSubmitting ? 'PENDING' : 'DRAFT';
-        costRecord.updatedAt = nowIso;
-      } else {
-        costRecord = {
-          id: `cost-${Date.now()}`,
-          ticketId,
-          ticketCode: ticket.ticketCode,
-          proposedById: techId,
-          proposedByName: tech?.fullName || 'KTV',
-          status: isSubmitting ? 'PENDING' : 'DRAFT',
-          items: sanitizedItems,
-          otherCost: numOtherCost,
-          totalCost,
-          receiptProofUrl: receiptProofUrl ? String(receiptProofUrl) : null,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-        };
-        store.repairCosts.push(costRecord);
-      }
 
-      resiFixStore.save(store);
+        if (existing) {
+          // Xóa các vật tư cũ để tạo lại đúng bộ mới
+          await tx.materialItem.deleteMany({ where: { costId: existing.id } });
 
-      console.log(`[COST] KTV ${costRecord.proposedByName} cập nhật chi phí cho ticket ${ticket.ticketCode}: ${totalCost.toLocaleString('vi-VN')} VND (Trạng thái: ${costRecord.status})`);
+          const updated = await tx.repairMaterialCost.update({
+            where: { id: existing.id },
+            data: {
+              otherCost: BigInt(numOtherCost),
+              totalCost: BigInt(totalCost),
+              receiptProofUrl: receiptProofUrl ? String(receiptProofUrl) : existing.receiptProofUrl,
+              status: isSubmitting ? 'PENDING' : 'DRAFT',
+              items: {
+                create: sanitizedItems.map((it) => ({
+                  materialCode: it.materialCode,
+                  materialName: it.materialName,
+                  unit: it.unit,
+                  quantity: it.quantity,
+                  unitPrice: BigInt(it.unitPrice),
+                  totalPrice: BigInt(it.totalPrice),
+                  notes: it.notes,
+                })),
+              },
+            },
+            include: { items: true },
+          });
+          return updated;
+        } else {
+          const created = await tx.repairMaterialCost.create({
+            data: {
+              ticketId,
+              ticketCode: ticket.ticketCode,
+              proposedById: techId,
+              proposedByName: tech?.fullName || 'KTV',
+              status: isSubmitting ? 'PENDING' : 'DRAFT',
+              otherCost: BigInt(numOtherCost),
+              totalCost: BigInt(totalCost),
+              receiptProofUrl: receiptProofUrl ? String(receiptProofUrl) : null,
+              items: {
+                create: sanitizedItems.map((it) => ({
+                  materialCode: it.materialCode,
+                  materialName: it.materialName,
+                  unit: it.unit,
+                  quantity: it.quantity,
+                  unitPrice: BigInt(it.unitPrice),
+                  totalPrice: BigInt(it.totalPrice),
+                  notes: it.notes,
+                })),
+              },
+            },
+            include: { items: true },
+          });
+          return created;
+        }
+      });
+
+      console.log(`[COST] KTV ${result.proposedByName} cập nhật chi phí cho ticket ${ticket.ticketCode}: ${totalCost.toLocaleString('vi-VN')} VND (Trạng thái: ${result.status})`);
 
       res.status(200).json({
         success: true,
         message: isSubmitting
           ? `Đã gửi bảng dự toán chi phí (${totalCost.toLocaleString('vi-VN')} VND) tới BMB để phê duyệt.`
           : 'Đã lưu bản nháp chi phí thành công.',
-        cost: costRecord,
+        cost: formatCostRecord(result),
       });
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.message === 'APPROVED_CANNOT_EDIT') {
+        res.status(400).json({ success: false, message: 'Chi phí sự cố này đã được duyệt, không thể chỉnh sửa thêm.' });
+        return;
+      }
       console.error('Lỗi khi đề xuất chi phí:', error);
       res.status(500).json({ success: false, message: 'Lỗi máy chủ khi đề xuất chi phí.' });
     }
@@ -248,8 +326,10 @@ router.patch(
         return;
       }
 
-      const store = resiFixStore.get();
-      const target = store.repairCosts.find((c) => c.ticketId === ticketId);
+      const target = await prisma.repairMaterialCost.findUnique({
+        where: { ticketId },
+        include: { items: true },
+      });
 
       if (!target) {
         res.status(404).json({ success: false, message: 'Không tìm thấy hồ sơ chi phí của sự cố này.' });
@@ -260,21 +340,29 @@ router.patch(
       if (target.status === 'APPROVED') {
         res.status(400).json({
           success: false,
-          message: `Chi phí sự cố này đã được phê duyệt trước đó (${target.totalCost.toLocaleString('vi-VN')} VND bởi ${target.reviewedBy}), không thể duyệt lại.`,
+          message: `Chi phí sự cố này đã được phê duyệt trước đó (${Number(target.totalCost).toLocaleString('vi-VN')} VND bởi ${target.reviewedByName || 'BMB'}), không thể duyệt lại.`,
         });
         return;
       }
 
-      target.status = status;
-      if (status === 'APPROVED' && typeof adjustedTotalCost === 'number' && adjustedTotalCost > 0) {
-        target.totalCost = Math.round(adjustedTotalCost);
-      }
-      target.reviewNote = typeof reviewNote === 'string' ? reviewNote.trim() : null;
-      target.reviewedBy = req.user?.fullName || 'BMB Admin';
-      target.reviewedAt = new Date().toISOString();
-      target.updatedAt = target.reviewedAt;
+      const finalTotalCost = (status === 'APPROVED' && typeof adjustedTotalCost === 'number' && adjustedTotalCost > 0)
+        ? BigInt(Math.round(adjustedTotalCost))
+        : target.totalCost;
 
-      resiFixStore.save(store);
+      const reviewerName = req.user?.fullName || 'BMB Admin';
+
+      const updated = await prisma.repairMaterialCost.update({
+        where: { id: target.id },
+        data: {
+          status,
+          totalCost: finalTotalCost,
+          reviewNote: typeof reviewNote === 'string' ? reviewNote.trim() : null,
+          reviewedById: req.user!.userId,
+          reviewedByName: reviewerName,
+          reviewedAt: new Date(),
+        },
+        include: { items: true },
+      });
 
       // Ghi nhận Audit Log vào vòng đời sự cố (ticketStatusLog) để lưu trữ vĩnh viễn
       const currentTicket = await prisma.incidentTicket.findUnique({
@@ -286,19 +374,19 @@ router.patch(
           ticketId: target.ticketId,
           toStatus: currentTicket?.status || TicketStatus.IN_PROGRESS,
           title: status === 'APPROVED' ? 'BMB phê duyệt chi phí sửa chữa' : 'BMB từ chối chi phí sửa chữa',
-          note: `Tổng chi phí: ${target.totalCost.toLocaleString('vi-VN')} VND. ${target.reviewNote ? `Ghi chú: ${target.reviewNote}` : ''} (Người duyệt: ${target.reviewedBy})`,
+          note: `Tổng chi phí: ${Number(finalTotalCost).toLocaleString('vi-VN')} VND. ${updated.reviewNote ? `Ghi chú: ${updated.reviewNote}` : ''} (Người duyệt: ${reviewerName})`,
           changedById: req.user!.userId,
         },
       }).catch((err) => console.warn('[COST_AUDIT_LOG_ERROR]', err?.message));
 
-      console.log(`[AUDIT_LOG] BMB (${target.reviewedBy}) đã ${status} chi phí cho ticket ${target.ticketCode}: ${target.totalCost.toLocaleString('vi-VN')} VND`);
+      console.log(`[AUDIT_LOG] BMB (${reviewerName}) đã ${status} chi phí cho ticket ${target.ticketCode}: ${Number(finalTotalCost).toLocaleString('vi-VN')} VND`);
 
       res.status(200).json({
         success: true,
         message: status === 'APPROVED'
-          ? `Đã phê duyệt chi phí sửa chữa (${target.totalCost.toLocaleString('vi-VN')} VND).`
+          ? `Đã phê duyệt chi phí sửa chữa (${Number(finalTotalCost).toLocaleString('vi-VN')} VND).`
           : 'Đã từ chối chi phí sửa chữa.',
-        cost: target,
+        cost: formatCostRecord(updated),
       });
     } catch (error) {
       console.error('Lỗi khi duyệt chi phí:', error);
@@ -314,10 +402,10 @@ router.get(
   authorizeRoles(Role.BMB),
   async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const store = resiFixStore.get();
+      const cfg = await getCostConfig();
       res.status(200).json({
         success: true,
-        config: store.costConfig || { anomalyThresholdVnd: 5000000, requireReceiptThresholdVnd: 500000 },
+        config: cfg,
       });
     } catch (error) {
       console.error('Lỗi lấy cấu hình chi phí:', error);
@@ -334,27 +422,27 @@ router.patch(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { anomalyThresholdVnd, requireReceiptThresholdVnd } = req.body || {};
-      const store = resiFixStore.get();
-
-      if (!store.costConfig) {
-        store.costConfig = { anomalyThresholdVnd: 5000000, requireReceiptThresholdVnd: 500000 };
-      }
+      const currentConfig = await getCostConfig();
 
       if (typeof anomalyThresholdVnd === 'number' && anomalyThresholdVnd >= 500000 && anomalyThresholdVnd <= 100000000) {
-        store.costConfig.anomalyThresholdVnd = Math.round(anomalyThresholdVnd);
+        currentConfig.anomalyThresholdVnd = Math.round(anomalyThresholdVnd);
       }
       if (typeof requireReceiptThresholdVnd === 'number' && requireReceiptThresholdVnd >= 0 && requireReceiptThresholdVnd <= 50000000) {
-        store.costConfig.requireReceiptThresholdVnd = Math.round(requireReceiptThresholdVnd);
+        currentConfig.requireReceiptThresholdVnd = Math.round(requireReceiptThresholdVnd);
       }
 
-      resiFixStore.save(store);
+      await prisma.systemSetting.upsert({
+        where: { key: 'cost_config' },
+        create: { key: 'cost_config', value: currentConfig as any },
+        update: { value: currentConfig as any },
+      });
 
-      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình chi phí:`, store.costConfig);
+      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình chi phí:`, currentConfig);
 
       res.status(200).json({
         success: true,
         message: 'Đã cập nhật cấu hình ngưỡng chi phí thành công.',
-        config: store.costConfig,
+        config: currentConfig,
       });
     } catch (error) {
       console.error('Lỗi khi cập nhật cấu hình chi phí:', error);
@@ -373,20 +461,25 @@ router.get(
       const fromDate = typeof req.query.fromDate === 'string' ? req.query.fromDate : '';
       const toDate = typeof req.query.toDate === 'string' ? req.query.toDate : '';
 
-      const store = resiFixStore.get();
-      let costs = store.repairCosts.slice();
+      const dbCosts = await prisma.repairMaterialCost.findMany({
+        include: { items: true },
+        orderBy: { createdAt: 'desc' },
+      });
 
-      if (fromDate) costs = costs.filter((c) => c.createdAt.slice(0, 10) >= fromDate);
-      if (toDate) costs = costs.filter((c) => c.createdAt.slice(0, 10) <= toDate);
+      let costs = dbCosts.map(formatCostRecord);
 
-      const approvedCosts = costs.filter((c) => c.status === 'APPROVED');
-      const totalApprovedAmount = approvedCosts.reduce((sum, c) => sum + c.totalCost, 0);
+      if (fromDate) costs = costs.filter((c: any) => c.createdAt.slice(0, 10) >= fromDate);
+      if (toDate) costs = costs.filter((c: any) => c.createdAt.slice(0, 10) <= toDate);
+
+      const approvedCosts = costs.filter((c: any) => c.status === 'APPROVED');
+      const totalApprovedAmount = approvedCosts.reduce((sum: number, c: any) => sum + c.totalCost, 0);
 
       // Cảnh báo chi phí bất thường theo cấu hình động của BMB (không hardcode)
-      const anomalyThreshold = store.costConfig?.anomalyThresholdVnd || 5000000;
+      const costConfig = await getCostConfig();
+      const anomalyThreshold = costConfig.anomalyThresholdVnd;
       const anomalies = approvedCosts
-        .filter((c) => c.totalCost > anomalyThreshold)
-        .map((c) => `Ticket ${c.ticketCode} có chi phí cao bất thường (${c.totalCost.toLocaleString('vi-VN')} VND > ${anomalyThreshold.toLocaleString('vi-VN')} VND), cần kiểm tra hóa đơn gốc`);
+        .filter((c: any) => c.totalCost > anomalyThreshold)
+        .map((c: any) => `Ticket ${c.ticketCode} có chi phí cao bất thường (${c.totalCost.toLocaleString('vi-VN')} VND > ${anomalyThreshold.toLocaleString('vi-VN')} VND), cần kiểm tra hóa đơn gốc`);
 
       res.status(200).json({
         success: true,
@@ -405,4 +498,3 @@ router.get(
 );
 
 export default router;
-

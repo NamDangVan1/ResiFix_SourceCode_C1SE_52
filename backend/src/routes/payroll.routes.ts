@@ -3,21 +3,17 @@ import { Role } from '@prisma/client';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../db';
 import {
-  resiFixStore,
   AttendanceRecord,
   OvertimeRequest,
   ReconcileRequest,
-  isTechOnApprovedLeave,
   calculateDistanceMeters,
   evaluateCheckInPunctuality,
   calculateWorkHoursBreakdown,
-  parseShiftBounds,
   AttendanceGpsSnapshot,
   AttendanceAuditLog,
   AttendanceVerificationStatus,
   createAttendanceNonce,
   consumeAttendanceNonce,
-  calculateOvertimeMultiplier,
   calculateOvertimePay,
   calculateShiftSalaryVietnam,
   getDayType,
@@ -48,6 +44,207 @@ const validateAttendancePhoto = (photoUrl?: string | null): { valid: boolean; me
   }
   return { valid: false, message: 'Đường dẫn ảnh không an toàn. Yêu cầu giao thức HTTPS hoặc data URI hợp lệ.' };
 };
+
+const getParamAsString = (param: string | string[] | undefined): string => {
+  if (Array.isArray(param)) return param[0] || '';
+  return String(param || '');
+};
+
+const timeToMinutes = (t: string): number => {
+  if (!t || typeof t !== 'string') return -1;
+  const parts = t.trim().split(':').map(Number);
+  if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return -1;
+  const [h, m] = parts;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
+  return h * 60 + m;
+};
+
+// ============================================================================
+// CÁC HÀM TIỆN ÍCH LƯU TRỮ VÀ GIẢI MÃ DỮ LIỆU ATTENDANCE VÀ OVERTIME QUA PRISMA
+// ============================================================================
+
+function unpackAttendanceLog(log: any): AttendanceRecord {
+  let meta: any = {};
+  if (log.anomalyNotes && typeof log.anomalyNotes === 'string') {
+    const trimmed = log.anomalyNotes.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        meta = JSON.parse(trimmed);
+      } catch {
+        meta = { rawAnomaly: log.anomalyNotes };
+      }
+    } else {
+      meta = { rawAnomaly: log.anomalyNotes };
+    }
+  }
+
+  const workH = log.workHours !== null && log.workHours !== undefined ? Number(log.workHours) : null;
+  const regularH = meta.regularHours !== undefined ? meta.regularHours : workH;
+  const nightH = meta.nightHours !== undefined ? meta.nightHours : 0;
+  const billableH = meta.billableHours !== undefined ? meta.billableHours : workH;
+  const disputedH = meta.disputedHours !== undefined ? meta.disputedHours : (meta.verificationStatus === 'REJECTED' ? (workH || 0) : 0);
+
+  return {
+    id: log.id,
+    techId: log.technicianId,
+    techName: log.technicianName,
+    techPhone: meta.techPhone || null,
+    buildingBlock: meta.buildingBlock || 'Tòa S1',
+    date: log.date,
+    sessionIndex: log.sessionIndex,
+    shiftScheduled: log.shiftScheduled,
+    shiftStartTime: meta.shiftStartTime || (log.shiftScheduled ? log.shiftScheduled.split('-')[0]?.trim() : '07:00'),
+    shiftEndTime: meta.shiftEndTime || (log.shiftScheduled ? log.shiftScheduled.split('-')[1]?.trim() : '15:00'),
+    checkIn: log.checkIn instanceof Date ? log.checkIn.toISOString() : String(log.checkIn),
+    checkInPhotoUrl: meta.checkInPhotoUrl || null,
+    checkInGps: meta.checkInGps || null,
+    checkInNotes: meta.checkInNotes || null,
+    checkOut: log.checkOut ? (log.checkOut instanceof Date ? log.checkOut.toISOString() : String(log.checkOut)) : null,
+    checkOutPhotoUrl: meta.checkOutPhotoUrl || null,
+    checkOutGps: meta.checkOutGps || null,
+    checkOutNotes: meta.checkOutNotes || null,
+    workMinutes: log.workMinutes,
+    workHours: workH,
+    billableHours: billableH,
+    regularHours: regularH,
+    nightHours: nightH,
+    disputedHours: disputedH,
+    punctualityStatus: meta.punctualityStatus || 'ON_TIME',
+    lateMinutes: meta.lateMinutes || 0,
+    earlyMinutes: meta.earlyMinutes || 0,
+    verificationStatus: meta.verificationStatus || 'VERIFIED',
+    anomalyNotes: meta.rawAnomaly || meta.anomalyText || (typeof meta.anomalyNotes === 'string' ? meta.anomalyNotes : null),
+    explanationText: meta.explanationText || null,
+    photoMetadata: meta.photoMetadata || null,
+    reviewNote: meta.reviewNote || null,
+    reviewedBy: meta.reviewedBy || null,
+    reviewedAt: meta.reviewedAt || null,
+    auditLogs: meta.auditLogs || [],
+  };
+}
+
+function packAttendanceMetadata(record: any, baseAnomalyText?: string | null): string {
+  const payload = {
+    techPhone: record.techPhone || null,
+    buildingBlock: record.buildingBlock || 'Tòa S1',
+    shiftStartTime: record.shiftStartTime,
+    shiftEndTime: record.shiftEndTime,
+    checkInPhotoUrl: record.checkInPhotoUrl || null,
+    checkInGps: record.checkInGps || null,
+    checkInNotes: record.checkInNotes || null,
+    checkOutPhotoUrl: record.checkOutPhotoUrl || null,
+    checkOutGps: record.checkOutGps || null,
+    checkOutNotes: record.checkOutNotes || null,
+    photoMetadata: record.photoMetadata || null,
+    regularHours: record.regularHours,
+    nightHours: record.nightHours,
+    billableHours: record.billableHours,
+    disputedHours: record.disputedHours,
+    punctualityStatus: record.punctualityStatus,
+    lateMinutes: record.lateMinutes,
+    earlyMinutes: record.earlyMinutes,
+    verificationStatus: record.verificationStatus,
+    rawAnomaly: baseAnomalyText || record.anomalyNotes || null,
+    explanationText: record.explanationText || null,
+    reviewNote: record.reviewNote || null,
+    reviewedBy: record.reviewedBy || null,
+    reviewedAt: record.reviewedAt || null,
+    auditLogs: record.auditLogs || [],
+  };
+  return JSON.stringify(payload);
+}
+
+function formatOvertime(o: any): OvertimeRequest {
+  const reqH = o.requestedHours !== undefined && o.requestedHours !== null
+    ? Number(o.requestedHours)
+    : (o.hours !== undefined ? Number(o.hours) : 0);
+  const appH = o.approvedHours !== undefined && o.approvedHours !== null ? Number(o.approvedHours) : reqH;
+
+  return {
+    id: o.id,
+    techId: o.technicianId || o.techId,
+    techName: o.technicianName || o.techName,
+    date: o.date,
+    fromTime: o.fromTime,
+    toTime: o.toTime,
+    durationMinutes: o.durationMinutes,
+    hours: reqH,
+    reason: o.reason,
+    ticketId: o.ticketId || null,
+    status: o.status,
+    approvedHours: appH,
+    reviewNote: o.reviewNote || null,
+    reviewedBy: o.reviewedByName || (o.reviewedBy ? o.reviewedBy.fullName : null),
+    reviewedAt: o.reviewedAt ? new Date(o.reviewedAt).toISOString() : null,
+    createdAt: o.createdAt ? new Date(o.createdAt).toISOString() : new Date().toISOString(),
+  };
+}
+
+async function getPayrollConfig() {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'payroll_config' } });
+    if (setting?.value && typeof setting.value === 'object') {
+      return setting.value as any;
+    }
+  } catch (err) {
+    console.warn('[PAYROLL_CONFIG_READ_WARN]', err);
+  }
+  return {
+    baseSalaryDefault: 8000000,
+    hourlyRateDefault: 50000,
+    standardMonthlyHours: 160,
+    otMultiplierNormal: 1.5,
+    otMultiplierWeekend: 2.0,
+    otMultiplierHoliday: 3.0,
+    standardAllowance: 730000,
+    buildingLocation: {
+      buildingName: 'Tòa nhà ResiFix SkyView',
+      buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
+      latitude: 10.7324,
+      longitude: 106.6992,
+      allowedRadiusMeters: 300,
+      isConfirmed: false,
+    },
+  };
+}
+
+async function isTechOnApprovedLeaveDb(techId: string, date: string): Promise<boolean> {
+  try {
+    const leave = await prisma.shiftScheduleRequest.findFirst({
+      where: {
+        techId,
+        type: 'LEAVE',
+        status: 'APPROVED',
+        date: { lte: date },
+        OR: [
+          { endDate: null, date },
+          { endDate: { gte: date } },
+        ],
+      },
+    });
+    return Boolean(leave);
+  } catch {
+    return false;
+  }
+}
+
+async function getReconcileRequests(): Promise<ReconcileRequest[]> {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'payroll_reconcile_requests' } });
+    if (setting?.value && Array.isArray(setting.value)) {
+      return setting.value as any;
+    }
+  } catch {}
+  return [];
+}
+
+async function saveReconcileRequests(reqs: ReconcileRequest[]): Promise<void> {
+  await prisma.systemSetting.upsert({
+    where: { key: 'payroll_reconcile_requests' },
+    create: { key: 'payroll_reconcile_requests', value: reqs as any },
+    update: { value: reqs as any },
+  });
+}
 
 const router = Router();
 
@@ -84,13 +281,16 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const attendanceId = getParamAsString(req.params.id);
-      const store = resiFixStore.get();
-      const record = store.attendanceLogs.find((a) => a.id === attendanceId);
+      const dbRecord = await prisma.attendanceLog.findUnique({
+        where: { id: attendanceId },
+      });
 
-      if (!record) {
+      if (!dbRecord) {
         res.status(404).json({ success: false, message: 'Không tìm thấy ca chấm công này.' });
         return;
       }
+
+      const record = unpackAttendanceLog(dbRecord);
 
       // Quyền truy cập: BMB hoặc chính KTV sở hữu bản ghi
       const isOwner = req.user?.role === Role.TECHNICIAN && record.techId === req.user?.userId;
@@ -125,12 +325,12 @@ router.get(
   '/admin/building-location',
   authenticateJWT,
   authorizeRoles(Role.BMB),
-  async (req: AuthRequest, res: Response): Promise<void> => {
+  async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const store = resiFixStore.get();
+      const cfg = await getPayrollConfig();
       res.status(200).json({
         success: true,
-        buildingLocation: store.payrollConfig.buildingLocation,
+        buildingLocation: cfg.buildingLocation,
       });
     } catch (error) {
       console.error('Lỗi khi tải cấu hình vị trí tòa nhà:', error);
@@ -169,18 +369,19 @@ router.put(
         return;
       }
 
-      const store = resiFixStore.get();
-      const { configAuditLogs: _ignored, ...prevConfigPure } = store.payrollConfig.buildingLocation;
+      const cfg = await getPayrollConfig();
+      const prevLocation = cfg.buildingLocation || {};
+      const { configAuditLogs: _ignored, ...prevConfigPure } = prevLocation;
 
       const bmbId = req.user!.userId;
       const bmbName = req.user!.fullName || 'BMB Admin';
       const nowIso = new Date().toISOString();
 
-      if (!store.payrollConfig.buildingLocation.configAuditLogs) {
-        store.payrollConfig.buildingLocation.configAuditLogs = [];
+      if (!prevLocation.configAuditLogs) {
+        prevLocation.configAuditLogs = [];
       }
 
-      store.payrollConfig.buildingLocation.configAuditLogs.push({
+      prevLocation.configAuditLogs.push({
         changedAt: nowIso,
         changedById: bmbId,
         changedByName: bmbName,
@@ -196,24 +397,30 @@ router.put(
         note: typeof note === 'string' ? note.trim() : 'BMB xác nhận cấu hình tọa độ tòa nhà',
       });
 
-      store.payrollConfig.buildingLocation.buildingName = buildingName.trim();
-      store.payrollConfig.buildingLocation.buildingAddress = buildingAddress.trim();
-      store.payrollConfig.buildingLocation.latitude = latitude;
-      store.payrollConfig.buildingLocation.longitude = longitude;
-      store.payrollConfig.buildingLocation.allowedRadiusMeters = allowedRadiusMeters;
-      store.payrollConfig.buildingLocation.isConfirmed = true;
-      store.payrollConfig.buildingLocation.confirmedAt = nowIso;
-      store.payrollConfig.buildingLocation.confirmedById = bmbId;
-      store.payrollConfig.buildingLocation.confirmedByName = bmbName;
+      prevLocation.buildingName = buildingName.trim();
+      prevLocation.buildingAddress = buildingAddress.trim();
+      prevLocation.latitude = latitude;
+      prevLocation.longitude = longitude;
+      prevLocation.allowedRadiusMeters = allowedRadiusMeters;
+      prevLocation.isConfirmed = true;
+      prevLocation.confirmedAt = nowIso;
+      prevLocation.confirmedById = bmbId;
+      prevLocation.confirmedByName = bmbName;
 
-      resiFixStore.save(store);
+      cfg.buildingLocation = prevLocation;
 
-      console.log(`[AUDIT] BMB (${bmbName}) đã xác nhận cấu hình vị trí tòa nhà:`, store.payrollConfig.buildingLocation);
+      await prisma.systemSetting.upsert({
+        where: { key: 'payroll_config' },
+        create: { key: 'payroll_config', value: cfg as any },
+        update: { value: cfg as any },
+      });
+
+      console.log(`[AUDIT] BMB (${bmbName}) đã xác nhận cấu hình vị trí tòa nhà:`, cfg.buildingLocation);
 
       res.status(200).json({
         success: true,
         message: 'Đã cập nhật và xác nhận tọa độ chính thức của tòa nhà thành công.',
-        buildingLocation: store.payrollConfig.buildingLocation,
+        buildingLocation: cfg.buildingLocation,
       });
     } catch (error) {
       console.error('Lỗi khi cấu hình vị trí tòa nhà:', error);
@@ -222,17 +429,11 @@ router.put(
   }
 );
 
-
-const getParamAsString = (param: string | string[] | undefined): string => {
-  if (Array.isArray(param)) return param[0] || '';
-  return String(param || '');
-};
-
 // ============================================================================
 // 1. KỸ THUẬT VIÊN: CHECK-IN / CHECK-OUT (GIỜ CHUẨN SERVER + GPS + ẢNH WATERMARK)
 // ============================================================================
+
 // POST /api/payroll/check-in
-// KIỂM TRA ĐỘC LẬP: ĐÚNG TÀI KHOẢN, ĐÚNG CA, GPS TÒA NHÀ, ẢNH CHỤP TRỰC TIẾP
 router.post(
   '/check-in',
   authenticateJWT,
@@ -250,15 +451,14 @@ router.post(
         return;
       }
 
-      // 1. LẤY THỜI GIAN CHÍNH THỨC TỪ SERVER (Asia/Ho_Chi_Minh - Tuyệt đối không tin thời gian Client)
+      // 1. LẤY THỜI GIAN CHÍNH THỨC TỪ SERVER (Asia/Ho_Chi_Minh)
       const now = new Date();
       const serverIsoTime = now.toISOString();
-      const todayDate = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }); // YYYY-MM-DD
-
-      const store = resiFixStore.get();
+      const todayDate = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
 
       // 2. Kiểm tra lịch nghỉ phép đã được phê duyệt hôm nay
-      if (isTechOnApprovedLeave(techId, todayDate)) {
+      const onLeave = await isTechOnApprovedLeaveDb(techId, todayDate);
+      if (onLeave) {
         res.status(400).json({
           success: false,
           message: `Hôm nay (${todayDate}) bạn đang có lịch nghỉ phép đã được phê duyệt. Không thể thực hiện check-in!`,
@@ -267,12 +467,15 @@ router.post(
       }
 
       // 3. Chống Check-in trùng (ca làm việc đang mở chưa check-out)
-      const activeSession = store.attendanceLogs.find((a) => a.techId === techId && !a.checkOut);
+      const activeSession = await prisma.attendanceLog.findFirst({
+        where: { technicianId: techId, checkOut: null },
+      });
       if (activeSession) {
+        const unpackedActive = unpackAttendanceLog(activeSession);
         res.status(400).json({
           success: false,
           message: `Bạn đang có ca làm việc chưa hoàn tất check-out (bắt đầu lúc ${new Date(activeSession.checkIn).toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })} ngày ${activeSession.date}). Vui lòng check-out trước khi bắt đầu ca mới!`,
-          attendance: activeSession,
+          attendance: unpackedActive,
         });
         return;
       }
@@ -293,7 +496,8 @@ router.post(
         }
       }
 
-      const buildingLoc = store.payrollConfig.buildingLocation || {
+      const cfg = await getPayrollConfig();
+      const buildingLoc = cfg.buildingLocation || {
         buildingName: 'Tòa nhà ResiFix SkyView',
         buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
         latitude: 10.7324,
@@ -314,15 +518,18 @@ router.post(
           latitude,
           longitude,
           accuracyMeters: typeof accuracy === 'number' ? Math.round(accuracy) : null,
+          accuracy: typeof accuracy === 'number' ? Math.round(accuracy) : null,
           distanceToBuildingMeters: distMeters,
+          distanceMeters: distMeters,
           isWithinRadius,
+          isWithinAllowedRadius: isWithinRadius,
           addressEstimate: isWithinRadius
             ? `${buildingLoc.buildingName} (Ước tính cách ~${distMeters}m)`
             : `Tọa độ ngoài phạm vi (Cách ${buildingLoc.buildingName} ~${distMeters}m)`,
         };
       }
 
-      // 5. Kiểm tra tính đúng giờ so với ca trực được giao (độc lập, không coi đi muộn là gian lận)
+      // 5. Kiểm tra tính đúng giờ so với ca trực được giao
       const punctuality = evaluateCheckInPunctuality(now, tech.shiftName);
 
       // 6. Kiểm tra ảnh chụp trực tiếp
@@ -332,7 +539,6 @@ router.post(
       let verificationStatus: AttendanceVerificationStatus = 'VERIFIED';
       const anomalyReasons: string[] = [];
 
-      // Kiểm tra xem BMB đã xác nhận tọa độ chính thức của tòa nhà hay chưa
       if (!buildingLoc.isConfirmed) {
         verificationStatus = 'PENDING_REVIEW';
         anomalyReasons.push('Tọa độ tòa nhà chưa được BMB xác nhận chính thức. Ca trực đưa vào danh sách chờ BMB đối soát.');
@@ -348,7 +554,6 @@ router.post(
         anomalyReasons.push(`Độ chính xác GPS kém (±${Math.round(accuracy)}m > 100m), cần đối soát thực tế`);
       }
 
-      // Kiểm tra tính hợp lệ & an toàn của ảnh
       const photoValidation = validateAttendancePhoto(photoUrl);
       let photoMetadata: any = null;
       if (!photoValidation.valid) {
@@ -367,7 +572,6 @@ router.post(
         };
       }
 
-      // Đi muộn ghi nhận đúng thực tế, không tự động kết luận gian lận
       if (punctuality.punctualityStatus === 'LATE') {
         anomalyReasons.push(`Vào ca muộn ${punctuality.lateMinutes} phút so với ca ${tech.shiftName || 'tiêu chuẩn'}`);
       }
@@ -382,10 +586,12 @@ router.post(
           : `Gắn cờ ngoại lệ: ${anomalyReasons.join('; ')}`,
       };
 
-      const daySessions = store.attendanceLogs.filter((a) => a.techId === techId && a.date === todayDate);
-      const sessionIndex = daySessions.length + 1;
+      const daySessionsCount = await prisma.attendanceLog.count({
+        where: { technicianId: techId, date: todayDate },
+      });
+      const sessionIndex = daySessionsCount + 1;
 
-      const newRecord: AttendanceRecord = {
+      const recordData: any = {
         id: `att-${Date.now()}-${sessionIndex}`,
         techId,
         techName: tech.fullName,
@@ -413,8 +619,20 @@ router.post(
         auditLogs: [initialAuditLog],
       };
 
-      store.attendanceLogs.push(newRecord);
-      resiFixStore.save(store);
+      const serializedMetadata = packAttendanceMetadata(recordData, recordData.anomalyNotes);
+
+      const created = await prisma.attendanceLog.create({
+        data: {
+          id: recordData.id,
+          technicianId: techId,
+          technicianName: tech.fullName,
+          date: todayDate,
+          sessionIndex,
+          shiftScheduled: recordData.shiftScheduled,
+          checkIn: now,
+          anomalyNotes: serializedMetadata,
+        },
+      });
 
       // Cập nhật trạng thái sẵn sàng trực isOnDuty = true trên User
       await prisma.user.update({
@@ -428,7 +646,7 @@ router.post(
       res.status(200).json({
         success: true,
         message: `Check-in ca ${sessionIndex} thành công! (${punctuality.punctualityStatus === 'LATE' ? `Ghi nhận vào muộn ${punctuality.lateMinutes} phút` : 'Đúng giờ'})`,
-        attendance: newRecord,
+        attendance: unpackAttendanceLog(created),
       });
     } catch (error) {
       console.error('Lỗi khi check-in:', error);
@@ -438,7 +656,6 @@ router.post(
 );
 
 // POST /api/payroll/check-out
-// HOÀN TẤT CA TRỰC: GHI NHẬN ẢNH + GPS CHECK-OUT + PHÂN BỔ GIỜ THƯỜNG & GIỜ ĐÊM
 router.post(
   '/check-out',
   authenticateJWT,
@@ -449,20 +666,21 @@ router.post(
       const now = new Date();
       const serverIsoTime = now.toISOString();
 
-      const store = resiFixStore.get();
       // Tìm ca trực đang mở gần nhất chưa check-out của KTV
-      const activeRecord = store.attendanceLogs
-        .slice()
-        .reverse()
-        .find((a) => a.techId === techId && !a.checkOut);
+      const dbActive = await prisma.attendanceLog.findFirst({
+        where: { technicianId: techId, checkOut: null },
+        orderBy: { checkIn: 'desc' },
+      });
 
-      if (!activeRecord) {
+      if (!dbActive) {
         res.status(400).json({
           success: false,
           message: 'Không tìm thấy ca làm việc nào đang mở cần check-out.',
         });
         return;
       }
+
+      const activeRecord = unpackAttendanceLog(dbActive);
 
       const body = req.body && typeof req.body === 'object' ? req.body : {};
       const { photoUrl, latitude, longitude, accuracy, notes, nonce } = body;
@@ -479,7 +697,8 @@ router.post(
         }
       }
 
-      const buildingLoc = store.payrollConfig.buildingLocation || {
+      const cfg = await getPayrollConfig();
+      const buildingLoc = cfg.buildingLocation || {
         buildingName: 'Tòa nhà ResiFix SkyView',
         buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
         latitude: 10.7324,
@@ -498,8 +717,11 @@ router.post(
           latitude,
           longitude,
           accuracyMeters: typeof accuracy === 'number' ? Math.round(accuracy) : null,
+          accuracy: typeof accuracy === 'number' ? Math.round(accuracy) : null,
           distanceToBuildingMeters: distMeters,
+          distanceMeters: distMeters,
           isWithinRadius,
+          isWithinAllowedRadius: isWithinRadius,
           addressEstimate: isWithinRadius
             ? `${buildingLoc.buildingName} (Ước tính cách ~${distMeters}m)`
             : `Tọa độ ngoài phạm vi (Cách ${buildingLoc.buildingName} ~${distMeters}m)`,
@@ -512,81 +734,68 @@ router.post(
       activeRecord.checkOutGps = checkOutGps;
       activeRecord.checkOutNotes = typeof notes === 'string' ? notes.trim() : null;
 
-      // Phân bổ thời gian thực tế chính xác (giờ thường và giờ đêm 22:00-06:00)
+      // Phân bổ thời gian thực tế chính xác
       const breakdown = calculateWorkHoursBreakdown(new Date(activeRecord.checkIn), now);
       activeRecord.workMinutes = breakdown.totalMinutes;
       activeRecord.workHours = breakdown.totalHours;
       activeRecord.regularHours = breakdown.regularHours;
       activeRecord.nightHours = breakdown.nightHours;
 
-      // Đánh giá về sớm so với ca trực được giao
-      const shiftBounds = parseShiftBounds(activeRecord.shiftScheduled);
-      if (shiftBounds) {
-        const vnTimeStr = now.toLocaleTimeString('en-GB', {
-          timeZone: 'Asia/Ho_Chi_Minh',
-          hour12: false,
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        const [currH, currM] = vnTimeStr.split(':').map(Number);
-        const checkOutMinutes = currH * 60 + currM;
-        const shiftEndMinutes = shiftBounds.endH * 60 + shiftBounds.endM;
-        const diffEarly = shiftEndMinutes - checkOutMinutes;
-        if (diffEarly > 15) {
-          activeRecord.earlyMinutes = diffEarly;
-          activeRecord.punctualityStatus =
-            activeRecord.punctualityStatus === 'LATE' ? 'LATE_AND_EARLY' : 'EARLY_LEAVE';
-        }
+      const checkoutAnomalies: string[] = [];
+      if (!hasGps) {
+        checkoutAnomalies.push('Không có GPS khi check-out');
+      } else if (!isWithinRadius) {
+        checkoutAnomalies.push(`GPS check-out ngoài phạm vi (${checkOutGps?.distanceToBuildingMeters}m)`);
       }
 
-      // Đánh giá kiểm tra ngoại lệ khi check-out
-      const checkoutAnomalies: string[] = [];
-      if (!hasGps) checkoutAnomalies.push('Không xác định được GPS khi check-out');
-      else if (!isWithinRadius) checkoutAnomalies.push(`GPS check-out ngoài phạm vi (${checkOutGps?.distanceToBuildingMeters}m)`);
-      if (!hasPhoto) checkoutAnomalies.push('Thiếu ảnh chụp hiện trường check-out');
+      if (!hasPhoto) {
+        checkoutAnomalies.push('Thiếu ảnh chụp hiện trường check-out');
+      }
 
       if (checkoutAnomalies.length > 0) {
         activeRecord.verificationStatus = 'PENDING_REVIEW';
-        activeRecord.anomalyNotes = activeRecord.anomalyNotes
-          ? `${activeRecord.anomalyNotes}; ${checkoutAnomalies.join('; ')}`
-          : checkoutAnomalies.join('; ');
-      }
-
-      // Giờ tính lương:
-      // Nếu hợp lệ (VERIFIED hoặc APPROVED): tính đủ giờ thực tế
-      // Nếu có ngoại lệ: ghi nhận disputedHours để BMB xử lý ngoại lệ (không tự động khấu trừ hay hủy bỏ)
-      if (activeRecord.verificationStatus === 'VERIFIED') {
+        const existingNotes = activeRecord.anomalyNotes ? `${activeRecord.anomalyNotes}; ` : '';
+        activeRecord.anomalyNotes = `${existingNotes}${checkoutAnomalies.join('; ')}`;
         activeRecord.billableHours = activeRecord.workHours;
-        activeRecord.disputedHours = 0;
-      } else {
-        activeRecord.billableHours = activeRecord.workHours; // Ghi nhận tạm, chờ BMB xác nhận
         activeRecord.disputedHours = activeRecord.workHours;
+      } else {
+        if (activeRecord.verificationStatus !== 'PENDING_REVIEW') {
+          activeRecord.verificationStatus = 'VERIFIED';
+          activeRecord.billableHours = activeRecord.workHours;
+          activeRecord.disputedHours = 0;
+        } else {
+          activeRecord.billableHours = activeRecord.workHours;
+          activeRecord.disputedHours = activeRecord.workHours;
+        }
       }
 
       if (!activeRecord.auditLogs) activeRecord.auditLogs = [];
       activeRecord.auditLogs.push({
-        action: activeRecord.verificationStatus === 'VERIFIED' ? 'AUTO_VERIFY' : 'SYSTEM_FLAG',
+        action: checkoutAnomalies.length > 0 ? 'SYSTEM_FLAG' : 'AUTO_VERIFY',
         performedById: techId,
         performedByName: activeRecord.techName,
         performedAt: serverIsoTime,
-        note: `Check-out thành công. Tổng giờ: ${breakdown.totalHours}h (${breakdown.regularHours}h thường, ${breakdown.nightHours}h đêm)${checkoutAnomalies.length > 0 ? `. Ngoại lệ: ${checkoutAnomalies.join('; ')}` : ''}`,
+        note: `Check-out thành công. Tổng giờ: ${breakdown.totalHours}h (${breakdown.regularHours}h thường, ${breakdown.nightHours}h đêm).${checkoutAnomalies.length > 0 ? ` Ngoại lệ: ${checkoutAnomalies.join('; ')}` : ''}`,
       });
 
-      // Cập nhật trạng thái không sẵn sàng isOnDuty = false trên User TRƯỚC khi ghi store để triệt tiêu race condition
-      await prisma.user.update({
-        where: { id: techId },
-        data: { isOnDuty: false },
-        select: { id: true },
+      const updatedSerializedMetadata = packAttendanceMetadata(activeRecord, activeRecord.anomalyNotes);
+
+      const updated = await prisma.attendanceLog.update({
+        where: { id: dbActive.id },
+        data: {
+          checkOut: now,
+          workMinutes: breakdown.totalMinutes,
+          workHours: breakdown.totalHours,
+          anomalyNotes: updatedSerializedMetadata,
+        },
       });
 
-      resiFixStore.save(store);
-
-      console.log(`[ATTENDANCE] KTV ${activeRecord.techName} check-out ca ${activeRecord.sessionIndex}: ${breakdown.totalHours}h (${activeRecord.verificationStatus})`);
+      console.log(`[ATTENDANCE] KTV ${activeRecord.techName} đã check-out lúc ${serverIsoTime}. Tổng thời gian: ${breakdown.totalHours}h (${activeRecord.verificationStatus})`);
 
       res.status(200).json({
         success: true,
-        message: `Check-out ca ${activeRecord.sessionIndex} thành công! Tổng thời gian ghi nhận: ${breakdown.totalHours} giờ.`,
-        attendance: activeRecord,
+        message: `Check-out thành công! Tổng thời gian làm việc: ${breakdown.totalHours} giờ (${breakdown.regularHours}h ngày, ${breakdown.nightHours}h đêm).`,
+        attendance: unpackAttendanceLog(updated),
       });
     } catch (error) {
       console.error('Lỗi khi check-out:', error);
@@ -603,12 +812,12 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const techId = req.user!.userId;
-      const store = resiFixStore.get();
-      const myLogs = store.attendanceLogs
-        .filter((a) => a.techId === techId)
-        .sort((a, b) => new Date(b.checkIn).getTime() - new Date(a.checkIn).getTime());
+      const logs = await prisma.attendanceLog.findMany({
+        where: { technicianId: techId },
+        orderBy: { checkIn: 'desc' },
+      });
 
-      res.status(200).json({ success: true, logs: myLogs });
+      res.status(200).json({ success: true, logs: logs.map(unpackAttendanceLog) });
     } catch (error) {
       console.error('Lỗi khi tải lịch sử chấm công:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi tải lịch sử chấm công.' });
@@ -616,18 +825,10 @@ router.get(
   }
 );
 
-const timeToMinutes = (t: string): number => {
-  if (!t || typeof t !== 'string') return -1;
-  const parts = t.trim().split(':').map(Number);
-  if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return -1;
-  const [h, m] = parts;
-  if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
-  return h * 60 + m;
-};
-
 // ============================================================================
 // 2. YÊU CẦU TĂNG CA (OVERTIME) - CHỐNG GIAN LẬN & CHỒNG LẤN KHUNG GIỜ
 // ============================================================================
+
 // POST /api/payroll/overtime - KTV gửi yêu cầu tăng ca
 router.post(
   '/overtime',
@@ -651,7 +852,7 @@ router.post(
           return;
         }
         let diff = endM - startM;
-        if (diff <= 0) diff += 24 * 60; // Hỗ trợ ca đêm qua 00:00
+        if (diff <= 0) diff += 24 * 60;
         durationMinutes = diff;
         finalHours = Math.round((diff / 60) * 100) / 100;
       } else {
@@ -686,35 +887,30 @@ router.post(
         ? date
         : new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
 
-      const store = resiFixStore.get();
+      // Lấy danh sách OT trong ngày từ PostgreSQL
+      const existingOts = await prisma.overtimeRequest.findMany({
+        where: { technicianId: techId, date: todayDate, status: { not: 'REJECTED' } },
+      });
 
-      // CHỐNG GIAN LẬN: KIỂM TRA TRÙNG / CHỒNG LẤN KHUNG GIỜ (KỂ CẢ KHI KHÔNG CÓ ticketId)
       const startA = timeToMinutes(validFrom);
       let endA = timeToMinutes(validTo);
       if (endA <= startA) endA += 24 * 60;
 
-      for (const existing of store.overtimeRequests) {
-        if (existing.techId === techId && existing.date === todayDate && existing.status !== 'REJECTED') {
-          const startB = timeToMinutes(existing.fromTime || '17:30');
-          let endB = timeToMinutes(existing.toTime || '19:30');
-          if (endB <= startB) endB += 24 * 60;
+      for (const existing of existingOts) {
+        const startB = timeToMinutes(existing.fromTime || '17:30');
+        let endB = timeToMinutes(existing.toTime || '19:30');
+        if (endB <= startB) endB += 24 * 60;
 
-          // Điều kiện chồng lấn giữa hai khoảng [startA, endA] và [startB, endB]
-          if (startA < endB && endA > startB) {
-            res.status(409).json({
-              success: false,
-              message: `Khung giờ tăng ca (${validFrom} - ${validTo}) bị trùng hoặc chồng lấn với yêu cầu tăng ca khác (${existing.fromTime || '17:30'} - ${existing.toTime || '19:30'}) của bạn trong ngày ${todayDate}!`,
-            });
-            return;
-          }
+        if (startA < endB && endA > startB) {
+          res.status(409).json({
+            success: false,
+            message: `Khung giờ tăng ca (${validFrom} - ${validTo}) bị trùng hoặc chồng lấn với yêu cầu tăng ca khác (${existing.fromTime || '17:30'} - ${existing.toTime || '19:30'}) của bạn trong ngày ${todayDate}!`,
+          });
+          return;
         }
       }
 
-      // Giới hạn tổng giờ OT trong ngày tối đa 8h
-      const dayExistingHours = store.overtimeRequests
-        .filter((o) => o.techId === techId && o.date === todayDate && o.status !== 'REJECTED')
-        .reduce((sum, o) => sum + o.hours, 0);
-
+      const dayExistingHours = existingOts.reduce((sum, o) => sum + Number(o.requestedHours), 0);
       if (dayExistingHours + finalHours > 8) {
         res.status(400).json({
           success: false,
@@ -723,31 +919,29 @@ router.post(
         return;
       }
 
-      const newOt: OvertimeRequest = {
-        id: `ot-${Date.now()}`,
-        techId,
-        techName: tech?.fullName || 'Kỹ thuật viên',
-        date: todayDate,
-        fromTime: validFrom,
-        toTime: validTo,
-        durationMinutes,
-        hours: finalHours,
-        reason: reason.trim(),
-        ticketId: ticketId ? String(ticketId).trim() : null,
-        status: 'PENDING',
-        approvedHours: finalHours,
-        createdAt: new Date().toISOString(),
-      };
+      const created = await prisma.overtimeRequest.create({
+        data: {
+          id: `ot-${Date.now()}`,
+          technicianId: techId,
+          technicianName: tech?.fullName || 'Kỹ thuật viên',
+          date: todayDate,
+          fromTime: validFrom,
+          toTime: validTo,
+          durationMinutes,
+          requestedHours: finalHours,
+          approvedHours: finalHours,
+          reason: reason.trim(),
+          ticketId: ticketId ? String(ticketId).trim() : null,
+          status: 'PENDING',
+        },
+      });
 
-      store.overtimeRequests.push(newOt);
-      resiFixStore.save(store);
-
-      console.log(`[OVERTIME] KTV ${newOt.techName} gửi yêu cầu OT: ${validFrom}-${validTo} (${finalHours}h) - Lý do: ${reason}`);
+      console.log(`[OVERTIME] KTV ${created.technicianName} gửi yêu cầu OT: ${validFrom}-${validTo} (${finalHours}h) - Lý do: ${reason}`);
 
       res.status(201).json({
         success: true,
         message: 'Yêu cầu tăng ca đã được gửi tới Ban Quản Lý (BMB) để phê duyệt.',
-        overtime: newOt,
+        overtime: formatOvertime(created),
       });
     } catch (error) {
       console.error('Lỗi khi gửi yêu cầu tăng ca:', error);
@@ -764,12 +958,12 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const techId = req.user!.userId;
-      const store = resiFixStore.get();
-      const myOts = store.overtimeRequests
-        .filter((o) => o.techId === techId)
-        .sort((a, b) => b.id.localeCompare(a.id));
+      const ots = await prisma.overtimeRequest.findMany({
+        where: { technicianId: techId },
+        orderBy: { createdAt: 'desc' },
+      });
 
-      res.status(200).json({ success: true, overtimes: myOts });
+      res.status(200).json({ success: true, overtimes: ots.map(formatOvertime) });
     } catch (error) {
       console.error('Lỗi khi tải danh sách tăng ca:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi tải danh sách tăng ca.' });
@@ -780,6 +974,7 @@ router.get(
 // ============================================================================
 // 3. TÍNH LƯƠNG & PHIẾU LƯƠNG CỦA KỸ THUẬT VIÊN (ĐƠN GIÁ 50.000 VNĐ/GIỜ)
 // ============================================================================
+
 // GET /api/payroll/my-salary - KTV xem phiếu lương cá nhân minh bạch
 router.get(
   '/my-salary',
@@ -790,20 +985,19 @@ router.get(
       const techId = req.user!.userId;
       const targetMonth = typeof req.query.month === 'string' ? req.query.month : new Date().toISOString().slice(0, 7);
 
-      const store = resiFixStore.get();
-      const cfg = store.payrollConfig;
-      const hourlyRate = cfg.hourlyRateDefault || 50000; // Đơn giá 50.000 VNĐ / giờ
+      const cfg = await getPayrollConfig();
+      const hourlyRate = cfg.hourlyRateDefault || 50000;
 
-      // Các ca chấm công trong tháng
-      const monthLogs = store.attendanceLogs.filter(
-        (a) => a.techId === techId && a.date.startsWith(targetMonth)
-      );
+      // Các ca chấm công trong tháng từ PostgreSQL
+      const dbLogs = await prisma.attendanceLog.findMany({
+        where: { technicianId: techId, date: { startsWith: targetMonth } },
+        orderBy: { checkIn: 'desc' },
+      });
+      const monthLogs = dbLogs.map(unpackAttendanceLog);
 
-      // Ca đã xác minh hoặc BMB đã duyệt
       const verifiedLogs = monthLogs.filter(
         (a) => a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'APPROVED'
       );
-      // Ca ngoại lệ đang chờ xem xét
       const disputedLogs = monthLogs.filter(
         (a) => a.verificationStatus === 'PENDING_REVIEW' || a.verificationStatus === 'NEEDS_EXPLANATION'
       );
@@ -812,16 +1006,16 @@ router.get(
       const nightHours = verifiedLogs.reduce((sum, a) => sum + (a.nightHours || 0), 0);
       const disputedHours = disputedLogs.reduce((sum, a) => sum + (a.disputedHours || a.workHours || 0), 0);
 
-      // Tăng ca đã phê duyệt
-      const approvedOts = store.overtimeRequests.filter(
-        (o) => o.techId === techId && o.status === 'APPROVED' && o.date.startsWith(targetMonth)
-      );
+      // Tăng ca đã phê duyệt từ PostgreSQL
+      const dbOts = await prisma.overtimeRequest.findMany({
+        where: { technicianId: techId, status: 'APPROVED', date: { startsWith: targetMonth } },
+      });
+      const approvedOts = dbOts.map(formatOvertime);
       const totalOtHours = approvedOts.reduce((sum, o) => sum + (o.approvedHours ?? o.hours), 0);
 
-      // Công thức tiền lương chuẩn Điều 98 Bộ luật Lao động 2019
       const shiftSalary = calculateShiftSalaryVietnam(regularHours, nightHours, hourlyRate);
       const regularPay = shiftSalary.regularPay;
-      const nightPay = shiftSalary.nightPay; // Đủ 130% tiền lương ca đêm theo Điều 98 Khoản 2
+      const nightPay = shiftSalary.nightPay;
 
       let totalOtPay = 0;
       for (const ot of approvedOts) {
@@ -836,7 +1030,8 @@ router.get(
       const totalSalary = regularPay + nightPay + otPay + allowance;
       const disputedPayEstimated = Math.round(disputedHours * hourlyRate);
 
-      const isLocked = store.lockedMonths.some((m) => m.month === targetMonth);
+      const lock = await prisma.monthlyPayrollLock.findUnique({ where: { month: targetMonth } });
+      const isLocked = Boolean(lock);
 
       res.status(200).json({
         success: true,
@@ -884,19 +1079,19 @@ router.post(
         return;
       }
 
-      const store = resiFixStore.get();
-      const record = store.attendanceLogs.find(
-        (a) => a.id === attendanceId && a.techId === req.user!.userId
-      );
+      const dbLog = await prisma.attendanceLog.findFirst({
+        where: { id: attendanceId, technicianId: req.user!.userId },
+      });
 
-      if (!record) {
+      if (!dbLog) {
         res.status(404).json({ success: false, message: 'Không tìm thấy ca chấm công của bạn.' });
         return;
       }
 
+      const record = unpackAttendanceLog(dbLog);
       const nowIso = new Date().toISOString();
       record.explanationText = explanationText.trim();
-      record.verificationStatus = 'PENDING_REVIEW'; // Chuyển lại cho BMB xem xét
+      record.verificationStatus = 'PENDING_REVIEW';
 
       if (!record.auditLogs) record.auditLogs = [];
       record.auditLogs.push({
@@ -907,14 +1102,19 @@ router.post(
         note: `KTV giải trình: ${explanationText.trim()}`,
       });
 
-      resiFixStore.save(store);
+      const updatedSerialized = packAttendanceMetadata(record, record.anomalyNotes);
+
+      const updated = await prisma.attendanceLog.update({
+        where: { id: dbLog.id },
+        data: { anomalyNotes: updatedSerialized },
+      });
 
       console.log(`[ATTENDANCE_EXPLAIN] KTV ${req.user!.fullName} đã gửi giải trình cho ca ${record.id}`);
 
       res.status(200).json({
         success: true,
         message: 'Đã gửi giải trình thành công. Vui lòng chờ Ban quản lý xét duyệt!',
-        attendance: record,
+        attendance: unpackAttendanceLog(updated),
       });
     } catch (error) {
       console.error('Lỗi gửi giải trình chấm công:', error);
@@ -938,7 +1138,8 @@ router.post(
       }
 
       const tech = await prisma.user.findUnique({ where: { id: techId }, select: { fullName: true } });
-      const store = resiFixStore.get();
+      const recs = await getReconcileRequests();
+
       const rec: ReconcileRequest = {
         id: `rec-${Date.now()}`,
         techId,
@@ -949,8 +1150,8 @@ router.post(
         createdAt: new Date().toISOString(),
       };
 
-      store.reconcileRequests.push(rec);
-      resiFixStore.save(store);
+      recs.push(rec);
+      await saveReconcileRequests(recs);
 
       console.log(`[AUDIT] KTV ${rec.techName} gửi yêu cầu đối soát lương tháng ${rec.month}: ${rec.note}`);
 
@@ -969,6 +1170,7 @@ router.post(
 // ============================================================================
 // 4. BMB ADMIN: QUẢN LÝ CHẤM CÔNG, DUYỆT NGOẠI LỆ, BẢNG LƯƠNG & KHÓA SỔ
 // ============================================================================
+
 // GET /api/payroll/admin/attendance - BMB quản lý toàn bộ chấm công, lọc linh hoạt, GPS + Ảnh
 router.get(
   '/admin/attendance',
@@ -977,26 +1179,30 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { date, month, techId, buildingBlock, status } = req.query as Record<string, string>;
-      const store = resiFixStore.get();
-      let logs = store.attendanceLogs.slice().sort((a, b) => new Date(b.checkIn).getTime() - new Date(a.checkIn).getTime());
 
-      // Lọc theo ngày (YYYY-MM-DD)
+      const where: any = {
+        technician: { isActive: true },
+      };
       if (date && typeof date === 'string' && date.trim()) {
-        logs = logs.filter((l) => l.date === date.trim());
+        where.date = date.trim();
+      } else if (month && typeof month === 'string' && month.trim()) {
+        where.date = { startsWith: month.trim() };
       }
-      // Lọc theo tháng (YYYY-MM)
-      if (month && typeof month === 'string' && month.trim()) {
-        logs = logs.filter((l) => l.date.startsWith(month.trim()));
-      }
-      // Lọc theo KTV
       if (techId && typeof techId === 'string' && techId !== 'ALL') {
-        logs = logs.filter((l) => l.techId === techId.trim());
+        where.technicianId = techId.trim();
       }
-      // Lọc theo tòa nhà
+
+      const dbLogs = await prisma.attendanceLog.findMany({
+        where,
+        orderBy: { checkIn: 'desc' },
+      });
+
+      let logs = dbLogs.map(unpackAttendanceLog);
+
       if (buildingBlock && typeof buildingBlock === 'string' && buildingBlock !== 'ALL') {
         logs = logs.filter((l) => (l.buildingBlock || 'Tòa S1').toUpperCase() === buildingBlock.trim().toUpperCase());
       }
-      // Lọc theo trạng thái
+
       if (status && typeof status === 'string' && status !== 'ALL') {
         const s = status.trim().toUpperCase();
         if (s === 'VERIFIED') {
@@ -1012,26 +1218,23 @@ router.get(
         }
       }
 
-      // Phát hiện cảnh báo bất thường: ca chưa check-out hoặc ngoại lệ chưa xử lý
+      const pendingCheckouts = logs.filter((l) => !l.checkOut);
       const anomalies: string[] = [];
-      const pendingCheckouts = store.attendanceLogs.filter((l) => !l.checkOut);
       if (pendingCheckouts.length > 0) {
         anomalies.push(`Có ${pendingCheckouts.length} lượt trực chưa hoàn thành check-out.`);
       }
-      const pendingReviewCount = store.attendanceLogs.filter(
+      const pendingReviewCount = logs.filter(
         (l) => l.verificationStatus === 'PENDING_REVIEW' || l.verificationStatus === 'NEEDS_EXPLANATION'
       ).length;
       if (pendingReviewCount > 0) {
         anomalies.push(`Có ${pendingReviewCount} ca chấm công có ngoại lệ đang chờ BMB xem xét.`);
       }
 
-      // Thống kê nhanh
       const verifiedCount = logs.filter((l) => l.verificationStatus === 'VERIFIED' || l.verificationStatus === 'APPROVED').length;
       const lateCount = logs.filter((l) => l.punctualityStatus === 'LATE' || l.punctualityStatus === 'LATE_AND_EARLY').length;
       const totalBillableHours = Math.round(logs.reduce((sum, l) => sum + (l.billableHours || 0), 0) * 100) / 100;
       const totalDisputedHours = Math.round(logs.reduce((sum, l) => sum + (l.disputedHours || 0), 0) * 100) / 100;
 
-      // Làm giàu dữ liệu hiển thị (Thêm link Google Maps cho GPS)
       const enrichedLogs = logs.map((log) => ({
         ...log,
         checkInMapUrl: log.checkInGps
@@ -1042,6 +1245,8 @@ router.get(
           : null,
       }));
 
+      const cfg = await getPayrollConfig();
+
       res.status(200).json({
         success: true,
         totalLogs: logs.length,
@@ -1051,7 +1256,7 @@ router.get(
         totalBillableHours,
         totalDisputedHours,
         anomalies,
-        buildingLocation: store.payrollConfig.buildingLocation,
+        buildingLocation: cfg.buildingLocation,
         attendanceLogs: enrichedLogs,
       });
     } catch (error) {
@@ -1087,15 +1292,19 @@ router.patch(
         return;
       }
 
-      const store = resiFixStore.get();
-      const record = store.attendanceLogs.find((a) => a.id === attendanceId);
-      if (!record) {
+      const dbRecord = await prisma.attendanceLog.findUnique({
+        where: { id: attendanceId },
+      });
+      if (!dbRecord) {
         res.status(404).json({ success: false, message: 'Không tìm thấy ca chấm công này.' });
         return;
       }
 
+      const record = unpackAttendanceLog(dbRecord);
       const shiftMonth = record.date.slice(0, 7);
-      if (store.lockedMonths.some((m) => m.month === shiftMonth)) {
+      const isLocked = Boolean(await prisma.monthlyPayrollLock.findUnique({ where: { month: shiftMonth } }));
+
+      if (isLocked) {
         res.status(403).json({
           success: false,
           message: `Kỳ lương tháng ${shiftMonth} đã được khóa chính thức. Không thể sửa đổi hoặc phê duyệt ca này.`,
@@ -1109,13 +1318,14 @@ router.patch(
 
       if (!record.auditLogs) record.auditLogs = [];
 
+      let finalBillable = record.workHours || 0;
       if (action === 'APPROVE') {
         record.verificationStatus = 'APPROVED';
-        const finalHours =
+        finalBillable =
           typeof adjustedHours === 'number' && adjustedHours >= 0
             ? Math.round(adjustedHours * 100) / 100
             : record.workHours || 0;
-        record.billableHours = finalHours;
+        record.billableHours = finalBillable;
         record.disputedHours = 0;
         record.reviewNote = reviewNote.trim();
         record.reviewedBy = bmbName;
@@ -1126,12 +1336,12 @@ router.patch(
           performedByName: bmbName,
           performedAt: nowIso,
           note: reviewNote.trim(),
-          adjustedHours: finalHours,
+          adjustedHours: finalBillable,
         });
       } else if (action === 'REJECT') {
         record.verificationStatus = 'REJECTED';
         record.billableHours = 0;
-        record.disputedHours = record.workHours || 0; // Bảo lưu giờ thực tế để giải quyết tranh chấp lao động
+        record.disputedHours = record.workHours || 0;
         record.reviewNote = reviewNote.trim();
         record.reviewedBy = bmbName;
         record.reviewedAt = nowIso;
@@ -1157,7 +1367,15 @@ router.patch(
         });
       }
 
-      resiFixStore.save(store);
+      const updatedSerialized = packAttendanceMetadata(record, record.anomalyNotes);
+
+      const updated = await prisma.attendanceLog.update({
+        where: { id: dbRecord.id },
+        data: {
+          workHours: action === 'APPROVE' ? finalBillable : dbRecord.workHours,
+          anomalyNotes: updatedSerialized,
+        },
+      });
 
       console.log(`[AUDIT_LOG] BMB (${bmbName}) đã ${action} ca chấm công ${record.id} của KTV ${record.techName}. Ghi chú: ${reviewNote.trim()}`);
 
@@ -1169,7 +1387,7 @@ router.patch(
             : action === 'REJECT'
             ? 'Đã từ chối ca chấm công này.'
             : 'Đã gửi yêu cầu giải trình đến Kỹ thuật viên.',
-        attendance: record,
+        attendance: unpackAttendanceLog(updated),
       });
     } catch (error) {
       console.error('Lỗi khi BMB duyệt chấm công:', error);
@@ -1185,10 +1403,13 @@ router.get(
   authorizeRoles(Role.BMB),
   async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const store = resiFixStore.get();
+      const ots = await prisma.overtimeRequest.findMany({
+        where: { technician: { isActive: true } },
+        orderBy: { createdAt: 'desc' },
+      });
       res.status(200).json({
         success: true,
-        overtimeRequests: store.overtimeRequests.slice().reverse(),
+        overtimeRequests: ots.map(formatOvertime),
       });
     } catch (error) {
       console.error('Lỗi khi lấy danh sách tăng ca:', error);
@@ -1212,27 +1433,29 @@ router.patch(
         return;
       }
 
-      const store = resiFixStore.get();
-      const target = store.overtimeRequests.find((o) => o.id === otId);
+      const target = await prisma.overtimeRequest.findUnique({
+        where: { id: otId },
+      });
       if (!target) {
         res.status(404).json({ success: false, message: 'Không tìm thấy yêu cầu tăng ca.' });
         return;
       }
 
+      const reqH = Number(target.requestedHours);
+      let appH = reqH;
+
       if (status === 'APPROVED') {
-        let appH = target.hours;
         if (approvedHours !== undefined) {
           const numApp = Number(approvedHours);
-          if (isNaN(numApp) || numApp <= 0 || numApp > target.hours) {
+          if (isNaN(numApp) || numApp <= 0 || numApp > reqH) {
             res.status(400).json({
               success: false,
-              message: `Số giờ duyệt (${approvedHours}h) không hợp lệ! Phải > 0 và không được vượt quá số giờ KTV đã đăng ký (${target.hours}h).`,
+              message: `Số giờ duyệt (${approvedHours}h) không hợp lệ! Phải > 0 và không được vượt quá số giờ KTV đã đăng ký (${reqH}h).`,
             });
             return;
           }
           appH = Math.round(numApp * 100) / 100;
         }
-        target.approvedHours = appH;
       } else if (status === 'REJECTED') {
         if (!reviewNote || typeof reviewNote !== 'string' || reviewNote.trim().length < 5) {
           res.status(400).json({
@@ -1241,24 +1464,31 @@ router.patch(
           });
           return;
         }
-        target.approvedHours = 0;
+        appH = 0;
       }
 
-      target.status = status;
-      target.reviewNote = typeof reviewNote === 'string' ? reviewNote.trim() : null;
-      target.reviewedBy = req.user?.fullName || 'BMB Admin';
-      target.reviewedAt = new Date().toISOString();
+      const reviewerName = req.user?.fullName || 'BMB Admin';
 
-      resiFixStore.save(store);
+      const updated = await prisma.overtimeRequest.update({
+        where: { id: otId },
+        data: {
+          status,
+          approvedHours: appH,
+          reviewNote: typeof reviewNote === 'string' ? reviewNote.trim() : null,
+          reviewedById: req.user!.userId,
+          reviewedByName: reviewerName,
+          reviewedAt: new Date(),
+        },
+      });
 
-      console.log(`[AUDIT_LOG] BMB (${target.reviewedBy} - ID: ${req.user?.userId}) đã ${status} yêu cầu tăng ca ${target.id} của KTV ${target.techName}. Giờ duyệt: ${target.approvedHours}h. Ghi chú: ${target.reviewNote || 'N/A'}`);
+      console.log(`[AUDIT_LOG] BMB (${reviewerName} - ID: ${req.user?.userId}) đã ${status} yêu cầu tăng ca ${updated.id} của KTV ${updated.technicianName}. Giờ duyệt: ${appH}h.`);
 
       res.status(200).json({
         success: true,
         message: status === 'APPROVED'
-          ? `Đã phê duyệt yêu cầu tăng ca (${target.approvedHours} giờ).`
+          ? `Đã phê duyệt yêu cầu tăng ca (${appH} giờ).`
           : 'Đã từ chối yêu cầu tăng ca.',
-        overtime: target,
+        overtime: formatOvertime(updated),
       });
     } catch (error) {
       console.error('Lỗi khi duyệt tăng ca:', error);
@@ -1281,22 +1511,27 @@ router.get(
         select: { id: true, fullName: true, phone: true, specialtyLabel: true, shiftName: true, buildingBlock: true },
       });
 
-      const store = resiFixStore.get();
-      const cfg = store.payrollConfig;
-      const isLocked = store.lockedMonths.some((m) => m.month === targetMonth);
+      const cfg = await getPayrollConfig();
       const hourlyRate = cfg.hourlyRateDefault || 50000;
 
-      const payrollList = technicians.map((tech) => {
-        // Lấy tất cả ca chấm công trong tháng
-        const monthLogs = store.attendanceLogs.filter(
-          (a) => a.techId === tech.id && a.date.startsWith(targetMonth)
-        );
+      const lock = await prisma.monthlyPayrollLock.findUnique({ where: { month: targetMonth } });
+      const isLocked = Boolean(lock);
 
-        // Ca hợp lệ (VERIFIED hoặc APPROVED)
+      const dbAllMonthLogs = await prisma.attendanceLog.findMany({
+        where: { date: { startsWith: targetMonth } },
+      });
+      const allMonthLogs = dbAllMonthLogs.map(unpackAttendanceLog);
+
+      const dbAllMonthOts = await prisma.overtimeRequest.findMany({
+        where: { status: 'APPROVED', date: { startsWith: targetMonth } },
+      });
+      const allMonthOts = dbAllMonthOts.map(formatOvertime);
+
+      const payrollList = technicians.map((tech) => {
+        const monthLogs = allMonthLogs.filter((a) => a.techId === tech.id);
         const verifiedLogs = monthLogs.filter(
           (a) => a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'APPROVED'
         );
-        // Ca ngoại lệ đang chờ duyệt
         const disputedLogs = monthLogs.filter(
           (a) => a.verificationStatus === 'PENDING_REVIEW' || a.verificationStatus === 'NEEDS_EXPLANATION'
         );
@@ -1305,10 +1540,7 @@ router.get(
         const nightHours = verifiedLogs.reduce((sum, a) => sum + (a.nightHours || 0), 0);
         const disputedHours = disputedLogs.reduce((sum, a) => sum + (a.disputedHours || a.workHours || 0), 0);
 
-        // Tăng ca OT đã được BMB duyệt
-        const approvedOts = store.overtimeRequests.filter(
-          (o) => o.techId === tech.id && o.status === 'APPROVED' && o.date.startsWith(targetMonth)
-        );
+        const approvedOts = allMonthOts.filter((o) => o.techId === tech.id);
         const otHours = approvedOts.reduce((sum, o) => sum + (o.approvedHours ?? o.hours), 0);
 
         const shiftSalary = calculateShiftSalaryVietnam(regularHours, nightHours, hourlyRate);
@@ -1354,6 +1586,8 @@ router.get(
       });
 
       const totalPayout = payrollList.reduce((sum, p) => sum + p.totalSalary, 0);
+      const allReconciles = await getReconcileRequests();
+      const monthReconciles = allReconciles.filter((r) => r.month === targetMonth);
 
       res.status(200).json({
         success: true,
@@ -1362,7 +1596,7 @@ router.get(
         config: cfg,
         totalPayout,
         payrolls: payrollList,
-        reconcileRequests: store.reconcileRequests.filter((r) => r.month === targetMonth),
+        reconcileRequests: monthReconciles,
       });
     } catch (error) {
       console.error('Lỗi khi tính bảng lương BMB:', error);
@@ -1381,20 +1615,23 @@ router.post(
       const { month } = req.body || {};
       const targetMonth = typeof month === 'string' && month ? month : new Date().toISOString().slice(0, 7);
 
-      const store = resiFixStore.get();
-      const existing = store.lockedMonths.find((m) => m.month === targetMonth);
+      const existing = await prisma.monthlyPayrollLock.findUnique({
+        where: { month: targetMonth },
+      });
       if (existing) {
         res.status(409).json({ success: false, message: `Bảng lương tháng ${targetMonth} đã được khóa trước đó!` });
         return;
       }
 
-      store.lockedMonths.push({
-        month: targetMonth,
-        lockedAt: new Date().toISOString(),
-        lockedBy: req.user?.fullName || 'BMB Admin',
-        totalPayout: 0,
+      await prisma.monthlyPayrollLock.create({
+        data: {
+          month: targetMonth,
+          totalPayout: BigInt(0),
+          lockedById: req.user!.userId,
+          lockedByName: req.user?.fullName || 'BMB Admin',
+          auditNote: `BMB (${req.user?.fullName}) đã KHÓA BẢNG LƯƠNG tháng ${targetMonth}`,
+        },
       });
-      resiFixStore.save(store);
 
       console.log(`[AUDIT_LOG] BMB (${req.user?.fullName}) đã KHÓA BẢNG LƯƠNG tháng ${targetMonth} lúc ${new Date().toISOString()}`);
 
@@ -1417,32 +1654,36 @@ router.patch(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { baseSalaryDefault, standardMonthlyHours, otMultiplierNormal, otMultiplierWeekend, standardAllowance } = req.body || {};
-      const store = resiFixStore.get();
+      const cfg = await getPayrollConfig();
 
       if (typeof baseSalaryDefault === 'number' && baseSalaryDefault > 0) {
-        store.payrollConfig.baseSalaryDefault = baseSalaryDefault;
+        cfg.baseSalaryDefault = baseSalaryDefault;
       }
       if (typeof standardMonthlyHours === 'number' && standardMonthlyHours > 0) {
-        store.payrollConfig.standardMonthlyHours = standardMonthlyHours;
+        cfg.standardMonthlyHours = standardMonthlyHours;
       }
       if (typeof otMultiplierNormal === 'number' && otMultiplierNormal > 0) {
-        store.payrollConfig.otMultiplierNormal = otMultiplierNormal;
+        cfg.otMultiplierNormal = otMultiplierNormal;
       }
       if (typeof otMultiplierWeekend === 'number' && otMultiplierWeekend > 0) {
-        store.payrollConfig.otMultiplierWeekend = otMultiplierWeekend;
+        cfg.otMultiplierWeekend = otMultiplierWeekend;
       }
       if (typeof standardAllowance === 'number' && standardAllowance >= 0) {
-        store.payrollConfig.standardAllowance = standardAllowance;
+        cfg.standardAllowance = standardAllowance;
       }
 
-      resiFixStore.save(store);
+      await prisma.systemSetting.upsert({
+        where: { key: 'payroll_config' },
+        create: { key: 'payroll_config', value: cfg as any },
+        update: { value: cfg as any },
+      });
 
-      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình lương:`, store.payrollConfig);
+      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình lương:`, cfg);
 
       res.status(200).json({
         success: true,
         message: 'Đã cập nhật cấu hình lương và quy tắc tăng ca thành công.',
-        config: store.payrollConfig,
+        config: cfg,
       });
     } catch (error) {
       console.error('Lỗi cập nhật cấu hình lương:', error);
@@ -1452,4 +1693,3 @@ router.patch(
 );
 
 export default router;
-

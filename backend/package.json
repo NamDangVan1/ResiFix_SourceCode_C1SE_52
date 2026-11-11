@@ -5,9 +5,15 @@
   "main": "index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
+    "dev:test": "ts-node src/index.ts --test-env",
     "build": "npx prisma generate && tsc",
     "start": "node dist/index.js",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "test:verify-db": "ts-node src/scripts/verify_test_db_connection.ts",
+    "test:reconcile-schema": "ts-node src/scripts/reconcile_test_schema.ts",
+    "test:migrate-dryrun": "ts-node src/scripts/migrate_store_to_neon.ts",
+    "test:migrate-execute": "ts-node src/scripts/migrate_store_to_neon.ts --execute",
+    "test:regression": "ts-node src/scripts/test_complete_neon_migration.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

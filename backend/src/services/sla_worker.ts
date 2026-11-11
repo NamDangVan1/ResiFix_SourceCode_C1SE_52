@@ -5,25 +5,56 @@
  * - Tự động kích hoạt các cấp độ leo thang (Escalation Tiers 1, 2, 3).
  * - Hỗ trợ tạm dừng (Pause SLA) khi chờ vật tư hoặc hẹn giờ với cư dân.
  * - Chống gửi lặp thông báo (Debounce / Cooldown).
+ * - 100% PERSISTENCE TRÊN NEON POSTGRESQL (Prisma SlaTracking & SystemSetting).
  */
 
 import { TicketStatus, PriorityLevel, Role, NotificationType } from '@prisma/client';
 import { prisma } from '../db';
-import { resiFixStore, SlaTicketStatus, SlaTierConfig } from '../data/resifix_store';
+import { SlaTicketStatus, SlaTierConfig, SlaConfig } from '../data/resifix_store';
+
+const DEFAULT_SLA_CONFIG: SlaConfig = {
+  highPriority: { responseMinutes: 15, assignmentMinutes: 30, resolutionHours: 4 },
+  mediumPriority: { responseMinutes: 30, assignmentMinutes: 60, resolutionHours: 12 },
+  lowPriority: { responseMinutes: 60, assignmentMinutes: 120, resolutionHours: 24 },
+  warningThresholdPercent: 80,
+  autoEscalationHours: 2,
+  alertDebounceMinutes: 15,
+};
 
 class SlaWorkerService {
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning: boolean = false;
+  private cachedConfig: SlaConfig = DEFAULT_SLA_CONFIG;
+  private lastConfigLoadTime: number = 0;
+
+  // Lấy cấu hình SLA từ SystemSetting (có cache 30 giây giảm tải query)
+  public async getSlaConfig(): Promise<SlaConfig> {
+    const now = Date.now();
+    if (now - this.lastConfigLoadTime < 30000) {
+      return this.cachedConfig;
+    }
+    try {
+      const setting = await prisma.systemSetting.findUnique({ where: { key: 'sla_config' } });
+      if (setting?.value && typeof setting.value === 'object') {
+        this.cachedConfig = setting.value as any;
+        this.lastConfigLoadTime = now;
+      }
+    } catch {
+      // Dùng cấu hình hiện tại nếu có lỗi tạm thời
+    }
+    return this.cachedConfig;
+  }
 
   // Tính toán thời hạn theo mức ưu tiên
-  public calculateDeadlines(createdAt: Date, priority: PriorityLevel | string): {
+  public calculateDeadlinesWithConfig(
+    createdAt: Date,
+    priority: PriorityLevel | string,
+    cfg: SlaConfig
+  ): {
     responseDeadline: string;
     assignmentDeadline: string;
     resolutionDeadline: string;
   } {
-    const store = resiFixStore.get();
-    const cfg = store.slaConfig;
-
     let tier: SlaTierConfig = cfg.mediumPriority;
     if (priority === PriorityLevel.HIGH || priority === 'HIGH') tier = cfg.highPriority;
     else if (priority === PriorityLevel.LOW || priority === 'LOW') tier = cfg.lowPriority;
@@ -36,69 +67,100 @@ class SlaWorkerService {
     return { responseDeadline, assignmentDeadline, resolutionDeadline };
   }
 
-  // Đánh giá trạng thái SLA của một ticket
-  public evaluateTicketSla(ticket: {
+  // Format Prisma SlaTracking sang SlaTicketStatus interface
+  public formatSlaTracking(t: any): SlaTicketStatus {
+    const now = Date.now();
+    const respMs = new Date(t.responseDeadline).getTime();
+    const assignMs = new Date(t.assignmentDeadline).getTime();
+    const resMs = new Date(t.resolutionDeadline).getTime();
+
+    return {
+      ticketId: t.ticketId,
+      ticketCode: t.ticketCode,
+      priority: t.priority as any,
+      status: t.status,
+      responseDeadline: new Date(t.responseDeadline).toISOString(),
+      assignmentDeadline: new Date(t.assignmentDeadline).toISOString(),
+      resolutionDeadline: new Date(t.resolutionDeadline).toISOString(),
+      slaStatus: t.slaStatus as any,
+      isResponseBreached: now > respMs,
+      isAssignmentBreached: now > assignMs,
+      isResolutionBreached: now > resMs,
+      isPaused: Boolean(t.isPaused),
+      pausedAt: t.pausedAt ? new Date(t.pausedAt).toISOString() : null,
+      pauseReason: t.pauseReason || null,
+      escalationTier: t.escalationTier || 0,
+      lastAlertSentAt: t.lastAlertSentAt ? new Date(t.lastAlertSentAt).toISOString() : null,
+    };
+  }
+
+  // Đánh giá và lưu trạng thái SLA của một ticket vào PostgreSQL
+  public async evaluateTicketSla(ticket: {
     id: string;
     ticketCode: string;
     createdAt: Date;
     status: TicketStatus | string;
     finalPriority?: PriorityLevel | null;
     aiSuggestedPriority?: PriorityLevel | null;
-  }): SlaTicketStatus {
-    const store = resiFixStore.get();
+  }): Promise<SlaTicketStatus> {
+    const cfg = await this.getSlaConfig();
     const now = Date.now();
     const priority = ticket.finalPriority || ticket.aiSuggestedPriority || PriorityLevel.MEDIUM;
 
-    let tracking = store.slaTrackings.find((s) => s.ticketId === ticket.id);
+    let dbTracking = await prisma.slaTracking.findUnique({
+      where: { ticketId: ticket.id },
+    });
 
-    if (!tracking) {
-      const deadlines = this.calculateDeadlines(ticket.createdAt, priority);
-      tracking = {
-        ticketId: ticket.id,
-        ticketCode: ticket.ticketCode,
-        priority: priority as any,
-        status: ticket.status,
-        ...deadlines,
-        slaStatus: 'ON_TRACK',
-        isResponseBreached: false,
-        isAssignmentBreached: false,
-        isResolutionBreached: false,
-        isPaused: false,
-        escalationTier: 0,
-      };
-      store.slaTrackings.push(tracking);
-      resiFixStore.save(store);
+    if (!dbTracking) {
+      const deadlines = this.calculateDeadlinesWithConfig(ticket.createdAt, priority, cfg);
+      dbTracking = await prisma.slaTracking.create({
+        data: {
+          ticketId: ticket.id,
+          ticketCode: ticket.ticketCode,
+          priority: String(priority),
+          status: String(ticket.status),
+          responseDeadline: new Date(deadlines.responseDeadline),
+          assignmentDeadline: new Date(deadlines.assignmentDeadline),
+          resolutionDeadline: new Date(deadlines.resolutionDeadline),
+          slaStatus: 'ON_TRACK',
+          isPaused: false,
+          escalationTier: 0,
+        },
+      });
     }
 
-    // Nếu ticket đã hoàn thành hoặc đang tạm dừng SLA
+    // Nếu ticket đã hoàn thành hoặc đóng
     if (ticket.status === TicketStatus.COMPLETED || ticket.status === TicketStatus.CLOSED) {
-      tracking.slaStatus = tracking.isResolutionBreached ? 'BREACHED' : 'ON_TRACK';
-      return tracking;
+      const isResBreached = now > new Date(dbTracking.resolutionDeadline).getTime();
+      const finalStatus = isResBreached ? 'BREACHED' : 'ON_TRACK';
+      if (dbTracking.slaStatus !== finalStatus || dbTracking.status !== ticket.status) {
+        dbTracking = await prisma.slaTracking.update({
+          where: { ticketId: ticket.id },
+          data: { slaStatus: finalStatus, status: String(ticket.status) },
+        });
+      }
+      return this.formatSlaTracking(dbTracking);
     }
 
-    if (tracking.isPaused) {
-      return tracking;
+    if (dbTracking.isPaused) {
+      if (dbTracking.status !== ticket.status) {
+        dbTracking = await prisma.slaTracking.update({
+          where: { ticketId: ticket.id },
+          data: { status: String(ticket.status) },
+        });
+      }
+      return this.formatSlaTracking(dbTracking);
     }
 
-    // 1. Kiểm tra Response SLA (Tiếp nhận ban đầu)
-    const responseDeadlineMs = new Date(tracking.responseDeadline).getTime();
-    if (ticket.status === TicketStatus.PENDING && now > responseDeadlineMs) {
-      tracking.isResponseBreached = true;
-    }
+    // Kiểm tra các mốc deadline
+    const responseDeadlineMs = new Date(dbTracking.responseDeadline).getTime();
+    const assignmentDeadlineMs = new Date(dbTracking.assignmentDeadline).getTime();
+    const resolutionDeadlineMs = new Date(dbTracking.resolutionDeadline).getTime();
 
-    // 2. Kiểm tra Assignment SLA (Phân công kỹ thuật viên)
-    const assignmentDeadlineMs = new Date(tracking.assignmentDeadline).getTime();
-    if ((ticket.status === TicketStatus.PENDING || ticket.status === TicketStatus.ASSIGNED) && now > assignmentDeadlineMs) {
-      tracking.isAssignmentBreached = true;
-    }
+    const isRespBreached = ticket.status === TicketStatus.PENDING && now > responseDeadlineMs;
+    const isAssignBreached = (ticket.status === TicketStatus.PENDING || ticket.status === TicketStatus.ASSIGNED) && now > assignmentDeadlineMs;
+    const isResBreached = now > resolutionDeadlineMs;
 
-    // 3. Kiểm tra Resolution SLA (Hoàn tất khắc phục sự cố)
-    const resolutionDeadlineMs = new Date(tracking.resolutionDeadline).getTime();
-    if (now > resolutionDeadlineMs) {
-      tracking.isResolutionBreached = true;
-    }
-
-    // Xác định deadline đang áp dụng theo giai đoạn
     let targetDeadlineMs = resolutionDeadlineMs;
     if (ticket.status === TicketStatus.PENDING) {
       targetDeadlineMs = responseDeadlineMs;
@@ -110,26 +172,39 @@ class SlaWorkerService {
     const elapsedMs = now - new Date(ticket.createdAt).getTime();
     const ratio = totalWindowMs > 0 ? elapsedMs / totalWindowMs : 1.0;
 
-    const hasAnyBreach = tracking.isResponseBreached || tracking.isAssignmentBreached || tracking.isResolutionBreached || ratio >= 1.0;
+    const hasAnyBreach = isRespBreached || isAssignBreached || isResBreached || ratio >= 1.0;
+
+    let newSlaStatus: 'ON_TRACK' | 'AT_RISK' | 'BREACHED' = 'ON_TRACK';
+    let newTier = 0;
 
     if (hasAnyBreach) {
-      tracking.slaStatus = 'BREACHED';
-      // Tính toán cấp độ leo thang (Escalation)
+      newSlaStatus = 'BREACHED';
       const hoursOverdue = (now - targetDeadlineMs) / (1000 * 60 * 60);
-      if (hoursOverdue > store.slaConfig.autoEscalationHours) {
-        tracking.escalationTier = 3; // Leo thang lên Ban Giám Đốc tòa nhà
+      if (hoursOverdue > cfg.autoEscalationHours) {
+        newTier = 3; // Leo thang lên Ban Giám Đốc
       } else {
-        tracking.escalationTier = 2; // Báo động BMB điều phối
+        newTier = 2; // Báo động BMB điều phối
       }
-    } else if (ratio >= store.slaConfig.warningThresholdPercent / 100) {
-      tracking.slaStatus = 'AT_RISK';
-      tracking.escalationTier = 1; // Nhắc nhở KTV/BMB
+    } else if (ratio >= cfg.warningThresholdPercent / 100) {
+      newSlaStatus = 'AT_RISK';
+      newTier = 1; // Nhắc nhở KTV/BMB
     } else {
-      tracking.slaStatus = 'ON_TRACK';
-      tracking.escalationTier = 0;
+      newSlaStatus = 'ON_TRACK';
+      newTier = 0;
     }
 
-    return tracking;
+    if (dbTracking.slaStatus !== newSlaStatus || dbTracking.escalationTier !== newTier || dbTracking.status !== ticket.status) {
+      dbTracking = await prisma.slaTracking.update({
+        where: { ticketId: ticket.id },
+        data: {
+          slaStatus: newSlaStatus,
+          escalationTier: newTier,
+          status: String(ticket.status),
+        },
+      });
+    }
+
+    return this.formatSlaTracking(dbTracking);
   }
 
   // Quét định kỳ kiểm tra các ticket đang xử lý (Hỗ trợ phân tán nhiều instance Node.js)
@@ -147,7 +222,7 @@ class SlaWorkerService {
         }
         dbLocked = true;
       } catch {
-        // Fallback khi DB sandbox offline
+        // Tiếp tục nếu DB không hỗ trợ pg_try_advisory_lock
       }
 
       const activeTickets = await prisma.incidentTicket.findMany({
@@ -166,16 +241,23 @@ class SlaWorkerService {
         },
       });
 
-      const store = resiFixStore.get();
-      const debounceMs = (store.slaConfig.alertDebounceMinutes || 15) * 60 * 1000;
+      const cfg = await this.getSlaConfig();
+      const debounceMs = (cfg.alertDebounceMinutes || 15) * 60 * 1000;
 
       for (const t of activeTickets) {
-        const sla = this.evaluateTicketSla(t);
+        const sla = await this.evaluateTicketSla(t);
         if (sla.slaStatus === 'BREACHED' && sla.escalationTier >= 2) {
-          const nowStr = new Date().toISOString();
-          if (!sla.lastAlertSentAt || Date.now() - new Date(sla.lastAlertSentAt).getTime() > debounceMs) {
+          const nowMs = Date.now();
+          const lastAlertMs = sla.lastAlertSentAt ? new Date(sla.lastAlertSentAt).getTime() : 0;
+
+          if (!sla.lastAlertSentAt || nowMs - lastAlertMs > debounceMs) {
             console.warn(`[SLA_BREACH_ALERT] Sự cố ${t.ticketCode} đã QUÁ HẠN SLA! Cấp độ leo thang: Tier ${sla.escalationTier}. Phụ trách: ${t.assignedTech?.fullName || 'Chưa phân công'}`);
-            sla.lastAlertSentAt = nowStr;
+            
+            const now = new Date();
+            await prisma.slaTracking.update({
+              where: { ticketId: t.id },
+              data: { lastAlertSentAt: now },
+            });
 
             // Ghi nhận thông báo thực tế vào bảng Notification
             try {
@@ -206,22 +288,19 @@ class SlaWorkerService {
                 });
               }
             } catch {
-              // Bắt lỗi khi database offline trong môi trường sandbox
+              // Bắt lỗi nhẹ khi tạo thông báo
             }
           }
         }
       }
-
-      resiFixStore.save();
     } catch (err: any) {
-      // Trong môi trường offline/sandbox hoặc lỗi mạng, bắt lỗi nhẹ không gây crash
-      // console.warn('[SLA_CYCLE_OFFLINE]', err.message?.slice(0, 50));
+      console.warn('[SLA_CYCLE_ERROR]', err?.message?.slice(0, 80));
     } finally {
       if (dbLocked) {
         try {
           await prisma.$queryRaw`SELECT pg_advisory_unlock(888123)`;
         } catch {
-          // Bắt lỗi khi DB sandbox offline
+          // Bắt lỗi khi unlock
         }
       }
       this.isRunning = false;
@@ -246,4 +325,3 @@ class SlaWorkerService {
 }
 
 export const slaWorker = new SlaWorkerService();
-

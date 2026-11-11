@@ -1,21 +1,8 @@
-import path from 'path';
-import dotenv from 'dotenv';
-
-// BẮT BUỘC NẠP FILE .ENV NGAY DÒNG ĐẦU TIÊN TRƯỚC KHI IMPORT CÁC ROUTES & PRISMA
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
-
+import './config/env';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { prisma } from './db';
-import authRoutes from './routes/auth.routes';
-import ticketRoutes from './routes/ticket.routes';
-import notificationRoutes from './routes/notification.routes';
-import uploadRoutes from './routes/upload.routes';
-import managementRoutes from './routes/management.routes';
-import payrollRoutes from './routes/payroll.routes';
-import scheduleRoutes from './routes/schedule.routes';
-import costRoutes from './routes/cost.routes';
-import slaRoutes from './routes/sla.routes';
+import { prisma } from './config/database';
+import apiRouter from './routes';
 import { slaWorker } from './services/sla_worker';
 
 const app = express();
@@ -30,32 +17,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// 1. Module Xác thực & Phân quyền RBAC (EP01: US-01 -> US-05)
-app.use('/api/auth', authRoutes);
-
-// 2. Module Quản lý Sự cố, Quét QR & Trợ lý Gemini AI (EP02 -> EP07: US-06 -> US-40)
-app.use('/api/tickets', ticketRoutes);
-
-// 3. Module Hộp thư Thông báo & Lịch sử FCM (EP06: US-35 -> US-37, Risk R3)
-app.use('/api/notifications', notificationRoutes);
-
-// 4. Module Tải ảnh đám mây Cloudinary (EP08: US-43, Risk R4)
-app.use('/api/upload', uploadRoutes);
-
-// 5. Module Quản lý Căn hộ, Cư dân & Liên hệ Khẩn cấp
-app.use('/api/management', managementRoutes);
-
-// 6. Module Chấm công & Tính lương Kỹ thuật viên
-app.use('/api/payroll', payrollRoutes);
-
-// 7. Module Đổi ca & Xin nghỉ phép KTV
-app.use('/api/schedule', scheduleRoutes);
-
-// 8. Module Chi phí sửa chữa & Vật tư gắn với IncidentTicket
-app.use('/api/costs', costRoutes);
-
-// 9. Module Cam kết chất lượng dịch vụ (SLA) & Leo thang sự cố
-app.use('/api/sla', slaRoutes);
+// Gắn kết toàn bộ 9 phân hệ API chính thức qua Router Aggregator
+app.use('/api', apiRouter);
 
 // 10. API Kiểm tra kết nối Server & Neon PostgreSQL Database (Health Check)
 app.get('/api/health', async (_req: Request, res: Response) => {

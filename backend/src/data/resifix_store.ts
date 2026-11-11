@@ -17,6 +17,35 @@ export interface ApartmentRecord {
   createdAt: string;
 }
 
+export const OFFICIAL_BUILDING_BLOCKS = [
+  { code: 'G', name: 'Tòa G' },
+  { code: 'F', name: 'Tòa F' },
+  { code: 'E', name: 'Tòa E' },
+] as const;
+
+export const generateOfficial75Apartments = (): ApartmentRecord[] => {
+  const list: ApartmentRecord[] = [];
+  for (const block of OFFICIAL_BUILDING_BLOCKS) {
+    for (let floor = 1; floor <= 5; floor++) {
+      for (let room = 1; room <= 5; room++) {
+        const roomCode = `${block.code}${floor}${String(room).padStart(2, '0')}`;
+        list.push({
+          id: `apt-${roomCode.toLowerCase()}`,
+          apartmentCode: roomCode,
+          buildingBlock: block.name,
+          floorNumber: floor,
+          roomQrCode: `ROOM:${roomCode}`,
+          status: 'VACANT',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        });
+      }
+    }
+  }
+  return list;
+};
+
+export type ResidencyRole = 'OWNER' | 'TENANT' | 'MEMBER';
+
 export interface ResidencyRecord {
   id: string;
   residentId: string;
@@ -25,6 +54,7 @@ export interface ResidencyRecord {
   apartmentCode: string;
   buildingBlock: string;
   floorNumber: number;
+  residencyRole?: ResidencyRole;
   moveInDate: string;
   moveOutDate?: string | null;
   isRepresentative: boolean;
@@ -90,8 +120,11 @@ export interface AttendanceGpsSnapshot {
   latitude: number;
   longitude: number;
   accuracyMeters?: number | null;
+  accuracy?: number | null;
   distanceToBuildingMeters: number;
+  distanceMeters?: number;
   isWithinRadius: boolean;
+  isWithinAllowedRadius?: boolean;
   addressEstimate?: string | null; // Địa chỉ ước tính từ GPS
 }
 
@@ -332,6 +365,7 @@ export interface ResiFixStoreData {
   slaConfig: SlaConfig;
   slaTrackings: SlaTicketStatus[];
   emergencyAlerts: EmergencyAlertRecord[];
+  temporaryPasswordUserIds?: string[]; // Danh sách userId cần đổi mật khẩu lần đầu (fallback khi DB chưa có cột mustChangePassword)
 }
 
 const STORE_PATH = path.resolve(__dirname, 'resifix_data.json');
@@ -341,7 +375,7 @@ const DEFAULT_STORE: ResiFixStoreData = {
     managerName: 'Đặng Thành Quyết',
     managerPhone: '0913402803',
   },
-  apartments: [],
+  apartments: generateOfficial75Apartments(),
   residencyHistory: [],
   payrollConfig: {
     hourlyRateDefault: 50000,
@@ -353,12 +387,12 @@ const DEFAULT_STORE: ResiFixStoreData = {
     standardAllowance: 730000,
     holidays: ['2026-01-01', '2026-04-30', '2026-05-01', '2026-09-02', '2026-09-03'],
     buildingLocation: {
-      buildingName: 'Tòa nhà ResiFix SkyView',
-      buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
-      latitude: 10.7324,
-      longitude: 106.6992,
+      buildingName: 'Khu Tòa Nhà ResiFix - Đại học Duy Tân',
+      buildingAddress: 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng',
+      latitude: 16.0592,
+      longitude: 108.1472,
       allowedRadiusMeters: 300,
-      isConfirmed: false, // Bắt buộc BMB xác nhận chính thức
+      isConfirmed: true,
       configAuditLogs: [],
     },
   },
@@ -397,7 +431,7 @@ class StoreManager {
       if (fs.existsSync(STORE_PATH)) {
         const raw = fs.readFileSync(STORE_PATH, 'utf8');
         const parsed = JSON.parse(raw);
-        return {
+        const storeData: ResiFixStoreData = {
           ...DEFAULT_STORE,
           ...parsed,
           payrollConfig: {
@@ -417,6 +451,54 @@ class StoreManager {
             ...(parsed.slaConfig || {}),
           },
         };
+
+        // Đồng bộ 75 căn hộ chính thức (G101..G505, F101..F505, E101..E505)
+        const officialApts = generateOfficial75Apartments();
+        const existingAptMap = new Map<string, ApartmentRecord>(
+          (storeData.apartments || []).map((a) => [a.apartmentCode.toUpperCase(), a])
+        );
+        let needsSave = false;
+
+        const mergedApartments = officialApts.map((official) => {
+          const existing = existingAptMap.get(official.apartmentCode);
+          if (existing) {
+            return {
+              ...official,
+              ...existing,
+              buildingBlock: official.buildingBlock,
+              floorNumber: official.floorNumber,
+              roomQrCode: existing.roomQrCode || official.roomQrCode,
+            };
+          }
+          needsSave = true;
+          return official;
+        });
+
+        for (const [code, apt] of existingAptMap.entries()) {
+          if (!mergedApartments.some((m) => m.apartmentCode.toUpperCase() === code)) {
+            mergedApartments.push(apt);
+          }
+        }
+        storeData.apartments = mergedApartments;
+
+        // Cập nhật vị trí chuẩn Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng
+        if (
+          !storeData.payrollConfig.buildingLocation.buildingAddress ||
+          storeData.payrollConfig.buildingLocation.buildingAddress.includes('Nguyễn Hữu Thọ')
+        ) {
+          storeData.payrollConfig.buildingLocation.buildingName = 'Khu Tòa Nhà ResiFix - Đại học Duy Tân';
+          storeData.payrollConfig.buildingLocation.buildingAddress = 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
+          storeData.payrollConfig.buildingLocation.latitude = 16.0592;
+          storeData.payrollConfig.buildingLocation.longitude = 108.1472;
+          storeData.payrollConfig.buildingLocation.isConfirmed = true;
+          needsSave = true;
+        }
+
+        if (needsSave || !parsed.apartments || parsed.apartments.length < 75) {
+          this.save(storeData);
+        }
+
+        return storeData;
       }
     } catch (err) {
       console.warn('Không thể đọc file resifix_store.json, khởi tạo dữ liệu mặc định:', err);

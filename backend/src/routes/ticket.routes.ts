@@ -13,7 +13,43 @@ import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { analyzeIncidentWithGemini } from '../services/gemini.service';
 import { prisma } from '../db';
-import { isTechOnApprovedLeave, resiFixStore } from '../data/resifix_store';
+import { createAndSaveOtp } from '../services/otp.service';
+import { safeSendOtpEmail } from '../services/mail.service';
+
+async function getBuildingAddress(): Promise<string> {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'payroll_config' } });
+    if (setting?.value && typeof setting.value === 'object') {
+      const val = setting.value as any;
+      if (val?.buildingLocation?.buildingAddress) {
+        return val.buildingLocation.buildingAddress;
+      }
+    }
+  } catch (err) {
+    console.warn('[BUILDING_ADDRESS_READ_WARN]', err);
+  }
+  return 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
+}
+
+async function isTechOnApprovedLeaveDb(techId: string, date: string): Promise<boolean> {
+  try {
+    const leave = await prisma.shiftScheduleRequest.findFirst({
+      where: {
+        techId,
+        type: 'LEAVE',
+        status: 'APPROVED',
+        date: { lte: date },
+        OR: [
+          { endDate: null, date },
+          { endDate: { gte: date } },
+        ],
+      },
+    });
+    return Boolean(leave);
+  } catch {
+    return false;
+  }
+}
 
 const router = Router();
 
@@ -165,6 +201,79 @@ router.get(
       return;
     }
 
+    const buildingAddress = await getBuildingAddress();
+
+    // 1. Kiểm tra xem có phải mã QR phòng căn hộ (ROOM:G101 hoặc G101) không
+    let roomCode = qrCode.startsWith('ROOM:') ? qrCode.replace(/^ROOM:/i, '').trim().toUpperCase() : null;
+    let aptRecord = roomCode ? await prisma.apartment.findFirst({ where: { apartmentCode: roomCode } }) : null;
+    if (!aptRecord && !qrCode.startsWith('ROOM:')) {
+      const matched = await prisma.apartment.findFirst({ where: { apartmentCode: qrCode } });
+      if (matched) {
+        roomCode = matched.apartmentCode;
+        aptRecord = matched;
+      }
+    }
+
+    if (aptRecord && roomCode) {
+      // Xác minh quyền cư dân đối với phòng riêng (Section VI)
+      const residentUser = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { id: true, apartmentCode: true },
+      });
+      const userApt = residentUser?.apartmentCode ? residentUser.apartmentCode.trim().toUpperCase() : null;
+      const activeResidency = await prisma.residencyRecord.findFirst({
+        where: {
+          residentId: req.user!.userId,
+          apartmentCode: roomCode,
+          moveOutDate: null,
+        },
+      });
+      const hasResidency = userApt === roomCode || Boolean(activeResidency);
+
+      if (!hasResidency) {
+        res.status(403).json({
+          success: false,
+          message: `Bạn không có quyền báo cáo sự cố tại phòng riêng ${roomCode} vì bạn không cư trú tại phòng này. Nếu đây là sự cố khu vực chung, vui lòng quét mã QR khu vực chung hoặc liên hệ Ban quản lý BMB.`,
+        });
+        return;
+      }
+
+      const locationLabel = `Phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber} (${buildingAddress})`;
+      const areaPayload = {
+        id: aptRecord.id,
+        qrCode: `ROOM:${aptRecord.apartmentCode}`,
+        apartmentCode: aptRecord.apartmentCode,
+        areaName: `Phòng ${aptRecord.apartmentCode}`,
+        locationLabel,
+        buildingBlock: aptRecord.buildingBlock,
+        floor: aptRecord.floorNumber,
+        category: 'ELECTRICAL',
+        address: buildingAddress,
+        isRoom: true,
+        isActive: true,
+      };
+
+      res.status(200).json({
+        success: true,
+        message: `Đã nhận diện phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber}`,
+        area: areaPayload,
+        asset: {
+          id: areaPayload.id,
+          qrCode: areaPayload.qrCode,
+          apartmentCode: aptRecord.apartmentCode,
+          assetName: `Phòng ${aptRecord.apartmentCode} (${aptRecord.buildingBlock}, Tầng ${aptRecord.floorNumber})`,
+          areaName: areaPayload.areaName,
+          category: areaPayload.category,
+          locationLabel,
+          buildingBlock: areaPayload.buildingBlock,
+          floor: areaPayload.floor,
+          isActive: true,
+        },
+      });
+      return;
+    }
+
+    // 2. Tra cứu trong bảng BuildingArea (khu vực chung: WP-1204, v.v.)
     const area = await prisma.buildingArea.findFirst({
       where: { qrCode, isActive: true },
     });
@@ -172,7 +281,7 @@ router.get(
     if (!area) {
       res.status(404).json({
         success: false,
-        message: `Không tìm thấy khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
+        message: `Không tìm thấy phòng hoặc khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
       });
       return;
     }
@@ -218,14 +327,25 @@ router.get(
 
       // Đồng bộ trạng thái ca trực tự động theo giờ Asia/Ho_Chi_Minh & đối soát chấm công
       const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
-      const store = resiFixStore.get();
+      const [todayLogs, approvedLeaves] = await Promise.all([
+        prisma.attendanceLog.findMany({ where: { date: todayVn } }),
+        prisma.shiftScheduleRequest.findMany({
+          where: {
+            type: 'LEAVE',
+            status: 'APPROVED',
+            date: { lte: todayVn },
+            OR: [{ endDate: null, date: todayVn }, { endDate: { gte: todayVn } }],
+          },
+        }),
+      ]);
+      const leaveTechIds = new Set(approvedLeaves.map((l) => l.techId));
 
       const enhancedTechnicians = technicians.map((tech) => {
         const inShift = isCurrentlyInShift(tech.shiftName);
-        const onLeave = isTechOnApprovedLeave(tech.id, todayVn);
+        const onLeave = leaveTechIds.has(tech.id);
         // Tìm ca trực đang mở hôm nay (đã check-in và CHƯA check-out)
-        const todayLogs = store.attendanceLogs.filter((a) => a.techId === tech.id && a.date === todayVn);
-        const activeAttendance = todayLogs.find((a) => !a.checkOut);
+        const techLogs = todayLogs.filter((a) => a.technicianId === tech.id);
+        const activeAttendance = techLogs.find((a) => !a.checkOut);
         const isCheckedIn = Boolean(activeAttendance);
 
         // KTV chỉ đủ điều kiện phân công khi:
@@ -235,7 +355,7 @@ router.get(
         // 4. Đang trong giờ ca trực hợp lệ (inShift)
         // 5. Đang bật trực (tech.isOnDuty === true) - Tuyệt đối không cho phép isOnDuty = false được phân công chỉ vì đang trong giờ ca
         const isEligible = Boolean(!onLeave && isCheckedIn && tech.isOnDuty && inShift);
-        const isCheckedOut = !activeAttendance && todayLogs.length > 0;
+        const isCheckedOut = !activeAttendance && techLogs.length > 0;
 
         return {
           ...tech,
@@ -276,8 +396,8 @@ router.post(
       res.status(400).json({ success: false, message: 'Vui lòng nhập họ tên và số điện thoại hợp lệ.' });
       return;
     }
-    if (email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)) {
-      res.status(400).json({ success: false, message: 'Email không hợp lệ.' });
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      res.status(400).json({ success: false, message: 'Vui lòng nhập địa chỉ email hợp lệ để Kỹ thuật viên nhận mã OTP kích hoạt tài khoản.' });
       return;
     }
     if (password.length < 6 || password.length > 128) {
@@ -298,7 +418,7 @@ router.post(
         data: {
           fullName,
           phone,
-          email: email || null,
+          email,
           passwordHash: await bcrypt.hash(password, 10),
           role: Role.TECHNICIAN,
           specialty,
@@ -306,11 +426,36 @@ router.post(
           shiftName: typeof body.shiftName === 'string' ? body.shiftName.trim() || null : null,
           isOnDuty: body.isOnDuty ?? false,
           isActive: true,
+          isActivated: false, // Bắt buộc kích hoạt tài khoản qua OTP
+          mustChangePassword: true,
         },
         select: TECHNICIAN_SELECT,
       });
 
-      res.status(201).json({ success: true, technician });
+      // Sinh mã OTP kích hoạt 6 chữ số (hiệu lực 5 phút) và gửi email ngay sau khi tạo
+      let emailSent = false;
+      let emailMessage = '';
+      try {
+        const { otp } = await createAndSaveOtp(email, 'ACCOUNT_ACTIVATION', 5);
+        const mailResult = await safeSendOtpEmail(email, otp, 'ACCOUNT_ACTIVATION', Role.TECHNICIAN);
+        emailSent = mailResult.success;
+        if (!mailResult.success) {
+          console.error('[TECH_CREATE_OTP_MAIL_ERROR]', mailResult.error || 'Failed to send activation email');
+          emailMessage = 'Tài khoản đã tạo thành công nhưng chưa thể gửi email OTP (lỗi kết nối SMTP). Kỹ thuật viên có thể bấm "Gửi lại mã OTP" trên màn hình kích hoạt.';
+        }
+      } catch (otpErr: any) {
+        console.warn('[TECH_CREATE_OTP_WARN]', otpErr?.message);
+        emailMessage = 'Tài khoản đã tạo nhưng gửi OTP thất bại. Kỹ thuật viên có thể bấm "Gửi lại mã OTP" khi đăng nhập.';
+      }
+
+      res.status(201).json({
+        success: true,
+        technician,
+        emailSent,
+        message: emailSent
+          ? `Đã tạo tài khoản Kỹ thuật viên ${fullName} và gửi mã OTP kích hoạt đến email ${email}.`
+          : emailMessage,
+      });
     } catch (error) {
       if (isUniqueConstraintError(error)) {
         res.status(409).json({ success: false, message: 'Số điện thoại hoặc email đã được sử dụng.' });
@@ -445,64 +590,111 @@ router.delete(
         });
 
         if (activeTickets.length > 0) {
-          if (!handoverTechId) {
-            throw new RouteError(
-              409,
-              `Kỹ thuật viên đang phụ trách ${activeTickets.length} sự cố chưa hoàn thành. Vui lòng chọn kỹ thuật viên nhận bàn giao trước khi vô hiệu hóa.`
-            );
-          }
-          if (handoverTechId === technicianId) {
-            throw new RouteError(400, 'Không thể bàn giao công việc cho chính kỹ thuật viên sắp bị vô hiệu hóa.');
-          }
+          if (handoverTechId && handoverTechId !== technicianId) {
+            const targetTech = await tx.user.findFirst({
+              where: { id: handoverTechId, role: Role.TECHNICIAN, isActive: true },
+              select: { id: true, fullName: true },
+            });
+            if (!targetTech) {
+              throw new RouteError(400, 'Kỹ thuật viên nhận bàn giao không hợp lệ hoặc đã bị vô hiệu hóa.');
+            }
 
-          const targetTech = await tx.user.findFirst({
-            where: { id: handoverTechId, role: Role.TECHNICIAN, isActive: true },
-            select: { id: true, fullName: true },
-          });
-          if (!targetTech) {
-            throw new RouteError(400, 'Kỹ thuật viên nhận bàn giao không hợp lệ hoặc đã bị vô hiệu hóa.');
-          }
+            // Bàn giao toàn bộ ticket đang xử lý
+            await tx.incidentTicket.updateMany({
+              where: {
+                assignedTechId: technicianId,
+                status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
+              },
+              data: { assignedTechId: handoverTechId },
+            });
 
-          // Bàn giao toàn bộ ticket đang xử lý
-          await tx.incidentTicket.updateMany({
-            where: {
-              assignedTechId: technicianId,
-              status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
-            },
-            data: { assignedTechId: handoverTechId },
-          });
+            // Ghi lịch sử tiến độ cho từng ticket
+            for (const t of activeTickets) {
+              await tx.ticketStatusLog.create({
+                data: {
+                  ticketId: t.id,
+                  fromStatus: t.status,
+                  toStatus: t.status,
+                  changedById: req.user!.userId,
+                  title: 'Bàn giao kỹ thuật viên',
+                  note: `BMB đã bàn giao sự cố từ KTV ${technician.fullName} sang KTV ${targetTech.fullName} trước khi vô hiệu hóa tài khoản.`,
+                },
+              });
+            }
 
-          // Ghi lịch sử tiến độ cho từng ticket
-          for (const t of activeTickets) {
-            await tx.ticketStatusLog.create({
+            // Gửi thông báo đến KTV nhận bàn giao
+            await tx.notification.create({
               data: {
-                ticketId: t.id,
-                fromStatus: t.status,
-                toStatus: t.status,
-                changedById: req.user!.userId,
-                title: 'Bàn giao kỹ thuật viên',
-                note: `BMB đã bàn giao sự cố từ KTV ${technician.fullName} sang KTV ${targetTech.fullName} trước khi vô hiệu hóa tài khoản.`,
+                userId: handoverTechId,
+                type: NotificationType.TASK_ASSIGNED,
+                title: 'Tiếp nhận bàn giao công việc',
+                message: `Bạn được BMB giao phụ trách ${activeTickets.length} sự cố tiếp nhận từ KTV ${technician.fullName}.`,
               },
             });
-          }
+            reassignedCount = activeTickets.length;
+          } else {
+            // Không có KTV bàn giao hoặc không chọn: Thu hồi phân công về trạng thái PENDING để BMB phân công lại
+            await tx.incidentTicket.updateMany({
+              where: {
+                assignedTechId: technicianId,
+                status: { in: [TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS] },
+              },
+              data: { assignedTechId: null, status: TicketStatus.PENDING },
+            });
 
-          // Gửi thông báo đến KTV nhận bàn giao
-          await tx.notification.create({
-            data: {
-              userId: handoverTechId,
-              type: NotificationType.TASK_ASSIGNED,
-              title: 'Tiếp nhận bàn giao công việc',
-              message: `Bạn được BMB giao phụ trách ${activeTickets.length} sự cố tiếp nhận từ KTV ${technician.fullName}.`,
-            },
-          });
-          reassignedCount = activeTickets.length;
+            for (const t of activeTickets) {
+              await tx.ticketStatusLog.create({
+                data: {
+                  ticketId: t.id,
+                  fromStatus: t.status,
+                  toStatus: TicketStatus.PENDING,
+                  changedById: req.user!.userId,
+                  title: 'Thu hồi phân công sự cố',
+                  note: `Sự cố chuyển về trạng thái chờ phân công do KTV ${technician.fullName} bị vô hiệu hóa tài khoản.`,
+                },
+              });
+            }
+            reassignedCount = activeTickets.length;
+          }
         }
 
-        const result = await tx.user.updateMany({
-          where: { id: technicianId, role: Role.TECHNICIAN, isActive: true },
-          data: { isActive: false, isOnDuty: false, fcmToken: null },
-        });
-        if (result.count !== 1) throw new RouteError(409, 'Tài khoản kỹ thuật viên đã được cập nhật.');
+        const isPurge = req.query.purge === 'true' || (body && body.purge === true);
+        if (isPurge) {
+          const bmbAdmin = await tx.user.findFirst({ where: { role: Role.BMB, isActive: true } });
+          const fallbackId = bmbAdmin ? bmbAdmin.id : req.user!.userId;
+
+          // Giải phóng khóa ngoại an toàn
+          await tx.incidentTicket.updateMany({
+            where: { assignedTechId: technicianId },
+            data: { assignedTechId: null },
+          });
+          await tx.ticketStatusLog.updateMany({
+            where: { changedById: technicianId },
+            data: { changedById: fallbackId },
+          });
+          await tx.ticketMedia.updateMany({
+            where: { uploadedById: technicianId },
+            data: { uploadedById: fallbackId },
+          });
+          await tx.notification.deleteMany({
+            where: { userId: technicianId },
+          });
+          await tx.shiftScheduleRequest.deleteMany({
+            where: { techId: technicianId },
+          });
+          await tx.attendanceLog.deleteMany({
+            where: { technicianId },
+          });
+          await tx.user.delete({
+            where: { id: technicianId },
+          });
+        } else {
+          const result = await tx.user.updateMany({
+            where: { id: technicianId, role: Role.TECHNICIAN, isActive: true },
+            data: { isActive: false, isOnDuty: false, fcmToken: null },
+          });
+          if (result.count !== 1) throw new RouteError(409, 'Tài khoản kỹ thuật viên đã được cập nhật.');
+        }
       });
 
       res.status(200).json({
@@ -622,17 +814,62 @@ router.post(
       const cleanDesc = description.trim();
 
       let area = null;
+      let isRoomTicket = false;
+      let roomApartmentCode: string | null = null;
+      const buildingAddress = await getBuildingAddress();
+
       if (qrCode) {
         if (typeof qrCode !== 'string' || qrCode.trim().length > 128) {
-          res.status(400).json({ success: false, message: 'Mã QR khu vực không hợp lệ.' });
+          res.status(400).json({ success: false, message: 'Mã QR không hợp lệ.' });
           return;
         }
-        area = await prisma.buildingArea.findFirst({
-          where: { qrCode: qrCode.trim().toUpperCase(), isActive: true },
-        });
-        if (!area) {
-          res.status(404).json({ success: false, message: 'Không tìm thấy khu vực đang hoạt động với mã QR này.' });
-          return;
+        const cleanQr = qrCode.trim().toUpperCase();
+
+        // 1. Kiểm tra xem có phải mã QR phòng riêng (ROOM:G101 hoặc G101) không
+        let roomCode = cleanQr.startsWith('ROOM:') ? cleanQr.replace(/^ROOM:/i, '').trim().toUpperCase() : null;
+        let aptRecord = roomCode ? await prisma.apartment.findFirst({ where: { apartmentCode: roomCode } }) : null;
+        if (!aptRecord && !cleanQr.startsWith('ROOM:')) {
+          const matched = await prisma.apartment.findFirst({ where: { apartmentCode: cleanQr } });
+          if (matched) {
+            roomCode = matched.apartmentCode;
+            aptRecord = matched;
+          }
+        }
+
+        if (aptRecord && roomCode) {
+          // Xác minh quyền cư dân đối với phòng riêng (Section VI)
+          const residentUser = await prisma.user.findUnique({
+            where: { id: req.user!.userId },
+            select: { id: true, apartmentCode: true },
+          });
+          const userApt = residentUser?.apartmentCode ? residentUser.apartmentCode.trim().toUpperCase() : null;
+          const activeResidency = await prisma.residencyRecord.findFirst({
+            where: {
+              residentId: req.user!.userId,
+              apartmentCode: roomCode,
+              moveOutDate: null,
+            },
+          });
+          const hasResidency = userApt === roomCode || Boolean(activeResidency);
+
+          if (!hasResidency) {
+            res.status(403).json({
+              success: false,
+              message: `Bạn không có quyền báo cáo sự cố tại phòng riêng ${roomCode} vì bạn không cư trú tại phòng này. Nếu đây là sự cố khu vực chung, vui lòng quét mã QR khu vực chung hoặc liên hệ Ban quản lý BMB.`,
+            });
+            return;
+          }
+          isRoomTicket = true;
+          roomApartmentCode = roomCode;
+        } else {
+          // 2. Tra cứu trong BuildingArea (khu vực chung)
+          area = await prisma.buildingArea.findFirst({
+            where: { qrCode: cleanQr, isActive: true },
+          });
+          if (!area) {
+            res.status(404).json({ success: false, message: 'Không tìm thấy phòng hoặc khu vực đang hoạt động với mã QR này.' });
+            return;
+          }
         }
       }
 
@@ -645,10 +882,17 @@ router.post(
         resident?.apartmentCode ? `Căn hộ ${resident.apartmentCode}` : '',
         resident?.buildingBlock || '',
         resident?.floorNumber ? `Tầng ${resident.floorNumber}` : '',
+        buildingAddress,
       ].filter(Boolean).join(' • ');
-      const finalLocation = area
-        ? `${area.locationLabel} • Khu vực: ${area.qrCode}`
-        : submittedLocation || profileLocation;
+
+      let finalLocation = submittedLocation || profileLocation;
+      if (isRoomTicket && roomApartmentCode) {
+        const aptRecord = await prisma.apartment.findFirst({ where: { apartmentCode: roomApartmentCode } });
+        finalLocation = `Phòng ${roomApartmentCode} – ${aptRecord?.buildingBlock || 'Tòa G'} – Tầng ${aptRecord?.floorNumber || 1} (${buildingAddress}) • QR: ROOM:${roomApartmentCode}`;
+      } else if (area) {
+        finalLocation = `${area.locationLabel} • Khu vực: ${area.qrCode}`;
+      }
+
       if (!finalLocation || finalLocation.length > 300) {
         res.status(400).json({ success: false, message: 'Vui lòng nhập vị trí sự cố hợp lệ.' });
         return;
@@ -677,7 +921,7 @@ router.post(
               isVoiceInput: isVoiceInput === true,
               locationNote: finalLocation,
               areaId: area?.id || null,
-              isQrScannedByRes: Boolean(area),
+              isQrScannedByRes: Boolean(area || isRoomTicket),
               aiSummary: aiResult.summary,
               aiSuggestedCategory: aiResult.category,
               aiSuggestedPriority: aiResult.priority,
@@ -816,11 +1060,17 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
         where: { id: assignedTechId.trim(), role: Role.TECHNICIAN, isActive: true },
         select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
       });
-      const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
-      const store = resiFixStore.get();
+      if (!tech || !tech.isOnDuty || !isCurrentlyInShift(tech.shiftName)) {
+        res.status(409).json({
+          success: false,
+          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
+        });
+        return;
+      }
 
-      // Kiểm tra KTV tồn tại, đang hoạt động, đang trực, trong ca trực và không nghỉ phép
-      if (!tech || !tech.isOnDuty || !isCurrentlyInShift(tech.shiftName) || isTechOnApprovedLeave(tech.id, todayVn)) {
+      const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+      const onLeave = await isTechOnApprovedLeaveDb(tech.id, todayVn);
+      if (onLeave) {
         res.status(409).json({
           success: false,
           message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
@@ -829,8 +1079,9 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
       }
 
       // Kiểm tra KTV đã check-in và CHƯA check-out
-      const todaySessions = store.attendanceLogs.filter((a) => a.techId === tech.id && a.date === todayVn);
-      const activeSession = todaySessions.find((a) => !a.checkOut);
+      const activeSession = await prisma.attendanceLog.findFirst({
+        where: { technicianId: tech.id, date: todayVn, checkOut: null },
+      });
       if (!activeSession) {
         res.status(409).json({
           success: false,
@@ -849,13 +1100,15 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
         if (!currentTech || !currentTech.isOnDuty || !isCurrentlyInShift(currentTech.shiftName)) {
           throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
         }
-        if (isTechOnApprovedLeave(currentTech.id, todayVn)) {
+        const txOnLeave = await isTechOnApprovedLeaveDb(currentTech.id, todayVn);
+        if (txOnLeave) {
           throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
         }
 
         // Chống race condition với check-out đồng thời
-        const freshStore = resiFixStore.get();
-        const activeAtt = freshStore.attendanceLogs.find((a) => a.techId === currentTech.id && a.date === todayVn && !a.checkOut);
+        const activeAtt = await tx.attendanceLog.findFirst({
+          where: { technicianId: currentTech.id, date: todayVn, checkOut: null },
+        });
         if (!activeAtt) {
           throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
         }

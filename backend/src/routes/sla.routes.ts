@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { Role, NotificationType } from '@prisma/client';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../db';
-import { resiFixStore, EmergencyAlertRecord } from '../data/resifix_store';
+import { EmergencyAlertRecord, SlaConfig } from '../data/resifix_store';
 import { slaWorker } from '../services/sla_worker';
 
 const router = Router();
@@ -12,15 +12,28 @@ const getParamAsString = (param: string | string[] | undefined): string => {
   return String(param || '');
 };
 
+const DEFAULT_SLA_CONFIG: SlaConfig = {
+  highPriority: { responseMinutes: 15, assignmentMinutes: 30, resolutionHours: 4 },
+  mediumPriority: { responseMinutes: 30, assignmentMinutes: 60, resolutionHours: 12 },
+  lowPriority: { responseMinutes: 60, assignmentMinutes: 120, resolutionHours: 24 },
+  warningThresholdPercent: 80,
+  autoEscalationHours: 2,
+  alertDebounceMinutes: 15,
+};
+
 // ============================================================================
-// 1. CẤU HÌNH & TRẠNG THÁI SLA
+// 1. CẤU HÌNH QUY ĐỊNH CAM KẾT DỊCH VỤ (SLA CONFIG)
 // ============================================================================
 
-// GET /api/sla/config - Xem cấu hình ngưỡng cam kết dịch vụ (SLA)
+// GET /api/sla/config - Xem cấu hình SLA
 router.get('/config', authenticateJWT, async (_req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const store = resiFixStore.get();
-    res.status(200).json({ success: true, config: store.slaConfig });
+    let cfg: SlaConfig = DEFAULT_SLA_CONFIG;
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'sla_config' } });
+    if (setting?.value && typeof setting.value === 'object') {
+      cfg = setting.value as any;
+    }
+    res.status(200).json({ success: true, config: cfg });
   } catch (error) {
     console.error('Lỗi lấy cấu hình SLA:', error);
     res.status(500).json({ success: false, message: 'Lỗi khi tải cấu hình SLA.' });
@@ -34,45 +47,54 @@ router.patch(
   authorizeRoles(Role.BMB),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const { highPriority, mediumPriority, lowPriority, warningThresholdPercent, autoEscalationHours } = req.body || {};
-      const store = resiFixStore.get();
+      const { highPriority, mediumPriority, lowPriority, warningThresholdPercent, autoEscalationHours, alertDebounceMinutes } = req.body || {};
+
+      let currentConfig: SlaConfig = DEFAULT_SLA_CONFIG;
+      const setting = await prisma.systemSetting.findUnique({ where: { key: 'sla_config' } });
+      if (setting?.value && typeof setting.value === 'object') {
+        currentConfig = setting.value as any;
+      }
 
       if (highPriority) {
-        if (highPriority.responseMinutes > 0) store.slaConfig.highPriority.responseMinutes = highPriority.responseMinutes;
-        if (highPriority.assignmentMinutes > 0) store.slaConfig.highPriority.assignmentMinutes = highPriority.assignmentMinutes;
-        if (highPriority.resolutionHours > 0) store.slaConfig.highPriority.resolutionHours = highPriority.resolutionHours;
+        if (highPriority.responseMinutes > 0) currentConfig.highPriority.responseMinutes = highPriority.responseMinutes;
+        if (highPriority.assignmentMinutes > 0) currentConfig.highPriority.assignmentMinutes = highPriority.assignmentMinutes;
+        if (highPriority.resolutionHours > 0) currentConfig.highPriority.resolutionHours = highPriority.resolutionHours;
       }
 
       if (mediumPriority) {
-        if (mediumPriority.responseMinutes > 0) store.slaConfig.mediumPriority.responseMinutes = mediumPriority.responseMinutes;
-        if (mediumPriority.assignmentMinutes > 0) store.slaConfig.mediumPriority.assignmentMinutes = mediumPriority.assignmentMinutes;
-        if (mediumPriority.resolutionHours > 0) store.slaConfig.mediumPriority.resolutionHours = mediumPriority.resolutionHours;
+        if (mediumPriority.responseMinutes > 0) currentConfig.mediumPriority.responseMinutes = mediumPriority.responseMinutes;
+        if (mediumPriority.assignmentMinutes > 0) currentConfig.mediumPriority.assignmentMinutes = mediumPriority.assignmentMinutes;
+        if (mediumPriority.resolutionHours > 0) currentConfig.mediumPriority.resolutionHours = mediumPriority.resolutionHours;
       }
 
       if (lowPriority) {
-        if (lowPriority.responseMinutes > 0) store.slaConfig.lowPriority.responseMinutes = lowPriority.responseMinutes;
-        if (lowPriority.assignmentMinutes > 0) store.slaConfig.lowPriority.assignmentMinutes = lowPriority.assignmentMinutes;
-        if (lowPriority.resolutionHours > 0) store.slaConfig.lowPriority.resolutionHours = lowPriority.resolutionHours;
+        if (lowPriority.responseMinutes > 0) currentConfig.lowPriority.responseMinutes = lowPriority.responseMinutes;
+        if (lowPriority.assignmentMinutes > 0) currentConfig.lowPriority.assignmentMinutes = lowPriority.assignmentMinutes;
+        if (lowPriority.resolutionHours > 0) currentConfig.lowPriority.resolutionHours = lowPriority.resolutionHours;
       }
 
       if (typeof warningThresholdPercent === 'number' && warningThresholdPercent >= 50 && warningThresholdPercent <= 95) {
-        store.slaConfig.warningThresholdPercent = warningThresholdPercent;
+        currentConfig.warningThresholdPercent = warningThresholdPercent;
       }
       if (typeof autoEscalationHours === 'number' && autoEscalationHours > 0) {
-        store.slaConfig.autoEscalationHours = autoEscalationHours;
+        currentConfig.autoEscalationHours = autoEscalationHours;
       }
-      if (typeof req.body?.alertDebounceMinutes === 'number' && req.body.alertDebounceMinutes >= 1 && req.body.alertDebounceMinutes <= 120) {
-        store.slaConfig.alertDebounceMinutes = req.body.alertDebounceMinutes;
+      if (typeof alertDebounceMinutes === 'number' && alertDebounceMinutes >= 1 && alertDebounceMinutes <= 120) {
+        currentConfig.alertDebounceMinutes = alertDebounceMinutes;
       }
 
-      resiFixStore.save(store);
+      await prisma.systemSetting.upsert({
+        where: { key: 'sla_config' },
+        create: { key: 'sla_config', value: currentConfig as any },
+        update: { value: currentConfig as any },
+      });
 
-      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình SLA:`, store.slaConfig);
+      console.log(`[AUDIT] BMB (${req.user?.fullName}) đã cập nhật cấu hình SLA:`, currentConfig);
 
       res.status(200).json({
         success: true,
         message: 'Đã cập nhật quy định SLA thành công.',
-        config: store.slaConfig,
+        config: currentConfig,
       });
     } catch (error) {
       console.error('Lỗi cập nhật cấu hình SLA:', error);
@@ -105,7 +127,7 @@ router.get(
         return;
       }
 
-      const status = slaWorker.evaluateTicketSla(ticket);
+      const status = await slaWorker.evaluateTicketSla(ticket);
       res.status(200).json({ success: true, sla: status });
     } catch (error) {
       console.error('Lỗi khi lấy trạng thái SLA sự cố:', error);
@@ -133,8 +155,7 @@ router.post(
         return;
       }
 
-      const store = resiFixStore.get();
-      let tracking = store.slaTrackings.find((s) => s.ticketId === ticketId);
+      let tracking = await prisma.slaTracking.findUnique({ where: { ticketId } });
 
       if (!tracking) {
         const ticket = await prisma.incidentTicket.findUnique({
@@ -152,7 +173,13 @@ router.post(
           res.status(404).json({ success: false, message: 'Không tìm thấy sự cố.' });
           return;
         }
-        tracking = slaWorker.evaluateTicketSla(ticket);
+        await slaWorker.evaluateTicketSla(ticket);
+        tracking = await prisma.slaTracking.findUnique({ where: { ticketId } });
+      }
+
+      if (!tracking) {
+        res.status(404).json({ success: false, message: 'Không tìm thấy thông tin SLA của sự cố.' });
+        return;
       }
 
       if (tracking.isPaused) {
@@ -160,29 +187,33 @@ router.post(
         return;
       }
 
-      tracking.isPaused = true;
-      tracking.pausedAt = new Date().toISOString();
-      tracking.pauseReason = reason.trim();
-
-      resiFixStore.save(store);
+      const now = new Date();
+      const updated = await prisma.slaTracking.update({
+        where: { ticketId },
+        data: {
+          isPaused: true,
+          pausedAt: now,
+          pauseReason: reason.trim(),
+        },
+      });
 
       // Ghi log tiến độ vòng đời sự cố
       await prisma.ticketStatusLog.create({
         data: {
           ticketId,
-          toStatus: tracking.status as any,
+          toStatus: updated.status as any,
           title: 'Tạm dừng tính cam kết SLA',
           note: `Lý do tạm dừng: ${reason.trim()} (Bởi BMB: ${req.user?.fullName})`,
           changedById: req.user!.userId,
         },
       });
 
-      console.log(`[SLA] BMB (${req.user?.fullName}) đã tạm dừng SLA cho ticket ${tracking.ticketCode}: ${reason}`);
+      console.log(`[SLA] BMB (${req.user?.fullName}) đã tạm dừng SLA cho ticket ${updated.ticketCode}: ${reason}`);
 
       res.status(200).json({
         success: true,
         message: 'Đã tạm dừng tính thời gian SLA của sự cố.',
-        sla: tracking,
+        sla: slaWorker.formatSlaTracking(updated),
       });
     } catch (error) {
       console.error('Lỗi khi tạm dừng SLA:', error);
@@ -199,8 +230,7 @@ router.post(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const ticketId = getParamAsString(req.params.ticketId);
-      const store = resiFixStore.get();
-      const tracking = store.slaTrackings.find((s) => s.ticketId === ticketId);
+      const tracking = await prisma.slaTracking.findUnique({ where: { ticketId } });
 
       if (!tracking || !tracking.isPaused || !tracking.pausedAt) {
         res.status(400).json({ success: false, message: 'Sự cố không ở trạng thái tạm dừng SLA.' });
@@ -210,32 +240,38 @@ router.post(
       // Tính thời gian đã tạm dừng (milliseconds) để cộng dồn gia hạn deadline
       const pauseDurationMs = Date.now() - new Date(tracking.pausedAt).getTime();
 
-      tracking.responseDeadline = new Date(new Date(tracking.responseDeadline).getTime() + pauseDurationMs).toISOString();
-      tracking.assignmentDeadline = new Date(new Date(tracking.assignmentDeadline).getTime() + pauseDurationMs).toISOString();
-      tracking.resolutionDeadline = new Date(new Date(tracking.resolutionDeadline).getTime() + pauseDurationMs).toISOString();
+      const newResp = new Date(new Date(tracking.responseDeadline).getTime() + pauseDurationMs);
+      const newAssign = new Date(new Date(tracking.assignmentDeadline).getTime() + pauseDurationMs);
+      const newRes = new Date(new Date(tracking.resolutionDeadline).getTime() + pauseDurationMs);
 
-      tracking.isPaused = false;
-      tracking.pausedAt = null;
-      tracking.pauseReason = null;
-
-      resiFixStore.save(store);
+      const updated = await prisma.slaTracking.update({
+        where: { ticketId },
+        data: {
+          isPaused: false,
+          pausedAt: null,
+          pauseReason: null,
+          responseDeadline: newResp,
+          assignmentDeadline: newAssign,
+          resolutionDeadline: newRes,
+        },
+      });
 
       await prisma.ticketStatusLog.create({
         data: {
           ticketId,
-          toStatus: tracking.status as any,
+          toStatus: updated.status as any,
           title: 'Tiếp tục tính thời gian SLA',
           note: `Đã gia hạn thêm ${Math.round(pauseDurationMs / 60000)} phút do thời gian tạm dừng trước đó.`,
           changedById: req.user!.userId,
         },
       });
 
-      console.log(`[SLA] BMB (${req.user?.fullName}) tiếp tục SLA cho ticket ${tracking.ticketCode}. Đã gia hạn +${Math.round(pauseDurationMs / 60000)} phút.`);
+      console.log(`[SLA] BMB (${req.user?.fullName}) tiếp tục SLA cho ticket ${updated.ticketCode}. Đã gia hạn +${Math.round(pauseDurationMs / 60000)} phút.`);
 
       res.status(200).json({
         success: true,
         message: 'Đã tiếp tục tính SLA và gia hạn deadline tương ứng.',
-        sla: tracking,
+        sla: slaWorker.formatSlaTracking(updated),
       });
     } catch (error) {
       console.error('Lỗi tiếp tục SLA:', error);
@@ -258,8 +294,11 @@ router.get(
       // Chạy một chu kỳ quét cập nhật
       await slaWorker.runCheckCycle();
 
-      const store = resiFixStore.get();
-      const trackings = store.slaTrackings;
+      const dbTrackings = await prisma.slaTracking.findMany({
+        orderBy: { resolutionDeadline: 'asc' },
+      });
+
+      const trackings = dbTrackings.map((t) => slaWorker.formatSlaTracking(t));
 
       const onTrack = trackings.filter((t) => t.slaStatus === 'ON_TRACK');
       const atRisk = trackings.filter((t) => t.slaStatus === 'AT_RISK');
@@ -308,11 +347,15 @@ router.post(
       const cleanDesc = typeof description === 'string' ? description.trim() : '';
       const isTestMode = Boolean(isTest);
 
-      const store = resiFixStore.get();
-      if (!store.emergencyAlerts) store.emergencyAlerts = [];
+      // Đọc danh sách alerts hiện có từ SystemSetting
+      let emergencyAlerts: EmergencyAlertRecord[] = [];
+      const alertSetting = await prisma.systemSetting.findUnique({ where: { key: 'emergency_alerts' } });
+      if (alertSetting?.value && Array.isArray(alertSetting.value)) {
+        emergencyAlerts = alertSetting.value as any;
+      }
 
       // 3. Chống gửi trùng (Deduplication / Rate limit 60 giây cùng loại tại cùng vị trí)
-      const lastSameAlert = store.emergencyAlerts.find(
+      const lastSameAlert = emergencyAlerts.find(
         (a) => a.emergencyType === cleanType && Date.now() - new Date(a.createdAt).getTime() < 60000
       );
       if (lastSameAlert) {
@@ -323,7 +366,7 @@ router.post(
         return;
       }
 
-      // 4. Lưu vết Audit Log vào Store
+      // 4. Lưu vết Audit Log vào SystemSetting
       const alertRecord: EmergencyAlertRecord = {
         id: `alert-${Date.now()}`,
         emergencyType: cleanType,
@@ -335,8 +378,13 @@ router.post(
         isTest: isTestMode,
         createdAt: new Date().toISOString(),
       };
-      store.emergencyAlerts.push(alertRecord);
-      resiFixStore.save(store);
+      emergencyAlerts.push(alertRecord);
+
+      await prisma.systemSetting.upsert({
+        where: { key: 'emergency_alerts' },
+        create: { key: 'emergency_alerts', value: emergencyAlerts as any },
+        update: { value: emergencyAlerts as any },
+      });
 
       console.error(`🚨 [EMERGENCY_BROADCAST] ${isTestMode ? '[DIỄN TẬP] ' : ''}Loại: ${cleanType} tại: ${cleanLoc} (${cleanBlock})! Bởi: ${alertRecord.triggeredByName}`);
 
@@ -358,7 +406,7 @@ router.post(
             });
           }
         } catch {
-          // Bắt lỗi khi database offline trong sandbox
+          // Bắt lỗi nhẹ nếu tạo notification gặp trục trặc
         }
       }
 
@@ -410,7 +458,7 @@ router.post(
           });
         }
       } catch {
-        // Bắt lỗi khi database offline
+        // Bắt lỗi nhẹ
       }
 
       res.status(200).json({
@@ -432,4 +480,3 @@ router.post(
 );
 
 export default router;
-

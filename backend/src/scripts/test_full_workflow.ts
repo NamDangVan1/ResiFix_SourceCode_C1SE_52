@@ -182,7 +182,7 @@ async function runAllTests() {
   const checkInRecord: AttendanceRecord = {
     id: `att-in-${Date.now()}`,
     techId: testTechId,
-    techName: 'Đặng Văn Nam',
+    techName: 'Đặng Thành Quyết',
     date: todayStr,
     sessionIndex: 1,
     checkIn: new Date().toISOString(),
