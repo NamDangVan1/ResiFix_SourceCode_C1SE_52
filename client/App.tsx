@@ -628,6 +628,72 @@ function AppContent() {
   const [bmbViewingWorkloadTech, setBmbViewingWorkloadTech] = useState<any | null>(null);
   const [bmbRadioTicketId, setBmbRadioTicketId] = useState<string>('');
 
+  // State xem ảnh phóng to của cư dân cho BMB
+  const [bmbPhotoViewerVisible, setBmbPhotoViewerVisible] = useState<boolean>(false);
+  const [bmbPhotoViewerIndex, setBmbPhotoViewerIndex] = useState<number>(0);
+  const [bmbPhotoViewerList, setBmbPhotoViewerList] = useState<Array<{ id: string; url: string; caption?: string }>>([]);
+  const [bmbPhotoModalLoading, setBmbPhotoModalLoading] = useState<boolean>(false);
+  const [bmbPhotoModalError, setBmbPhotoModalError] = useState<boolean>(false);
+
+  // Trích xuất danh sách ảnh ban đầu do Cư dân báo cáo (chỉ lấy SCENE_BEFORE, tuyệt đối loại trừ REPAIR_PROOF của KTV)
+  const getResidentReportedMedia = (ticket: any): Array<{ id: string; url: string; caption?: string }> => {
+    if (!ticket) return [];
+    const items: Array<{ id: string; url: string; caption?: string }> = [];
+    const seenUrls = new Set<string>();
+
+    // 1. Lấy từ ticket.media (quan hệ Prisma chuẩn của IncidentTicket)
+    if (Array.isArray(ticket.media) && ticket.media.length > 0) {
+      for (const m of ticket.media) {
+        if (!m || !m.imageUrl) continue;
+        if (m.ticketId && ticket.id && m.ticketId !== ticket.id) continue;
+        // Tuyệt đối không lấy ảnh nghiệm thu sau sửa của KTV
+        if (m.mediaType === 'REPAIR_PROOF') continue;
+
+        if (m.mediaType === 'SCENE_BEFORE') {
+          if (!seenUrls.has(m.imageUrl)) {
+            seenUrls.add(m.imageUrl);
+            items.push({
+              id: m.id || m.imageUrl,
+              url: m.imageUrl,
+              caption: m.caption || translate('Ảnh hiện trường cư dân cung cấp'),
+            });
+          }
+          continue;
+        }
+
+        // Tương thích ngược an toàn nếu dữ liệu cũ chưa có mediaType
+        const isUploadedByResident = ticket.residentId && m.uploadedById === ticket.residentId;
+        const isSceneCaption = m.caption && /hiện trường|báo cáo|cư dân/i.test(m.caption);
+        if (isUploadedByResident || isSceneCaption) {
+          if (!seenUrls.has(m.imageUrl)) {
+            seenUrls.add(m.imageUrl);
+            items.push({
+              id: m.id || m.imageUrl,
+              url: m.imageUrl,
+              caption: m.caption || translate('Ảnh hiện trường cư dân cung cấp'),
+            });
+          }
+        }
+      }
+    }
+
+    // 2. Dự phòng an toàn nếu ticket có mảng photos (chuỗi URL) từ API
+    if (items.length === 0 && Array.isArray(ticket.photos) && ticket.photos.length > 0) {
+      ticket.photos.forEach((photoUrl: any, idx: number) => {
+        if (typeof photoUrl === 'string' && photoUrl.startsWith('http') && !seenUrls.has(photoUrl)) {
+          seenUrls.add(photoUrl);
+          items.push({
+            id: `photo-${idx}-${photoUrl}`,
+            url: photoUrl,
+            caption: `${translate('Ảnh hiện trường')} ${idx + 1}`,
+          });
+        }
+      });
+    }
+
+    return items;
+  };
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 4000);
@@ -1188,9 +1254,10 @@ function AppContent() {
 
           if (aptData?.apartments) {
             setApartments(aptData.apartments);
-            if (!selectedApartment && aptData.apartments.length > 0) {
-              setSelectedApartment(aptData.apartments[0]);
-            }
+            setSelectedApartment((current: any) => {
+              if (!current) return aptData.apartments[0] || null;
+              return aptData.apartments.find((a: any) => a.apartmentCode === current.apartmentCode) || aptData.apartments[0] || null;
+            });
           }
           console.log(`[CLIENT_RESIDENT_LOG][${new Date().toISOString()}] GET /management/residents completed. Received: ${resData?.residents?.length ?? 0} records (source: fetchAllData)`);
           if (resData?.residents) {
@@ -1771,6 +1838,47 @@ function AppContent() {
         } else {
           showToast(translate(isEdit ? 'Đã cập nhật thông tin cư dân.' : (data.message || 'Đã liên kết cư dân thành công.')));
         }
+
+        // Cập nhật ngay danh sách cư dân trên UI mà không cần chờ fetch nền
+        if (data.resident) {
+          const savedResident = data.resident;
+          setResidentsList((prev) => {
+            const idx = prev.findIndex((r) => r.id === savedResident.id || (r.phone && r.phone === savedResident.phone));
+            if (idx >= 0) {
+              const copy = [...prev];
+              copy[idx] = { ...copy[idx], ...savedResident };
+              return copy;
+            }
+            return [savedResident, ...prev];
+          });
+        }
+
+        // Tải lại trực tiếp danh sách cư dân & căn hộ có độ ưu tiên cao
+        try {
+          const [rRes, aRes] = await Promise.all([
+            fetch(`${API_BASE_URL}/management/residents`, {
+              headers: { Authorization: `Bearer ${token}`, 'bypass-tunnel-reminder': 'true' },
+            }),
+            fetch(`${API_BASE_URL}/management/apartments`, {
+              headers: { Authorization: `Bearer ${token}`, 'bypass-tunnel-reminder': 'true' },
+            }),
+          ]);
+          const rJson = await rRes.json().catch(() => null);
+          const aJson = await aRes.json().catch(() => null);
+          if (rJson?.residents) {
+            setResidentsList(rJson.residents);
+          }
+          if (aJson?.apartments) {
+            setApartments(aJson.apartments);
+            setSelectedApartment((current: any) => {
+              if (!current) return aJson.apartments[0] || null;
+              return aJson.apartments.find((a: any) => a.apartmentCode === current.apartmentCode) || aJson.apartments[0] || null;
+            });
+          }
+        } catch (fetchErr) {
+          console.warn('Lỗi khi tải lại dữ liệu cư dân/căn hộ sau khi lưu:', fetchErr);
+        }
+
         console.log(`[CLIENT_RESIDENT_LOG][${new Date().toISOString()}] POST /management/residents success: residentId=${data.resident?.id}, apt=${data.resident?.apartmentCode}. Refreshing authoritative state via fetchAllData() (source: handleSaveResident)`);
         await fetchAllData();
       } else {
@@ -1845,6 +1953,7 @@ function AppContent() {
       const data = await res.json().catch(() => ({}));
       if (data?.success) {
         showToast(data.message || translate('Đã hoàn tất bàn giao / chuyển đi cho cư dân.'));
+        setResidentsList((prev) => prev.filter((r) => r.id !== resId));
         await fetchAllData();
       } else {
         showToast(data?.message || translate('Lỗi khi ghi nhận chuyển đi.'));
@@ -1870,6 +1979,7 @@ function AppContent() {
       const data = await res.json().catch(() => ({}));
       if (data?.success) {
         showToast(data.message || translate('Đã xóa tài khoản cư dân thành công.'));
+        setResidentsList((prev) => prev.filter((r) => r.id !== resId));
         await fetchAllData();
       } else {
         showToast(data?.message || translate('Lỗi khi xóa tài khoản cư dân.'));
@@ -2475,6 +2585,240 @@ function AppContent() {
           </TouchableOpacity>
         </AnimatedModalContent>
       </View></Modal>
+  );
+
+  const renderBmbIncidentPhotoModal = () => (
+    <Modal
+      visible={bmbPhotoViewerVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setBmbPhotoViewerVisible(false)}
+    >
+      <View style={{
+        flex: 1,
+        backgroundColor: 'rgba(15, 23, 42, 0.92)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 16,
+      }}>
+        <View style={{
+          width: '100%',
+          maxWidth: 720,
+          maxHeight: '92%',
+          backgroundColor: '#0F172A',
+          borderRadius: 14,
+          overflow: 'hidden',
+          borderWidth: 1,
+          borderColor: '#334155',
+          flexDirection: 'column',
+        }}>
+          {/* Header thanh điều khiển */}
+          <View style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            paddingHorizontal: 16,
+            paddingVertical: 12,
+            borderBottomWidth: 1,
+            borderBottomColor: '#1E293B',
+            backgroundColor: '#0B1120',
+          }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ color: '#F8FAFC', fontWeight: '700', fontSize: 14 }}>
+                📷 {translate("Hình ảnh cư dân báo cáo")}
+              </Text>
+              {bmbPhotoViewerList.length > 0 && (
+                <View style={{
+                  backgroundColor: '#1E293B',
+                  paddingHorizontal: 8,
+                  paddingVertical: 2,
+                  borderRadius: 6,
+                }}>
+                  <Text style={{ color: '#94A3B8', fontSize: 12, fontWeight: '600' }}>
+                    {bmbPhotoViewerIndex + 1} / {bmbPhotoViewerList.length}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 16,
+                backgroundColor: '#1E293B',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              onPress={() => setBmbPhotoViewerVisible(false)}
+            >
+              <Text style={{ color: '#F8FAFC', fontSize: 16, fontWeight: '700', lineHeight: 18 }}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Vùng hiển thị ảnh chính */}
+          <View style={{
+            minHeight: 320,
+            maxHeight: 520,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: '#020617',
+            position: 'relative',
+            padding: 8,
+          }}>
+            {bmbPhotoModalLoading && (
+              <View style={{
+                position: 'absolute',
+                zIndex: 2,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <ActivityIndicator size="large" color="#38BDF8" />
+                <Text style={{ color: '#94A3B8', fontSize: 12, marginTop: 8 }}>
+                  {translate("Đang tải hình ảnh...")}
+                </Text>
+              </View>
+            )}
+
+            {bmbPhotoModalError ? (
+              <View style={{ alignItems: 'center', padding: 20 }}>
+                <Text style={{ fontSize: 32, marginBottom: 8 }}>⚠️</Text>
+                <Text style={{ color: '#F87171', fontWeight: '700', fontSize: 14, textAlign: 'center' }}>
+                  {translate("Không thể tải hình ảnh từ Cloudinary.")}
+                </Text>
+                <Text style={{ color: '#94A3B8', fontSize: 12, textAlign: 'center', marginTop: 4 }}>
+                  {translate("Vui lòng kiểm tra lại kết nối mạng hoặc thử lại sau.")}
+                </Text>
+              </View>
+            ) : (
+              bmbPhotoViewerList[bmbPhotoViewerIndex]?.url ? (
+                <Image
+                  source={{ uri: bmbPhotoViewerList[bmbPhotoViewerIndex].url }}
+                  style={{
+                    width: '100%',
+                    height: 480,
+                    maxHeight: '100%',
+                  }}
+                  resizeMode="contain"
+                  onLoadStart={() => {
+                    setBmbPhotoModalLoading(true);
+                    setBmbPhotoModalError(false);
+                  }}
+                  onLoadEnd={() => setBmbPhotoModalLoading(false)}
+                  onError={() => {
+                    setBmbPhotoModalLoading(false);
+                    setBmbPhotoModalError(true);
+                  }}
+                />
+              ) : null
+            )}
+
+            {/* Nút lùi ảnh (Previous) */}
+            {bmbPhotoViewerList.length > 1 && (
+              <TouchableOpacity
+                style={{
+                  position: 'absolute',
+                  left: 12,
+                  width: 40,
+                  height: 40,
+                  borderRadius: 20,
+                  backgroundColor: bmbPhotoViewerIndex > 0 ? 'rgba(30, 41, 59, 0.85)' : 'rgba(30, 41, 59, 0.3)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 3,
+                }}
+                disabled={bmbPhotoViewerIndex <= 0}
+                onPress={() => {
+                  if (bmbPhotoViewerIndex > 0) {
+                    setBmbPhotoViewerIndex((i) => i - 1);
+                    setBmbPhotoModalLoading(true);
+                    setBmbPhotoModalError(false);
+                  }
+                }}
+              >
+                <Text style={{
+                  color: bmbPhotoViewerIndex > 0 ? '#FFFFFF' : '#475569',
+                  fontSize: 22,
+                  fontWeight: '700',
+                  lineHeight: 24,
+                }}>‹</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Nút tiến ảnh (Next) */}
+            {bmbPhotoViewerList.length > 1 && (
+              <TouchableOpacity
+                style={{
+                  position: 'absolute',
+                  right: 12,
+                  width: 40,
+                  height: 40,
+                  borderRadius: 20,
+                  backgroundColor: bmbPhotoViewerIndex < bmbPhotoViewerList.length - 1 ? 'rgba(30, 41, 59, 0.85)' : 'rgba(30, 41, 59, 0.3)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 3,
+                }}
+                disabled={bmbPhotoViewerIndex >= bmbPhotoViewerList.length - 1}
+                onPress={() => {
+                  if (bmbPhotoViewerIndex < bmbPhotoViewerList.length - 1) {
+                    setBmbPhotoViewerIndex((i) => i + 1);
+                    setBmbPhotoModalLoading(true);
+                    setBmbPhotoModalError(false);
+                  }
+                }}
+              >
+                <Text style={{
+                  color: bmbPhotoViewerIndex < bmbPhotoViewerList.length - 1 ? '#FFFFFF' : '#475569',
+                  fontSize: 22,
+                  fontWeight: '700',
+                  lineHeight: 24,
+                }}>›</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Footer chú thích & chuyển ảnh */}
+          <View style={{
+            paddingHorizontal: 16,
+            paddingVertical: 12,
+            backgroundColor: '#0B1120',
+            borderTopWidth: 1,
+            borderTopColor: '#1E293B',
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 8,
+          }}>
+            <Text style={{ color: '#CBD5E1', fontSize: 13, flex: 1 }}>
+              {bmbPhotoViewerList[bmbPhotoViewerIndex]?.caption || translate("Ảnh hiện trường do cư dân gửi")}
+            </Text>
+
+            {bmbPhotoViewerList.length > 1 && (
+              <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                {bmbPhotoViewerList.map((_, dotIdx) => (
+                  <TouchableOpacity
+                    key={dotIdx}
+                    style={{
+                      width: dotIdx === bmbPhotoViewerIndex ? 18 : 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: dotIdx === bmbPhotoViewerIndex ? '#38BDF8' : '#334155',
+                    }}
+                    onPress={() => {
+                      setBmbPhotoViewerIndex(dotIdx);
+                      setBmbPhotoModalLoading(true);
+                      setBmbPhotoModalError(false);
+                    }}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 
   const renderTechCheckInModal = () => (
@@ -7371,21 +7715,91 @@ function AppContent() {
                     {bmbSelectedTicket.description}
                   </Text>
 
-                  {Array.isArray(bmbSelectedTicket.photos) && bmbSelectedTicket.photos.length > 0 && (
-                    <View style={[styles.rowCenter, { marginVertical: 10, gap: 8 }]}>
-                      {bmbSelectedTicket.photos.map((photoUrl: string, pIdx: number) => (
-                        <Image
-                          key={pIdx}
-                          source={{ uri: photoUrl }}
-                          style={styles.bmbAttachmentThumb}
-                          resizeMode="cover"
-                        />
-                      ))}
-                      <Text style={{ fontSize: 12, color: '#64748B' }}>
-                        {bmbSelectedTicket.photos.length} {translate('ảnh đính kèm')}
-                      </Text>
-                    </View>
-                  )}
+                  {/* KHU VỰC HÌNH ẢNH CƯ DÂN BÁO CÁO (CHỈ LẤY ẢNH SCENE_BEFORE BAN ĐẦU) */}
+                  {(() => {
+                    const residentMedia = getResidentReportedMedia(bmbSelectedTicket);
+
+                    return (
+                      <View style={{ marginVertical: 12 }}>
+                        <View style={[styles.cardTopRow, { marginBottom: 8 }]}>
+                          <Text style={styles.bmbSmallSectionHead}>
+                            {translate("HÌNH ẢNH CƯ DÂN BÁO CÁO")}
+                          </Text>
+                          {residentMedia.length > 0 && (
+                            <View style={[styles.statusPill, { backgroundColor: '#EFF6FF', paddingHorizontal: 8, paddingVertical: 2 }]}>
+                              <Text style={[styles.statusPillText, { color: '#2563EB', fontWeight: '700', fontSize: 11.5 }]}>
+                                {residentMedia.length} {translate("ảnh")}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+
+                        {residentMedia.length === 0 ? (
+                          <View style={{
+                            backgroundColor: '#F8FAFC',
+                            borderWidth: 1,
+                            borderColor: '#E2E8F0',
+                            borderRadius: 8,
+                            paddingVertical: 12,
+                            paddingHorizontal: 14,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 10,
+                          }}>
+                            <Text style={{ fontSize: 18 }}>📷</Text>
+                            <Text style={{ fontSize: 13, color: '#64748B', fontStyle: 'italic' }}>
+                              {translate("Cư dân chưa cung cấp hình ảnh")}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                            {residentMedia.map((item, idx) => (
+                              <TouchableOpacity
+                                key={item.id || idx}
+                                style={{
+                                  width: 76,
+                                  height: 76,
+                                  borderRadius: 8,
+                                  borderWidth: 1.5,
+                                  borderColor: '#CBD5E1',
+                                  overflow: 'hidden',
+                                  backgroundColor: '#F1F5F9',
+                                  position: 'relative',
+                                }}
+                                activeOpacity={0.8}
+                                onPress={() => {
+                                  setBmbPhotoViewerList(residentMedia);
+                                  setBmbPhotoViewerIndex(idx);
+                                  setBmbPhotoModalLoading(true);
+                                  setBmbPhotoModalError(false);
+                                  setBmbPhotoViewerVisible(true);
+                                }}
+                              >
+                                <Image
+                                  source={{ uri: item.url }}
+                                  style={{ width: '100%', height: '100%' }}
+                                  resizeMode="cover"
+                                />
+                                <View style={{
+                                  position: 'absolute',
+                                  bottom: 3,
+                                  right: 3,
+                                  backgroundColor: 'rgba(15, 23, 42, 0.72)',
+                                  borderRadius: 4,
+                                  paddingHorizontal: 4,
+                                  paddingVertical: 1,
+                                }}>
+                                  <Text style={{ color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' }}>
+                                    🔍 {idx + 1}
+                                  </Text>
+                                </View>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })()}
 
                   {/* HỘP GỢI Ý TỪ GEMINI FLASH AI */}
                   <View style={styles.bmbGeminiPurpleCard}>
@@ -8451,10 +8865,19 @@ function AppContent() {
                             <Text style={[styles.statusPillText, { color: roleColor, fontWeight: '600' }]}>{roleLabel}</Text>
                           </View>
                         </View>
-                        <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
-                          <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
-                            {res.isActive ? 'Hoạt động' : 'Đã khóa'}
-                          </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          {res.isActivated === false && (
+                            <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
+                              <Text style={[styles.statusPillText, { color: '#D97706' }]}>
+                                {translate('Chờ OTP')}
+                              </Text>
+                            </View>
+                          )}
+                          <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
+                            <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
+                              {res.isActive ? translate('Hoạt động') : translate('Đã khóa')}
+                            </Text>
+                          </View>
                         </View>
                       </View>
                       <Text style={styles.cardLocationText}>
@@ -10671,6 +11094,7 @@ function AppContent() {
       </Modal>
       {renderAttendanceReviewModal()}
       {renderPhotoViewerModal()}
+      {renderBmbIncidentPhotoModal()}
       {renderBuildingLocationModal()}
     </SafeAreaView>
   );

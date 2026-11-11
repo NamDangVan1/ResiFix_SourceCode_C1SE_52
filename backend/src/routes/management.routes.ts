@@ -163,10 +163,12 @@ router.get(
           fullName: true,
           phone: true,
           email: true,
+          role: true,
           apartmentCode: true,
           buildingBlock: true,
           floorNumber: true,
           isActive: true,
+          isActivated: true,
           createdAt: true,
         },
         orderBy: [{ apartmentCode: 'asc' }, { fullName: 'asc' }],
@@ -205,6 +207,7 @@ router.get(
 
         return {
           ...r,
+          isActivated: r.isActivated ?? true,
           residencyRole: role,
           isRepresentative: history?.isRepresentative ?? (role === 'OWNER'),
           moveInDate: moveInStr,
@@ -301,17 +304,18 @@ router.post(
           buildingBlock: true,
           floorNumber: true,
           isActive: true,
+          isActivated: true,
           createdAt: true,
         },
       });
 
       // TRƯỜNG HỢP 1: CƯ DÂN ĐÃ CÓ TÀI KHOẢN TRONG HỆ THỐNG
-      // -> Liên kết vào căn hộ mới mà không tạo tài khoản User trùng lặp
+      // -> Liên kết vào căn hộ mới hoặc kích hoạt lại tài khoản mà không tạo tài khoản User trùng lặp
       if (existingUser) {
-        if (existingUser.apartmentCode === cleanApt) {
+        if (existingUser.apartmentCode === cleanApt && existingUser.isActive) {
           res.status(409).json({
             success: false,
-            message: `Người dùng ${existingUser.fullName} (${existingUser.phone}) hiện đã được liên kết với căn hộ ${cleanApt}.`,
+            message: `Người dùng ${existingUser.fullName} (${existingUser.phone}) hiện đã được liên kết với căn hộ ${cleanApt} và đang hoạt động.`,
           });
           return;
         }
@@ -319,19 +323,26 @@ router.post(
         const updatedUser = await prisma.user.update({
           where: { id: existingUser.id },
           data: {
+            fullName: cleanName || existingUser.fullName,
+            ...(cleanEmail && !existingUser.email ? { email: cleanEmail } : {}),
+            role: existingUser.role === Role.BMB ? Role.BMB : Role.RESIDENT,
             apartmentCode: cleanApt,
             buildingBlock: cleanBlock,
             floorNumber: cleanFloor,
+            isActive: true, // Kích hoạt trạng thái hoạt động để hiển thị ngay trong danh sách cư dân & căn hộ
+            ...((!existingUser.isActivated && !(cleanEmail || existingUser.email)) ? { isActivated: true } : {}),
           },
           select: {
             id: true,
             fullName: true,
             phone: true,
             email: true,
+            role: true,
             apartmentCode: true,
             buildingBlock: true,
             floorNumber: true,
             isActive: true,
+            isActivated: true,
             createdAt: true,
           },
         });
@@ -360,10 +371,10 @@ router.post(
         // Ghi nhận lịch sử cư trú vào PostgreSQL qua Prisma
         await prisma.residencyRecord.create({
           data: {
-            id: `res-rec-${Date.now()}`,
-            residentId: existingUser.id,
-            residentName: existingUser.fullName,
-            residentPhone: existingUser.phone,
+            id: `res-rec-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+            residentId: updatedUser.id,
+            residentName: updatedUser.fullName,
+            residentPhone: updatedUser.phone,
             apartmentId: apt.id,
             apartmentCode: cleanApt,
             buildingBlock: cleanBlock,
@@ -423,10 +434,12 @@ router.post(
           fullName: true,
           phone: true,
           email: true,
+          role: true,
           apartmentCode: true,
           buildingBlock: true,
           floorNumber: true,
           isActive: true,
+          isActivated: true,
           createdAt: true,
         },
       });
@@ -473,7 +486,7 @@ router.post(
       // Ghi nhận lịch sử cư trú vào PostgreSQL qua Prisma
       await prisma.residencyRecord.create({
         data: {
-          id: `res-rec-${Date.now()}`,
+          id: `res-rec-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
           residentId: newResident.id,
           residentName: newResident.fullName,
           residentPhone: newResident.phone,
@@ -614,10 +627,12 @@ router.patch(
           fullName: true,
           phone: true,
           email: true,
+          role: true,
           apartmentCode: true,
           buildingBlock: true,
           floorNumber: true,
           isActive: true,
+          isActivated: true,
         },
       });
 

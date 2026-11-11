@@ -3,8 +3,733 @@
     "managerName": "Đặng Thành Quyết",
     "managerPhone": "0913402803"
   },
-  "apartments": [],
-  "residencyHistory": [],
+  "apartments": [
+    {
+      "id": "apt-g101",
+      "apartmentCode": "G101",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:G101",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g102",
+      "apartmentCode": "G102",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:G102",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g103",
+      "apartmentCode": "G103",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:G103",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g104",
+      "apartmentCode": "G104",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:G104",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g105",
+      "apartmentCode": "G105",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:G105",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g201",
+      "apartmentCode": "G201",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:G201",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g202",
+      "apartmentCode": "G202",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:G202",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g203",
+      "apartmentCode": "G203",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:G203",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g204",
+      "apartmentCode": "G204",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:G204",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g205",
+      "apartmentCode": "G205",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:G205",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g301",
+      "apartmentCode": "G301",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:G301",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g302",
+      "apartmentCode": "G302",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:G302",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g303",
+      "apartmentCode": "G303",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:G303",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g304",
+      "apartmentCode": "G304",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:G304",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g305",
+      "apartmentCode": "G305",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:G305",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g401",
+      "apartmentCode": "G401",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:G401",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g402",
+      "apartmentCode": "G402",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:G402",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g403",
+      "apartmentCode": "G403",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:G403",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g404",
+      "apartmentCode": "G404",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:G404",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g405",
+      "apartmentCode": "G405",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:G405",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g501",
+      "apartmentCode": "G501",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:G501",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g502",
+      "apartmentCode": "G502",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:G502",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g503",
+      "apartmentCode": "G503",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:G503",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g504",
+      "apartmentCode": "G504",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:G504",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-g505",
+      "apartmentCode": "G505",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:G505",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f101",
+      "apartmentCode": "F101",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:F101",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f102",
+      "apartmentCode": "F102",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:F102",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f103",
+      "apartmentCode": "F103",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:F103",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f104",
+      "apartmentCode": "F104",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:F104",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f105",
+      "apartmentCode": "F105",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:F105",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f201",
+      "apartmentCode": "F201",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:F201",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f202",
+      "apartmentCode": "F202",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:F202",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f203",
+      "apartmentCode": "F203",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:F203",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f204",
+      "apartmentCode": "F204",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:F204",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f205",
+      "apartmentCode": "F205",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:F205",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f301",
+      "apartmentCode": "F301",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:F301",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f302",
+      "apartmentCode": "F302",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:F302",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f303",
+      "apartmentCode": "F303",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:F303",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f304",
+      "apartmentCode": "F304",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:F304",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f305",
+      "apartmentCode": "F305",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:F305",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f401",
+      "apartmentCode": "F401",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:F401",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f402",
+      "apartmentCode": "F402",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:F402",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f403",
+      "apartmentCode": "F403",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:F403",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f404",
+      "apartmentCode": "F404",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:F404",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f405",
+      "apartmentCode": "F405",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:F405",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f501",
+      "apartmentCode": "F501",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:F501",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f502",
+      "apartmentCode": "F502",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:F502",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f503",
+      "apartmentCode": "F503",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:F503",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f504",
+      "apartmentCode": "F504",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:F504",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-f505",
+      "apartmentCode": "F505",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:F505",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e101",
+      "apartmentCode": "E101",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:E101",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e102",
+      "apartmentCode": "E102",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:E102",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e103",
+      "apartmentCode": "E103",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:E103",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e104",
+      "apartmentCode": "E104",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:E104",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e105",
+      "apartmentCode": "E105",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 1,
+      "roomQrCode": "ROOM:E105",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e201",
+      "apartmentCode": "E201",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:E201",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e202",
+      "apartmentCode": "E202",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:E202",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e203",
+      "apartmentCode": "E203",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:E203",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e204",
+      "apartmentCode": "E204",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:E204",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e205",
+      "apartmentCode": "E205",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 2,
+      "roomQrCode": "ROOM:E205",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e301",
+      "apartmentCode": "E301",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E301",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e302",
+      "apartmentCode": "E302",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E302",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e303",
+      "apartmentCode": "E303",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E303",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e304",
+      "apartmentCode": "E304",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E304",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e305",
+      "apartmentCode": "E305",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E305",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e401",
+      "apartmentCode": "E401",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:E401",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e402",
+      "apartmentCode": "E402",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:E402",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e403",
+      "apartmentCode": "E403",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:E403",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e404",
+      "apartmentCode": "E404",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:E404",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e405",
+      "apartmentCode": "E405",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 4,
+      "roomQrCode": "ROOM:E405",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e501",
+      "apartmentCode": "E501",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:E501",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e502",
+      "apartmentCode": "E502",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:E502",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e503",
+      "apartmentCode": "E503",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:E503",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e504",
+      "apartmentCode": "E504",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:E504",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e505",
+      "apartmentCode": "E505",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 5,
+      "roomQrCode": "ROOM:E505",
+      "status": "VACANT",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "apt-e3204",
+      "apartmentCode": "E3204",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "roomQrCode": "ROOM:E3204",
+      "status": "OCCUPIED",
+      "createdAt": "2026-11-10T10:30:06.789Z"
+    }
+  ],
+  "residencyHistory": [
+    {
+      "id": "res-rec-1794305152133",
+      "residentId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "residentName": "Đặng Thành Quyết",
+      "phone": "0913402803",
+      "apartmentCode": "F303",
+      "buildingBlock": "Tòa F",
+      "floorNumber": 3,
+      "residencyRole": "TENANT",
+      "moveInDate": "2026-11-10",
+      "moveOutDate": null,
+      "isRepresentative": false
+    },
+    {
+      "id": "res-rec-1794306606789",
+      "residentId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "residentName": "Đặng Thành Quyết",
+      "phone": "0913402803",
+      "apartmentCode": "E3204",
+      "buildingBlock": "Tòa E",
+      "floorNumber": 3,
+      "residencyRole": "TENANT",
+      "moveInDate": "2026-11-10",
+      "moveOutDate": null,
+      "isRepresentative": false
+    },
+    {
+      "id": "res-rec-1794308599822",
+      "residentId": "871d28a3-57a2-45ea-a7b1-6b3e92b819c0",
+      "residentName": "Cristiano Ronaldo",
+      "phone": "0913400800",
+      "apartmentCode": "G103",
+      "buildingBlock": "Tòa G",
+      "floorNumber": 1,
+      "residencyRole": "TENANT",
+      "moveInDate": "2026-11-10",
+      "moveOutDate": null,
+      "isRepresentative": false
+    }
+  ],
   "payrollConfig": {
     "hourlyRateDefault": 50000,
     "baseSalaryDefault": 10000000,
@@ -21,12 +746,12 @@
       "2026-09-03"
     ],
     "buildingLocation": {
-      "buildingName": "Tòa nhà ResiFix SkyView",
-      "buildingAddress": "123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM",
-      "latitude": 10.7324,
-      "longitude": 106.6992,
+      "buildingName": "Khu Tòa Nhà ResiFix - Đại học Duy Tân",
+      "buildingAddress": "Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng",
+      "latitude": 16.0592,
+      "longitude": 108.1472,
       "allowedRadiusMeters": 300,
-      "isConfirmed": false,
+      "isConfirmed": true,
       "configAuditLogs": []
     }
   },
@@ -55,8 +780,8 @@
       "checkOutNotes": null,
       "regularHours": 13.78,
       "nightHours": 3.92,
-      "verificationStatus": "PENDING_REVIEW",
-      "billableHours": 17.7,
+      "verificationStatus": "REJECTED",
+      "billableHours": 0,
       "disputedHours": 17.7,
       "auditLogs": [
         {
@@ -65,8 +790,113 @@
           "performedByName": "Đặng Văn Nam",
           "performedAt": "2026-11-09T12:47:53.615Z",
           "note": "Check-out thành công. Tổng giờ: 17.7h (13.78h thường, 3.92h đêm). Ngoại lệ: GPS check-out ngoài phạm vi (613668m); Thiếu ảnh chụp hiện trường check-out"
+        },
+        {
+          "action": "BMB_REJECT",
+          "performedById": "49db8e32-1aef-4ac8-84e3-9a7115e527f4",
+          "performedByName": "Cầm Dương Mỹ Hạnh",
+          "performedAt": "2026-11-10T14:34:42.692Z",
+          "note": "Không công nhận ca trực do vi phạm quy chế chấm công.",
+          "adjustedHours": 0
         }
-      ]
+      ],
+      "reviewNote": "Không công nhận ca trực do vi phạm quy chế chấm công.",
+      "reviewedBy": "Cầm Dương Mỹ Hạnh",
+      "reviewedAt": "2026-11-10T14:34:42.692Z"
+    },
+    {
+      "id": "att-1794313322376-1",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "techName": "Đặng Thành Quyết",
+      "techPhone": "0913402803",
+      "buildingBlock": "Tòa F",
+      "date": "2026-11-10",
+      "sessionIndex": 1,
+      "shiftScheduled": "15:00 - 23:00",
+      "checkIn": "2026-11-10T12:22:02.372Z",
+      "checkInPhotoUrl": null,
+      "checkInGps": {
+        "latitude": 16.07877597334268,
+        "longitude": 108.1518638780967,
+        "accuracyMeters": 108,
+        "distanceToBuildingMeters": 2233,
+        "isWithinRadius": false,
+        "addressEstimate": "Tọa độ ngoài phạm vi (Cách Khu Tòa Nhà ResiFix - Đại học Duy Tân ~2233m)"
+      },
+      "checkInNotes": null,
+      "photoMetadata": null,
+      "checkOut": "2026-11-10T13:46:55.467Z",
+      "workMinutes": 85,
+      "workHours": 1.42,
+      "billableHours": 1.42,
+      "regularHours": 1.42,
+      "nightHours": 0,
+      "disputedHours": 0,
+      "punctualityStatus": "LATE_AND_EARLY",
+      "lateMinutes": 262,
+      "verificationStatus": "APPROVED",
+      "anomalyNotes": "Vị trí GPS ngoài phạm vi tòa nhà (2233m > 300m); Thiếu dữ liệu ảnh chụp hiện trường.; Vào ca muộn 262 phút so với ca 15:00 - 23:00; GPS check-out ngoài phạm vi (2234m); Thiếu ảnh chụp hiện trường check-out",
+      "auditLogs": [
+        {
+          "action": "SYSTEM_FLAG",
+          "performedById": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+          "performedByName": "Đặng Thành Quyết",
+          "performedAt": "2026-11-10T12:22:02.372Z",
+          "note": "Gắn cờ ngoại lệ: Vị trí GPS ngoài phạm vi tòa nhà (2233m > 300m); Thiếu dữ liệu ảnh chụp hiện trường.; Vào ca muộn 262 phút so với ca 15:00 - 23:00"
+        },
+        {
+          "action": "SYSTEM_FLAG",
+          "performedById": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+          "performedByName": "Đặng Thành Quyết",
+          "performedAt": "2026-11-10T13:46:55.467Z",
+          "note": "Check-out thành công. Tổng giờ: 1.42h (1.42h thường, 0h đêm). Ngoại lệ: GPS check-out ngoài phạm vi (2234m); Thiếu ảnh chụp hiện trường check-out"
+        },
+        {
+          "action": "REQUEST_EXPLANATION",
+          "performedById": "49db8e32-1aef-4ac8-84e3-9a7115e527f4",
+          "performedByName": "Cầm Dương Mỹ Hạnh",
+          "performedAt": "2026-11-10T13:59:42.296Z",
+          "note": "Yêu cầu giải trình rõ lý do chênh lệch vị trí GPS / đi muộn."
+        },
+        {
+          "action": "TECH_EXPLAIN",
+          "performedById": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+          "performedByName": "Đặng Thành Quyết",
+          "performedAt": "2026-11-10T14:00:54.431Z",
+          "note": "KTV giải trình: máy lỗi gps"
+        },
+        {
+          "action": "BMB_APPROVE",
+          "performedById": "49db8e32-1aef-4ac8-84e3-9a7115e527f4",
+          "performedByName": "Cầm Dương Mỹ Hạnh",
+          "performedAt": "2026-11-10T14:01:44.468Z",
+          "note": "Đã kiểm tra minh chứng, hợp lệ tính công.",
+          "adjustedHours": 1.42
+        },
+        {
+          "action": "BMB_APPROVE",
+          "performedById": "49db8e32-1aef-4ac8-84e3-9a7115e527f4",
+          "performedByName": "Cầm Dương Mỹ Hạnh",
+          "performedAt": "2026-11-10T14:01:50.740Z",
+          "note": "Đã kiểm tra minh chứng, hợp lệ tính công.",
+          "adjustedHours": 1.42
+        }
+      ],
+      "checkOutPhotoUrl": null,
+      "checkOutGps": {
+        "latitude": 16.078779817293743,
+        "longitude": 108.15190509954842,
+        "accuracyMeters": 102,
+        "distanceToBuildingMeters": 2234,
+        "isWithinRadius": false,
+        "addressEstimate": "Tọa độ ngoài phạm vi (Cách Khu Tòa Nhà ResiFix - Đại học Duy Tân ~2234m)"
+      },
+      "checkOutNotes": null,
+      "earlyMinutes": 134,
+      "reviewNote": "Đã kiểm tra minh chứng, hợp lệ tính công.",
+      "reviewedBy": "Cầm Dương Mỹ Hạnh",
+      "reviewedAt": "2026-11-10T14:01:50.740Z",
+      "explanationText": "máy lỗi gps"
     }
   ],
   "overtimeRequests": [],
@@ -114,7 +944,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.061Z"
+      "lastAlertSentAt": "2026-11-10T14:24:08.598Z"
     },
     {
       "ticketId": "005cfbed-1610-44cc-9a48-3765414779cb",
@@ -130,7 +960,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.263Z"
+      "lastAlertSentAt": "2026-11-10T14:24:08.691Z"
     },
     {
       "ticketId": "bd2be063-f1f8-46cb-99b5-3cd1276be1be",
@@ -146,7 +976,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.379Z"
+      "lastAlertSentAt": "2026-11-10T14:24:08.787Z"
     },
     {
       "ticketId": "a62a831b-8dfa-4fe3-b9f7-9c72a47f93ce",
@@ -162,7 +992,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.739Z"
+      "lastAlertSentAt": "2026-11-10T14:24:08.300Z"
     },
     {
       "ticketId": "bae4aee9-87f7-4e8d-b6b4-f8ac7890a37e",
@@ -178,7 +1008,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.950Z"
+      "lastAlertSentAt": "2026-11-10T14:24:08.503Z"
     },
     {
       "ticketId": "48296172-d555-426e-8202-655a255358f6",
@@ -194,7 +1024,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.495Z"
+      "lastAlertSentAt": "2026-11-10T10:59:31.224Z"
     },
     {
       "ticketId": "f1e27be7-9055-42ed-8898-b4db466820d9",
@@ -210,7 +1040,7 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.614Z"
+      "lastAlertSentAt": "2026-11-10T10:59:30.566Z"
     },
     {
       "ticketId": "99e0915c-f293-4a00-80c1-2948e11e183c",
@@ -226,8 +1056,9 @@
       "isResolutionBreached": true,
       "isPaused": false,
       "escalationTier": 3,
-      "lastAlertSentAt": "2026-11-09T18:31:43.869Z"
+      "lastAlertSentAt": "2026-11-10T10:59:31.556Z"
     }
   ],
-  "emergencyAlerts": []
+  "emergencyAlerts": [],
+  "temporaryPasswordUserIds": []
 }

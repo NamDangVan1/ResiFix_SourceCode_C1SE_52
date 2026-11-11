@@ -756,6 +756,11 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
 
     const tickets = rawTickets.map((t: any) => ({
       ...t,
+      photos: Array.isArray(t.media)
+        ? t.media
+            .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+            .map((m: any) => m.imageUrl)
+        : [],
       asset: t.area ? {
         id: t.area.id,
         qrCode: t.area.qrCode,
@@ -981,6 +986,11 @@ router.post(
 
       const safeTicketResponse = {
         ...newTicket,
+        photos: Array.isArray((newTicket as any).media)
+          ? (newTicket as any).media
+              .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+              .map((m: any) => m.imageUrl)
+          : [],
         asset: (newTicket as any).area ? {
           id: (newTicket as any).area.id,
           qrCode: (newTicket as any).area.qrCode,
@@ -1162,6 +1172,7 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
           select: {
             ...INCIDENT_TICKET_BASE_SELECT,
             assignedTech: { select: { fullName: true, specialtyLabel: true } },
+            media: true,
             statusLogs: {
               include: { changedBy: { select: { fullName: true } } },
               orderBy: { createdAt: 'asc' },
@@ -1173,7 +1184,14 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
       res.status(200).json({
         success: true,
         message: `Đã duyệt phân loại và giao việc cho KTV ${tech.fullName}.`,
-        ticket: updatedTicket,
+        ticket: {
+          ...updatedTicket,
+          photos: Array.isArray((updatedTicket as any).media)
+            ? (updatedTicket as any).media
+                .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+                .map((m: any) => m.imageUrl)
+            : [],
+        },
       });
     } catch (error) {
       if (error instanceof RouteError) {
