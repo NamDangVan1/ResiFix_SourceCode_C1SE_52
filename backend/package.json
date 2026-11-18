@@ -5,9 +5,15 @@
   "main": "index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
+    "dev:test": "ts-node src/index.ts --test-env",
     "build": "npx prisma generate && tsc",
     "start": "node dist/index.js",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "test:verify-db": "ts-node src/scripts/verify_test_db_connection.ts",
+    "test:reconcile-schema": "ts-node src/scripts/reconcile_test_schema.ts",
+    "test:migrate-dryrun": "ts-node src/scripts/migrate_store_to_neon.ts",
+    "test:migrate-execute": "ts-node src/scripts/migrate_store_to_neon.ts --execute",
+    "test:regression": "ts-node src/scripts/test_complete_neon_migration.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -25,7 +31,8 @@
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "firebase-admin": "^14.5.0",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^10.3.1"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
@@ -33,6 +40,7 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.6.5",
+    "@types/nodemailer": "^8.0.2",
     "prisma": "5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
