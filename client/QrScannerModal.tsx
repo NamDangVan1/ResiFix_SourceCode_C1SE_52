@@ -21,18 +21,18 @@ interface QrScannerModalProps {
 }
 
 const SAMPLE_QR_CODES = [
-  { code: 'AC-B02', name: 'Máy lạnh sảnh B (Tầng 1)' },
-  { code: 'WP-1204', name: 'Ống nước bồn rửa (Căn A-1204)' },
-  { code: 'HL-B12', name: 'Đèn hành lang khu B (Tầng 12)' },
-  { code: 'ELV-02', name: 'Thang máy khách số 02 (Sảnh B)' },
-  { code: 'PK-B1-02', name: 'Đầu đọc thẻ từ (Hầm B1)' },
+  { code: 'HL-B12', name: 'Hành lang khu B (Tầng 12)' },
+  { code: 'AC-B02', name: 'Sảnh tầng 1 (Tòa S1)' },
+  { code: 'PK-B1-02', name: 'Hầm gửi xe B1' },
+  { code: 'ELV-02', name: 'Khu vực Thang máy Tầng 1' },
+  { code: 'WP-1204', name: 'Căn hộ A-1204 (Tầng 12)' },
 ];
 
 export default function QrScannerModal({
   visible,
   onClose,
   onScannedCode,
-  roleTitle = 'Quét mã QR Thiết bị Tòa nhà (FR05)',
+  roleTitle = 'Quét mã QR Khu vực / Vị trí (FR05)',
 }: QrScannerModalProps) {
   const { t } = useUiPreferences();
   const [permission, requestPermission] = useCameraPermissions();
@@ -105,7 +105,7 @@ export default function QrScannerModal({
             <View style={{ flex: 1, paddingRight: 8 }}>
               <Text style={styles.headerTitle}>📷 {t(roleTitle)}</Text>
               <Text style={styles.headerSub}>
-                {t("Hướng camera vào tem QR dán trên thiết bị để tự động điền thông tin")}</Text>
+                {t("Hướng camera vào tem QR dán tại khu vực để tự động điền vị trí")}</Text>
             </View>
             <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
               <Text style={styles.closeBtnText}>✕</Text>
@@ -123,7 +123,7 @@ export default function QrScannerModal({
               <View style={styles.centerBox}>
                 <Text style={{ fontSize: 34, marginBottom: 8 }}>🔒</Text>
                 <Text style={styles.permissionText}>
-                  {t("Ứng dụng cần quyền truy cập Camera để quét mã QR thiết bị (FR05).")}</Text>
+                  {t("Ứng dụng cần quyền truy cập Camera để quét mã QR khu vực (FR05).")}</Text>
                 <TouchableOpacity
                   style={styles.grantBtn}
                   onPress={handleRequestPermission}
@@ -157,7 +157,7 @@ export default function QrScannerModal({
                     <View style={[styles.corner, styles.bottomRight]} />
                   </View>
                   <Text style={styles.scanHintText}>
-                    {t("Đặt mã QR thiết bị vào giữa khung ngắm")}</Text>
+                    {t("Đặt mã QR khu vực vào giữa khung ngắm")}</Text>
                 </View>
 
                 {/* Nút làm mới ống kính hoặc đổi Camera Trước/Sau nếu máy Android bị kẹt phần cứng */}
@@ -182,11 +182,11 @@ export default function QrScannerModal({
           </View>
 
           {/* Ô nhập mã thủ công nếu tem QR bị mờ rách */}
-          <Text style={styles.sectionLabel}>{t("Hoặc nhập mã thiết bị nếu tem QR bị mờ:")}</Text>
+          <Text style={styles.sectionLabel}>{t("Hoặc nhập mã khu vực nếu tem QR bị mờ:")}</Text>
           <View style={styles.manualRow}>
             <TextInput
               style={styles.manualInput}
-              placeholder={t("VD: WP-1204, AC-B02...")}
+              placeholder={t("VD: HL-B12, AC-B02, AREA-SANH-T1...")}
               placeholderTextColor="#94A3B8"
               value={manualCode}
               onChangeText={setManualCode}
@@ -207,7 +207,7 @@ export default function QrScannerModal({
 
           {/* Danh sách mã QR mẫu trong Database để bấm test nhanh khi thuyết trình */}
           <Text style={styles.sectionLabel}>
-            {t("⚡ Chọn nhanh tem QR thiết bị mẫu (Dùng khi Demo):")}</Text>
+            {t("⚡ Chọn nhanh mã QR khu vực mẫu (Dùng khi Demo):")}</Text>
           <View style={styles.quickChipsWrap}>
             {SAMPLE_QR_CODES.map((item) => (
               <TouchableOpacity

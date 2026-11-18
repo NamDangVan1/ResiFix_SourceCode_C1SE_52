@@ -94,13 +94,14 @@ model User {
   @@index([apartmentCode])
 }
 
-// BẢNG 2: THIẾT BỊ & VỊ TRÍ GẮN MÃ QR 
+// BẢNG 2: KHU VỰC & VỊ TRÍ GẮN MÃ QR (Hành lang khu B, Sảnh tầng 1, Hầm xe,...)
 model EquipmentAsset {
   id            String           @id @default(uuid())
-  qrCode        String           @unique // Mã QR dán trên thiết bị 
-  assetName     String           // Tên thiết bị tự điền khi quét 
-  category      IncidentCategory // Loại thiết bị
-  locationLabel String           // Vị trí hiển thị
+  qrCode        String           @unique // Mã QR dán tại khu vực (VD: HL-B12, SANH-T1,...)
+  areaName      String?          // Tên khu vực chuẩn: "Hành lang khu B", "Sảnh tầng 1",...
+  assetName     String           // Tên vị trí/khu vực hiển thị (đồng bộ với areaName để tương thích ngược)
+  category      IncidentCategory @default(OTHER) // Phân loại tiện ích mặc định
+  locationLabel String           // Vị trí hiển thị đầy đủ (VD: "Hành lang khu B - Tầng 12 - Tòa S1")
   buildingBlock String           // Tòa nhà 
   floor         String           // Tầng 
   isActive      Boolean          @default(true)

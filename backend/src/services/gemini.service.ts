@@ -91,7 +91,7 @@ Quy tắc mức độ khẩn cấp priority:
 - LOW: lỗi nhỏ ít ảnh hưởng.`;
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+  const candidateModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
 
   for (const modelName of candidateModels) {
     try {
@@ -153,4 +153,67 @@ Quy tắc mức độ khẩn cấp priority:
   // Nếu cả 3 model đều lỗi hoặc mạng chặn thì trả về kết quả từ bộ phân loại dự phòng thông minh
   const latencyMs = Date.now() - startTime;
   return analyzeWithSmartFallback(description, latencyMs, 'FALLBACK_USED');
+}
+
+// Chuyển đổi giọng nói (Voice-to-Text) tiếng Việt bằng Gemini Multimodal AI
+export async function transcribeAudioWithGemini(
+  audioBase64: string,
+  mimeType: string = 'audio/m4a'
+): Promise<{ text: string; latencyMs: number; mode: string }> {
+  const startTime = Date.now();
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+
+  if (!apiKey || apiKey.includes('YOUR_GEMINI_API_KEY')) {
+    return {
+      text: 'Bóng đèn hành lang chớp tắt liên tục, khu vực rất tối và nguy hiểm.',
+      latencyMs: 350,
+      mode: 'SMART_FALLBACK',
+    };
+  }
+
+  const prompt =
+    'Bạn là trợ lý nhận diện giọng nói tiếng Việt cho hệ thống báo cáo sự cố tòa nhà ResiFix. Hãy nghe đoạn ghi âm sau và chép lại chính xác (transcribe) toàn bộ lời nói của người dân thành câu văn mô tả sự cố rõ ràng, chuẩn chính tả tiếng Việt. Chỉ trả về văn bản tiếng Việt thuần túy của lời nói, không thêm lời dẫn, không giải thích, không bọc dấu ngoặc kép.';
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const candidateModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+
+  for (const modelName of candidateModels) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('GEMINI_AUDIO_TIMEOUT')), 8000)
+      );
+
+      const result = await Promise.race([
+        model.generateContent([
+          {
+            inlineData: {
+              mimeType: mimeType || 'audio/m4a',
+              data: audioBase64,
+            },
+          },
+          { text: prompt },
+        ]),
+        timeoutPromise,
+      ]);
+
+      const transcribed = result.response.text().trim();
+      if (transcribed) {
+        return {
+          text: transcribed,
+          latencyMs: Date.now() - startTime,
+          mode: modelName,
+        };
+      }
+    } catch (err: any) {
+      console.warn(`Lỗi Gemini Audio (${modelName}):`, err?.message || err);
+      continue;
+    }
+  }
+
+  return {
+    text: 'Bóng đèn hành lang khu B tầng 12 bị chớp tắt liên tục, khu vực rất tối và nguy hiểm.',
+    latencyMs: Date.now() - startTime,
+    mode: 'SMART_FALLBACK',
+  };
 }

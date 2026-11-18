@@ -53,31 +53,114 @@ async function main() {
     },
   });
 
-  // 4. Tạo Thiết bị gắn mã QR (WP-1204 & AC-B02)
-  const pipeAsset = await prisma.equipmentAsset.upsert({
-    where: { qrCode: 'WP-1204' },
-    update: {},
-    create: {
-      qrCode: 'WP-1204',
-      assetName: 'Đường ống nước bồn rửa',
-      category: IncidentCategory.PLUMBING,
-      locationLabel: 'Căn hộ A-1204 • Tòa S1',
+  // 4. Tạo Danh mục Khu vực / Vị trí gắn mã QR (Hành lang khu B, Sảnh tầng 1,...)
+  const areasData = [
+    {
+      qrCode: 'HL-B12',
+      areaName: 'Hành lang khu B',
+      assetName: 'Hành lang khu B',
+      category: IncidentCategory.ELECTRICAL,
+      locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
       buildingBlock: 'Tòa S1',
       floor: 'Tầng 12',
     },
-  });
+    {
+      qrCode: 'AC-B02',
+      areaName: 'Sảnh tầng 1',
+      assetName: 'Sảnh tầng 1',
+      category: IncidentCategory.HVAC,
+      locationLabel: 'Sảnh tầng 1 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Tầng 1',
+    },
+    {
+      qrCode: 'PK-B1-02',
+      areaName: 'Hầm gửi xe B1',
+      assetName: 'Hầm gửi xe B1',
+      category: IncidentCategory.ACCESS_SECURITY,
+      locationLabel: 'Hầm gửi xe B1 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Hầm B1',
+    },
+    {
+      qrCode: 'ELV-02',
+      areaName: 'Khu vực Thang máy Tầng 1',
+      assetName: 'Khu vực Thang máy Tầng 1',
+      category: IncidentCategory.ELEVATOR,
+      locationLabel: 'Sảnh thang máy Tầng 1 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Tầng 1',
+    },
+    {
+      qrCode: 'WP-1204',
+      areaName: 'Căn hộ A-1204',
+      assetName: 'Căn hộ A-1204',
+      category: IncidentCategory.PLUMBING,
+      locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Tầng 12',
+    },
+    {
+      qrCode: 'AREA-HL-B',
+      areaName: 'Hành lang khu B',
+      assetName: 'Hành lang khu B',
+      category: IncidentCategory.OTHER,
+      locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Tầng 12',
+    },
+    {
+      qrCode: 'AREA-SANH-T1',
+      areaName: 'Sảnh tầng 1',
+      assetName: 'Sảnh tầng 1',
+      category: IncidentCategory.OTHER,
+      locationLabel: 'Sảnh tầng 1 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Tầng 1',
+    },
+    {
+      qrCode: 'AREA-HAM-B1',
+      areaName: 'Hầm gửi xe B1',
+      assetName: 'Hầm gửi xe B1',
+      category: IncidentCategory.OTHER,
+      locationLabel: 'Hầm gửi xe B1 - Tòa S1',
+      buildingBlock: 'Tòa S1',
+      floor: 'Hầm B1',
+    },
+  ];
 
-  // 5. Tạo Sự cố #RF-2026-014 giống hệt trên Figma
+  let aptAsset: any = null;
+  for (const item of areasData) {
+    const saved = await prisma.equipmentAsset.upsert({
+      where: { qrCode: item.qrCode },
+      update: {
+        areaName: item.areaName,
+        assetName: item.assetName,
+        locationLabel: item.locationLabel,
+        buildingBlock: item.buildingBlock,
+        floor: item.floor,
+        category: item.category,
+      },
+      create: item,
+    });
+    if (item.qrCode === 'WP-1204') {
+      aptAsset = saved;
+    }
+  }
+
+  // 5. Tạo Sự cố mẫu
   await prisma.incidentTicket.upsert({
     where: { ticketCode: '#RF-2026-014' },
-    update: {},
+    update: {
+      locationNote: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+    },
     create: {
       ticketCode: '#RF-2026-014',
-      title: 'Rò rỉ đường ống nước bồn rửa',
+      title: 'Rò rỉ nước tại Căn hộ A-1204',
       description: 'Ống nước dưới bồn rửa bị nứt, nước chảy tràn ra sàn nhiều.',
       isVoiceInput: true,
-      locationNote: 'Căn hộ A-1204 • Thiết bị: WP-1204',
-      assetId: pipeAsset.id,
+      locationNote: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+      assetId: aptAsset?.id || null,
       isQrScannedByRes: true,
       aiSummary: 'Vỡ đường ống cấp nước bồn rửa tại căn hộ A-1204, nguy cơ ngập sàn.',
       aiSuggestedCategory: IncidentCategory.PLUMBING,

@@ -21,24 +21,22 @@ import {
   useUiPreferences,
 } from './UiPreferences';
 import QrScannerModal from './QrScannerModal';
+import VoiceRecorderModal from './VoiceRecorderModal';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ============================================================================
 // CẤU HÌNH ĐỊA CHỈ BACKEND CHUẨN CHO CẢ WEB & ĐIỆN THOẠI
 // ============================================================================
-const COMPUTER_LAN_IP = '192.168.1.50'; // IP Wi-Fi hiện tại của máy tính
+
+const COMPUTER_LAN_IP = '172.16.2.211'; // IP Wi-Fi hiện tại của máy tính
 
 const getApiBaseUrl = () => {
   if (Platform.OS === 'web') {
     // Trên trình duyệt máy tính: Luôn gọi thẳng vào cổng 5000 nội bộ của máy tính
     return 'http://localhost:5000/api';
   }
-<<<<<<< HEAD
   return `http://${COMPUTER_LAN_IP}:5000/api`;
-=======
-  return 'https://fast-games-eat.loca.lt/api';
->>>>>>> main
 };
 
 const API_BASE_URL = getApiBaseUrl();
@@ -79,7 +77,6 @@ const PRIORITY_VN: Record<string, string> = {
 const CATEGORIES_LIST = ['PLUMBING', 'ELECTRICAL', 'ELEVATOR', 'HVAC', 'ACCESS_SECURITY', 'OTHER'];
 const PRIORITIES_LIST = ['HIGH', 'MEDIUM', 'LOW'];
 
-<<<<<<< HEAD
 type TechnicianForm = {
   fullName: string;
   phone: string;
@@ -99,10 +96,6 @@ const EMPTY_TECHNICIAN_FORM: TechnicianForm = {
   shiftName: '',
   isOnDuty: false,
 };
-
-function AppContent() {
-  const { t: translate } = useUiPreferences();
-=======
 
 // ============================================================================
 // RESIFIX FIGMA DESIGN SYSTEM -- Android + React Native Web, không thêm thư viện
@@ -230,8 +223,8 @@ function OutlineIcon({
   );
 }
 
-export default function App() {
->>>>>>> main
+function AppContent() {
+  const { t: translate } = useUiPreferences();
   // 1. State Xác thực & Chuyển đổi giao diện Login Web / Mobile (FR01)
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<any | null>(null);
@@ -279,30 +272,33 @@ export default function App() {
   const [bmbNotiFilter, setBmbNotiFilter] = useState<'ALL' | 'UNREAD' | 'URGENT' | 'TECH'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // 5. State Màn hình 02 Cư dân: Tạo báo cáo sự cố 3 bước
+  // 5. State Màn hình 02 Cư dân: Tạo báo cáo sự cố 3 bước (Quét mã QR Khu vực)
   const [scannedAsset, setScannedAsset] = useState<{
     qrCode: string;
     assetName: string;
     locationLabel: string;
+    areaName?: string;
   } | null>({
-    qrCode: 'AC-B02',
-    assetName: 'Máy lạnh sảnh B',
-    locationLabel: 'Tầng 1 - Tòa S1',
+    qrCode: 'HL-B12',
+    assetName: 'Hành lang khu B',
+    areaName: 'Hành lang khu B',
+    locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
   });
   const [reportPhotos, setReportPhotos] = useState<{ label: string; url: string }[]>([
     {
-      label: 'Máy lạnh sảnh B',
+      label: 'Hành lang khu B',
       url: 'https://images.unsplash.com/photo-1585704032915-c3400ca199e7?auto=format&fit=crop&w=600&q=80',
     },
     {
-      label: 'Nước chảy xuống sàn',
+      label: 'Sàn hành lang khu B',
       url: 'https://images.unsplash.com/photo-1504328345606-18bbc8c9d7d1?auto=format&fit=crop&w=600&q=80',
     },
   ]);
   const [reportDesc, setReportDesc] = useState(
-    'Máy lạnh ở sảnh B tầng 1 bị chảy nước nhiều xuống sàn gây trơn trượt, có tiếng kêu to.'
+    'Bóng đèn hành lang khu B bị chập chờn nhấp nháy liên tục, sàn gạch có nước đọng trơn trượt.'
   );
   const [isVoiceUsed, setIsVoiceUsed] = useState(false);
+  const [voiceModalVisible, setVoiceModalVisible] = useState(false);
 
   // 6. State Chi tiết Sự cố (Cư dân & Kỹ thuật viên)
   const [activeTicket, setActiveTicket] = useState<any | null>(null);
@@ -582,42 +578,71 @@ export default function App() {
     setTechScreen('TASK_DETAIL');
   };
 
-  // Quét QR tự động điền thiết bị (Màn hình 02 Cư dân)
+  // Quét QR tự động điền thông tin khu vực (Màn hình 02 Cư dân)
   const [qrModalVisible, setQrModalVisible] = useState(false);
 
-  // Bộ dữ liệu thiết bị QR chuẩn của tòa nhà ResiFix (FR05, US-09)
+  // Bộ dữ liệu khu vực QR chuẩn của tòa nhà ResiFix (FR05, US-09)
   const RESIFIX_ASSET_CATALOG: Record<
     string,
-    { qrCode: string; assetName: string; locationLabel: string }
+    { qrCode: string; assetName: string; locationLabel: string; areaName?: string }
   > = {
-    'AC-B02': {
-      qrCode: 'AC-B02',
-      assetName: 'Máy lạnh sảnh B',
-      locationLabel: 'Tầng 1 - Tòa S1',
-    },
-    'WP-1204': {
-      qrCode: 'WP-1204',
-      assetName: 'Đường ống nước bồn rửa',
-      locationLabel: 'Căn hộ A-1204 - Tòa S1',
-    },
     'HL-B12': {
       qrCode: 'HL-B12',
-      assetName: 'Đèn hành lang khu B',
-      locationLabel: 'Hành lang Tầng 12 - Tòa S1',
+      assetName: 'Hành lang khu B',
+      areaName: 'Hành lang khu B',
+      locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
     },
-    'ELV-02': {
-      qrCode: 'ELV-02',
-      assetName: 'Thang máy khách số 02',
-      locationLabel: 'Sảnh Tầng 1 - Tòa S1',
+    'AREA-HL-B': {
+      qrCode: 'AREA-HL-B',
+      assetName: 'Hành lang khu B',
+      areaName: 'Hành lang khu B',
+      locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
+    },
+    'AC-B02': {
+      qrCode: 'AC-B02',
+      assetName: 'Sảnh tầng 1',
+      areaName: 'Sảnh tầng 1',
+      locationLabel: 'Sảnh tầng 1 - Tòa S1',
+    },
+    'AREA-SANH-T1': {
+      qrCode: 'AREA-SANH-T1',
+      assetName: 'Sảnh tầng 1',
+      areaName: 'Sảnh tầng 1',
+      locationLabel: 'Sảnh tầng 1 - Tòa S1',
     },
     'PK-B1-02': {
       qrCode: 'PK-B1-02',
-      assetName: 'Đầu đọc thẻ từ hầm xe B1',
+      assetName: 'Hầm gửi xe B1',
+      areaName: 'Hầm gửi xe B1',
       locationLabel: 'Hầm gửi xe B1 - Tòa S1',
+    },
+    'AREA-HAM-B1': {
+      qrCode: 'AREA-HAM-B1',
+      assetName: 'Hầm gửi xe B1',
+      areaName: 'Hầm gửi xe B1',
+      locationLabel: 'Hầm gửi xe B1 - Tòa S1',
+    },
+    'ELV-02': {
+      qrCode: 'ELV-02',
+      assetName: 'Khu vực Thang máy Tầng 1',
+      areaName: 'Khu vực Thang máy Tầng 1',
+      locationLabel: 'Sảnh thang máy Tầng 1 - Tòa S1',
+    },
+    'WP-1204': {
+      qrCode: 'WP-1204',
+      assetName: 'Căn hộ A-1204',
+      areaName: 'Căn hộ A-1204',
+      locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+    },
+    'AREA-CH-A1204': {
+      qrCode: 'AREA-CH-A1204',
+      assetName: 'Căn hộ A-1204',
+      areaName: 'Căn hộ A-1204',
+      locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
     },
   };
 
-  // Hàm xử lý khi Camera quét được mã QR thiết bị (FR05, US-09)
+  // Hàm xử lý khi Camera quét được mã QR khu vực (FR05, US-09)
   const handleQrCodeDetected = async (rawCode: string) => {
     const cleanCode = rawCode.trim().toUpperCase();
     try {
@@ -634,13 +659,16 @@ export default function App() {
 
       if (res.ok) {
         const data = await res.json();
-        if (data.success && data.asset) {
+        if (data.success && (data.area || data.asset)) {
+          const item = data.area || data.asset;
+          const areaTitle = item.areaName || item.assetName;
           setScannedAsset({
-            qrCode: data.asset.qrCode,
-            assetName: data.asset.assetName,
-            locationLabel: data.asset.locationLabel,
+            qrCode: item.qrCode,
+            assetName: areaTitle,
+            locationLabel: item.locationLabel,
+            areaName: areaTitle,
           });
-          showToast(translate(`✅ Đã nhận diện từ mã QR: ${data.asset.assetName}`));
+          showToast(translate(`✅ Đã xác định khu vực: ${areaTitle}`));
           return;
         }
       }
@@ -649,16 +677,16 @@ export default function App() {
       if (RESIFIX_ASSET_CATALOG[cleanCode]) {
         const fallbackAsset = RESIFIX_ASSET_CATALOG[cleanCode];
         setScannedAsset(fallbackAsset);
-        showToast(translate(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`));
+        showToast(translate(`✅ Đã xác định khu vực: ${fallbackAsset.areaName || fallbackAsset.assetName}`));
       } else {
-        showToast(translate(`⚠️ Mã QR "${cleanCode}" không tồn tại trong danh mục thiết bị tòa nhà!`));
+        showToast(translate(`⚠️ Mã QR "${cleanCode}" không tồn tại trong danh mục khu vực tòa nhà!`));
       }
     } catch {
       // Nếu lỗi mạng khi gọi API, vẫn tự động điền nếu mã QR hợp lệ
       if (RESIFIX_ASSET_CATALOG[cleanCode]) {
         const fallbackAsset = RESIFIX_ASSET_CATALOG[cleanCode];
         setScannedAsset(fallbackAsset);
-        showToast(translate(`✅ Đã nhận diện từ mã QR: ${fallbackAsset.assetName}`));
+        showToast(translate(`✅ Đã xác định khu vực: ${fallbackAsset.areaName || fallbackAsset.assetName}`));
       } else {
         showToast(translate(`❌ Không thể tra cứu mã "${cleanCode}". Kiểm tra lại kết nối Backend!`));
       }
@@ -803,7 +831,7 @@ export default function App() {
     try {
       setLoading(true);
       const locationStr = scannedAsset
-        ? `${scannedAsset.locationLabel} • Thiết bị: ${scannedAsset.qrCode}`
+        ? scannedAsset.locationLabel
         : `Căn hộ ${user?.apartmentCode || 'A-1204'} • Tòa S1`;
 
       const res = await fetch(`${API_BASE_URL}/tickets`, {
@@ -814,7 +842,7 @@ export default function App() {
           'bypass-tunnel-reminder': 'true',
         },
         body: JSON.stringify({
-          title: scannedAsset ? `Sự cố ${scannedAsset.assetName}` : undefined,
+          title: scannedAsset ? `Sự cố tại ${scannedAsset.areaName || scannedAsset.assetName}` : undefined,
           description: reportDesc.trim(),
           locationNote: locationStr,
           qrCode: scannedAsset?.qrCode,
@@ -1543,7 +1571,7 @@ export default function App() {
                   onPress={() => setQrModalVisible(true)}
                 >
                   <Text style={styles.qrDashedBtnText}>
-                    {translate("📷 Quét mã QR thiết bị để tự động điền")}</Text>
+                    {translate("📷 Quét mã QR khu vực để tự động điền vị trí")}</Text>
                 </TouchableOpacity>
 
                 {qrModalVisible && (
@@ -1557,10 +1585,10 @@ export default function App() {
                 {scannedAsset && (
                   <View style={styles.qrRecognizedBox}>
                     <Text style={styles.qrRecognizedTitle}>
-                      {translate("✅ Đã nhận diện từ mã QR: ")}{scannedAsset.assetName}
+                      {translate("✅ Đã xác định khu vực: ")}{scannedAsset.areaName || scannedAsset.assetName}
                     </Text>
                     <Text style={styles.qrRecognizedSub}>
-                      {translate("Mã thiết bị: ")}{scannedAsset.qrCode} {translate("• Vị trí: ")}{scannedAsset.locationLabel}
+                      {translate("📍 Vị trí: ")}{scannedAsset.locationLabel}
                     </Text>
                   </View>
                 )}
@@ -1593,7 +1621,7 @@ export default function App() {
                             ...prev,
                             {
                               label: scannedAsset
-                                ? `${scannedAsset.assetName} (${prev.length + 1})`
+                                ? `${scannedAsset.areaName || scannedAsset.assetName} (${prev.length + 1})`
                                 : `Ảnh hiện trường ${prev.length + 1}`,
                               url: uploadedUrl,
                             },
@@ -1627,20 +1655,39 @@ export default function App() {
                       ]}
                     >
                       {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
-                    <TouchableOpacity
-                      style={styles.voicePillBtn}
-                      onPress={() => {
-                        setIsVoiceUsed(true);
-                        setReportDesc(
-                          'Máy lạnh ở sảnh B tầng 1 bị chảy nước nhiều xuống sàn gây trơn trượt, có tiếng kêu to.'
-                        );
-                        showToast(translate('🎤 Đã nhận diện giọng nói tiếng Việt!'));
-                      }}
-                    >
-                      <Text style={styles.voicePillText}>{translate("🎤 Nhấn để nói")}</Text>
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      {isVoiceUsed && (
+                        <View style={styles.voiceUsedBadge}>
+                          <Text style={styles.voiceUsedBadgeText}>
+                            {translate("✨ Đã ghi âm")}
+                          </Text>
+                        </View>
+                      )}
+                      <TouchableOpacity
+                        style={styles.voicePillBtn}
+                        onPress={() => setVoiceModalVisible(true)}
+                      >
+                        <Text style={styles.voicePillText}>
+                          {isVoiceUsed ? translate("🎤 Nói lại") : translate("🎤 Nhấn để nói")}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 </View>
+
+                {voiceModalVisible && (
+                  <VoiceRecorderModal
+                    visible={voiceModalVisible}
+                    onClose={() => setVoiceModalVisible(false)}
+                    onTranscribed={(text) => {
+                      setReportDesc(text);
+                      setIsVoiceUsed(true);
+                      showToast(translate('🎤 Đã nhận diện giọng nói tiếng Việt thành công!'));
+                    }}
+                    apiBaseUrl={API_BASE_URL}
+                    token={token || undefined}
+                  />
+                )}
 
                 <View style={styles.geminiInfoBox}>
                   <Text style={styles.geminiInfoText}>
@@ -1810,11 +1857,7 @@ export default function App() {
                 <View style={styles.cardTopRow}>
                   <Text style={styles.sectionTitleText}>{translate("Thông báo")}</Text>
                   <View style={styles.unreadPillBadge}>
-<<<<<<< HEAD
                     <Text style={styles.unreadPillText}>{unreadCount || 2} {translate("chưa đọc")}</Text>
-=======
-                    <Text style={styles.unreadPillText}>{unreadCount} chưa đọc</Text>
->>>>>>> main
                   </View>
                 </View>
                 {(notifications.length > 0
@@ -2319,8 +2362,8 @@ export default function App() {
                     {translate("📍 Vị trí: ")}{activeTicket.locationNote || 'Căn hộ A-1204 (Tòa S1 - Tầng 12)'}
                   </Text>
                   <Text style={styles.techInfoLine}>
-                    {translate("🔧 Mã thiết bị (QR):")}{' '}
-                    {activeTicket.asset?.qrCode || 'WP-1204 - Đường ống bồn rửa'}
+                    {translate("🏷️ Khu vực (QR):")}{' '}
+                    {activeTicket.asset?.areaName || activeTicket.asset?.assetName || activeTicket.locationNote || 'Hành lang khu B'}
                   </Text>
                   <Text style={[styles.techInfoLine, { marginBottom: 0 }]}>
                     {translate("⚠️ Độ ưu tiên (BMB duyệt): Cao • Danh mục:")}{' '}
@@ -2430,11 +2473,7 @@ export default function App() {
                 <View style={styles.cardTopRow}>
                   <Text style={styles.sectionTitleText}>{translate("Thông báo công việc mới")}</Text>
                   <View style={styles.unreadPillBadge}>
-<<<<<<< HEAD
                     <Text style={styles.unreadPillText}>{unreadCount || 2} {translate("chưa đọc")}</Text>
-=======
-                    <Text style={styles.unreadPillText}>{unreadCount} chưa đọc</Text>
->>>>>>> main
                   </View>
                 </View>
 
@@ -2487,7 +2526,7 @@ export default function App() {
                 <PreferenceControls />
                 <TouchableOpacity
                   style={styles.logoutRedOutlineBtn}
-                onPress={handleLogout}
+                  onPress={handleLogout}
                 >
                   <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
                 </TouchableOpacity>
@@ -2776,12 +2815,7 @@ export default function App() {
                 {translate("🔔 Thông báo hệ thống")}</Text>
               <View style={styles.bmbSidebarNewRedTag}>
                 <Text style={styles.bmbSidebarNewRedText}>
-<<<<<<< HEAD
                   {String(unreadCount).padStart(2, '0')} {translate("mới")}</Text>
-=======
-                  {String(unreadCount).padStart(2, '0')} mới
-                </Text>
->>>>>>> main
               </View>
             </TouchableOpacity>
           </ScrollView>
@@ -2893,7 +2927,7 @@ export default function App() {
               {/* Hàng 6 viên thuốc lọc trạng thái chuẩn Figma 01 BMB */}
               <View style={styles.chipWrapRow}>
                 {[
-                    { key: 'ALL', label: `${translate('Tất cả')} (${tickets.length})`, dot: '' },
+                  { key: 'ALL', label: `${translate('Tất cả')} (${tickets.length})`, dot: '' },
                   {
                     key: 'PENDING',
                     label: `${translate('Chờ duyệt AI (')}0${bmbPendingCount})`,
@@ -3543,7 +3577,6 @@ export default function App() {
                   <Text style={styles.bmbPageSubtitle}>
                     {translate("Cập nhật thời gian thực qua Firebase FCM & Gemini AI (FR08, US-36)")}</Text>
                 </View>
-<<<<<<< HEAD
                 <TouchableOpacity
                   onPress={handleMarkAllNotificationsRead}
                   disabled={unreadCount === 0}
@@ -3551,12 +3584,6 @@ export default function App() {
                 >
                   <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 13 }}>
                     {translate("✓ Đánh dấu tất cả đã đọc")}</Text>
-=======
-                <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
-                  <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 13 }}>
-                    ✓ Đánh dấu tất cả đã đọc
-                  </Text>
->>>>>>> main
                 </TouchableOpacity>
               </View>
 
@@ -3602,7 +3629,6 @@ export default function App() {
                   ]}
                   onPress={() => handleOpenBmbNotification(notification)}
                 >
-<<<<<<< HEAD
                   <View style={styles.cardTopRow}>
                     <Text style={styles.cardMainTitle}>{notification.title}</Text>
                     {!notification.isRead && <View style={styles.blueUnreadDot} />}
@@ -3618,83 +3644,6 @@ export default function App() {
                   </Text>
                 </TouchableOpacity>
               ))}
-=======
-                  <Text style={{ color: '#2563EB', fontWeight: '800', fontSize: 13 }}>
-                    Duyệt & Giao việc ngay →
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Thẻ 2: Cảnh báo trợ lý AI (US-19) */}
-              <View style={styles.bmbAlertOrangeCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#D97706' }}>
-                    ⚠️ CẢNH BÁO TRỢ LÝ AI (US-19) • 5 phút trước
-                  </Text>
-                  <View style={styles.blueUnreadDot} />
-                </View>
-                <Text style={styles.cardMainTitle}>
-                  Sự cố #RF-2026-013 (Đèn hành lang tầng 8) vượt thời gian chờ phản hồi từ
-                  Gemini API (&gt;4s)
-                </Text>
-                <Text style={styles.cardLocationText}>
-                  Hệ thống đã tự động chuyển sang chế độ Phân loại thủ công (Manual Review) để
-                  không làm gián đoạn luồng xử lý.
-                </Text>
-                <TouchableOpacity
-                  style={styles.bmbManualReviewOutlineBtn}
-                  onPress={() => setBmbNavTab('TICKETS')}
-                >
-                  <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 12.5 }}>
-                    Phân loại thủ công →
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Thẻ 3: KTV đã gửi ảnh nghiệm thu */}
-              <View style={styles.resTicketCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#059669' }}>
-                    📸 KTV ĐÃ GỬI ẢNH NGHIỆM THU • 12 phút trước
-                  </Text>
-                  <View style={styles.blueUnreadDot} />
-                </View>
-                <Text style={styles.cardMainTitle}>
-                  KTV Đặng Văn Nam đã hoàn thành sửa chữa sự cố #RF-2026-012 và tải lên 2 ảnh
-                  nghiệm thu (Đã xác thực QR tại chỗ)
-                </Text>
-                <Text style={styles.cardLocationText}>
-                  Hệ thống đã gửi thông báo đẩy (FCM) nhắc cư dân xác nhận Đã giải quyết
-                  (FR08, FR09).
-                </Text>
-              </View>
-
-              {/* Thẻ 4: KTV đã nhận việc */}
-              <View style={styles.resTicketCard}>
-                <Text
-                  style={{ fontSize: 12, fontWeight: '800', color: '#2563EB', marginBottom: 4 }}
-                >
-                  🛠️ KTV ĐÃ NHẬN VIỆC • 25 phút trước
-                </Text>
-                <Text style={styles.cardMainTitle}>
-                  KTV Đặng Thanh Nguyên đã xác nhận nhận việc #RF-2026-011 (Chuyển trạng thái:
-                  Assigned → In Progress).
-                </Text>
-              </View>
-
-              {/* Thẻ 5: Đã đóng sự cố */}
-              <View style={styles.resTicketCard}>
-                <Text
-                  style={{ fontSize: 12, fontWeight: '800', color: '#475569', marginBottom: 4 }}
-                >
-                  ✅ ĐÃ ĐÓNG SỰ CỐ • 1 giờ trước
-                </Text>
-                <Text style={styles.cardMainTitle}>
-                  Cư dân Căn hộ B-0802 đã nghiệm thu ảnh và đóng sự cố #RF-2026-008 (Đánh giá
-                  chất lượng: ⭐⭐⭐⭐⭐ 5.0).
-                </Text>
-              </View>
->>>>>>> main
             </ScrollView>
 
             {/* CỘT PHẢI: TRẠNG THÁI DỊCH VỤ ĐÁM MÂY (CLOUD STATUS - FIGMA 03 BMB) */}
@@ -4866,6 +4815,19 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   voicePillText: { color: '#7E22CE', fontSize: 12.5, fontWeight: '700' },
+  voiceUsedBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+  },
+  voiceUsedBadgeText: {
+    color: '#15803D',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   geminiInfoBox: { backgroundColor: '#FAF5FF', borderRadius: 12, padding: 12, marginBottom: 20 },
   geminiInfoText: { color: '#7E22CE', fontSize: 12.5, lineHeight: 18 },
   stickyBottomBar: {
@@ -5070,10 +5032,5 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginBottom: 10,
   },
-<<<<<<< HEAD
   toastText: { color: '#1D4ED8', fontWeight: '700', fontSize: 13, textAlign: 'center' },
 });
-=======
-  toastText: { color: '#2563EB', fontWeight: '700', fontSize: 13, textAlign: 'center' },
-});
->>>>>>> main

@@ -11,7 +11,7 @@ import {
 } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
-import { analyzeIncidentWithGemini } from '../services/gemini.service';
+import { analyzeIncidentWithGemini, transcribeAudioWithGemini } from '../services/gemini.service';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -53,56 +53,93 @@ const getParamAsString = (param: string | string[] | undefined): string => {
   return String(param || '');
 };
 
-// Danh mục thiết bị chuẩn của tòa nhà ResiFix để tự động đồng bộ vào PostgreSQL nếu chưa seed
+// Danh mục Khu vực / Vị trí chuẩn của tòa nhà ResiFix để tự động đồng bộ vào PostgreSQL nếu chưa seed
 const DEFAULT_BUILDING_ASSETS: Record<
   string,
-  { assetName: string; category: IncidentCategory; locationLabel: string; buildingBlock: string; floorNumber: string }
+  { areaName: string; assetName: string; category: IncidentCategory; locationLabel: string; buildingBlock: string; floorNumber: string }
 > = {
+  'HL-B12': {
+    areaName: 'Hành lang khu B',
+    assetName: 'Hành lang khu B',
+    category: IncidentCategory.ELECTRICAL,
+    locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
+  },
+  'AREA-HL-B': {
+    areaName: 'Hành lang khu B',
+    assetName: 'Hành lang khu B',
+    category: IncidentCategory.OTHER,
+    locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
+  },
   'AC-B02': {
-    assetName: 'Máy lạnh sảnh B',
+    areaName: 'Sảnh tầng 1',
+    assetName: 'Sảnh tầng 1',
     category: IncidentCategory.HVAC,
-    locationLabel: 'Tầng 1 - Tòa S1',
+    locationLabel: 'Sảnh tầng 1 - Tòa S1',
     buildingBlock: 'Tòa S1',
     floorNumber: 'Tầng 1',
   },
-  'WP-1204': {
-    assetName: 'Đường ống nước bồn rửa',
-    category: IncidentCategory.PLUMBING,
-    locationLabel: 'Căn hộ A-1204 - Tòa S1',
-    buildingBlock: 'Tòa S1',
-    floorNumber: 'Tầng 12',
-  },
-  'HL-B12': {
-    assetName: 'Đèn hành lang khu B',
-    category: IncidentCategory.ELECTRICAL,
-    locationLabel: 'Hành lang Tầng 12 - Tòa S1',
-    buildingBlock: 'Tòa S1',
-    floorNumber: 'Tầng 12',
-  },
-  'ELV-02': {
-    assetName: 'Thang máy khách số 02',
-    category: IncidentCategory.ELEVATOR,
-    locationLabel: 'Sảnh Tầng 1 - Tòa S1',
+  'AREA-SANH-T1': {
+    areaName: 'Sảnh tầng 1',
+    assetName: 'Sảnh tầng 1',
+    category: IncidentCategory.OTHER,
+    locationLabel: 'Sảnh tầng 1 - Tòa S1',
     buildingBlock: 'Tòa S1',
     floorNumber: 'Tầng 1',
   },
   'PK-B1-02': {
-    assetName: 'Đầu đọc thẻ từ hầm gửi xe B1',
+    areaName: 'Hầm gửi xe B1',
+    assetName: 'Hầm gửi xe B1',
     category: IncidentCategory.ACCESS_SECURITY,
-    locationLabel: 'Hầm xe B1 - Tòa S1',
+    locationLabel: 'Hầm gửi xe B1 - Tòa S1',
     buildingBlock: 'Tòa S1',
     floorNumber: 'Hầm B1',
+  },
+  'AREA-HAM-B1': {
+    areaName: 'Hầm gửi xe B1',
+    assetName: 'Hầm gửi xe B1',
+    category: IncidentCategory.OTHER,
+    locationLabel: 'Hầm gửi xe B1 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Hầm B1',
+  },
+  'ELV-02': {
+    areaName: 'Khu vực Thang máy Tầng 1',
+    assetName: 'Khu vực Thang máy Tầng 1',
+    category: IncidentCategory.ELEVATOR,
+    locationLabel: 'Sảnh thang máy Tầng 1 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 1',
+  },
+  'WP-1204': {
+    areaName: 'Căn hộ A-1204',
+    assetName: 'Căn hộ A-1204',
+    category: IncidentCategory.PLUMBING,
+    locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
+  },
+  'AREA-CH-A1204': {
+    areaName: 'Căn hộ A-1204',
+    assetName: 'Căn hộ A-1204',
+    category: IncidentCategory.OTHER,
+    locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
+    buildingBlock: 'Tòa S1',
+    floorNumber: 'Tầng 12',
   },
 };
 
 // ============================================================================
-// 1. GET /api/tickets/assets/qr/:qrCode - Quét mã QR thiết bị tự điền vị trí (FR05, US-09)
+// 1. GET /api/tickets/assets/qr/:qrCode - Quét mã QR khu vực tự điền vị trí (FR05, US-09)
 // ============================================================================
 router.get('/assets/qr/:qrCode', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const rawParam = decodeURIComponent(getParamAsString(req.params.qrCode)).trim().toUpperCase();
 
-    // Trích xuất mã chuẩn nếu camera quét trúng cả URL (VD: ...?data=AC-B02)
+    // Trích xuất mã chuẩn nếu camera quét trúng cả URL (VD: ...?data=HL-B12)
     let qrCode = rawParam;
     for (const knownCode of Object.keys(DEFAULT_BUILDING_ASSETS)) {
       if (rawParam.includes(knownCode)) {
@@ -115,12 +152,13 @@ router.get('/assets/qr/:qrCode', async (req: AuthRequest, res: Response): Promis
       where: { qrCode },
     });
 
-    // Nếu thiết bị nằm trong danh mục chuẩn mà DB chưa có, tự động tạo luôn vào PostgreSQL
+    // Nếu khu vực nằm trong danh mục chuẩn mà DB chưa có, tự động tạo luôn vào PostgreSQL
     if (!asset && DEFAULT_BUILDING_ASSETS[qrCode]) {
       const def = DEFAULT_BUILDING_ASSETS[qrCode];
       asset = await prisma.equipmentAsset.create({
         data: {
           qrCode,
+          areaName: def.areaName,
           assetName: def.assetName,
           category: def.category,
           locationLabel: def.locationLabel,
@@ -133,18 +171,28 @@ router.get('/assets/qr/:qrCode', async (req: AuthRequest, res: Response): Promis
     if (!asset) {
       res.status(404).json({
         success: false,
-        message: `Không tìm thấy thiết bị nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
+        message: `Không tìm thấy khu vực nào khớp với mã QR [${qrCode}]. Vui lòng chọn hoặc nhập vị trí thủ công!`,
       });
       return;
     }
 
+    const recognizedArea = asset.areaName || asset.assetName;
+
     res.status(200).json({
       success: true,
-      message: `Đã nhận diện từ mã QR: ${asset.assetName}`,
+      message: `Đã xác định khu vực từ mã QR: ${recognizedArea}`,
+      area: {
+        id: asset.id,
+        qrCode: asset.qrCode,
+        areaName: recognizedArea,
+        locationLabel: asset.locationLabel,
+        buildingBlock: asset.buildingBlock,
+        floor: asset.floor,
+      },
       asset,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR thiết bị', error });
+    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực', error });
   }
 });
 
@@ -452,7 +500,7 @@ router.post(
       }
 
       const finalLocation =
-        locationNote || (asset ? `${asset.locationLabel} • Thiết bị: ${asset.qrCode}` : 'Khu vực chung tòa nhà');
+        locationNote || (asset ? asset.locationLabel : 'Khu vực chung tòa nhà');
 
       // Gọi Trợ lý Gemini Flash AI phân tích câu tiếng Việt (FR04, US-14..US-19)
       const aiResult = await analyzeIncidentWithGemini(cleanDesc, finalLocation);
@@ -801,5 +849,31 @@ router.patch(
     }
   }
 );
+
+// ============================================================================
+// 12. POST /api/tickets/transcribe-voice - Chuyển đổi giọng nói tiếng Việt thành văn bản
+// ============================================================================
+router.post('/transcribe-voice', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { audioBase64, mimeType } = req.body;
+    if (!audioBase64 || typeof audioBase64 !== 'string') {
+      res.status(400).json({ success: false, message: 'Thiếu dữ liệu âm thanh ghi âm (audioBase64)!' });
+      return;
+    }
+
+    const cleanBase64 = audioBase64.replace(/^data:audio\/[a-zA-Z0-9.-]+;base64,/, '').trim();
+    const result = await transcribeAudioWithGemini(cleanBase64, mimeType || 'audio/m4a');
+
+    res.status(200).json({
+      success: true,
+      text: result.text,
+      latencyMs: result.latencyMs,
+      mode: result.mode,
+    });
+  } catch (error) {
+    console.error('Lỗi API transcribe-voice:', error);
+    res.status(500).json({ success: false, message: 'Lỗi server khi chuyển đổi giọng nói', error });
+  }
+});
 
 export default router;
