@@ -21,7 +21,11 @@ interface QrScannerModalProps {
   roleTitle?: string;
 }
 
-export default function QrScannerModal({
+export default function QrScannerModal(props: QrScannerModalProps) {
+  return props.visible ? <ScannerSession {...props} /> : null;
+}
+
+function ScannerSession({
   visible,
   onClose,
   onScannedCode,
@@ -42,9 +46,6 @@ export default function QrScannerModal({
   useEffect(() => {
     if (!visible) return;
 
-    setScanned(false);
-    setManualCode('');
-    setCameraReady(false);
 
     if (shouldRequestPermission) requestPermission();
 

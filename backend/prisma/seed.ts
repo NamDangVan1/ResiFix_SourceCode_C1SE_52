@@ -60,7 +60,6 @@ async function main() {
     {
       qrCode: 'HL-B12',
       areaName: 'Hành lang khu B',
-      assetName: 'Hành lang khu B',
       category: IncidentCategory.ELECTRICAL,
       locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -69,7 +68,6 @@ async function main() {
     {
       qrCode: 'AC-B02',
       areaName: 'Sảnh tầng 1',
-      assetName: 'Sảnh tầng 1',
       category: IncidentCategory.HVAC,
       locationLabel: 'Sảnh tầng 1 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -78,7 +76,6 @@ async function main() {
     {
       qrCode: 'PK-B1-02',
       areaName: 'Hầm gửi xe B1',
-      assetName: 'Hầm gửi xe B1',
       category: IncidentCategory.ACCESS_SECURITY,
       locationLabel: 'Hầm gửi xe B1 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -87,7 +84,6 @@ async function main() {
     {
       qrCode: 'ELV-02',
       areaName: 'Khu vực Thang máy Tầng 1',
-      assetName: 'Khu vực Thang máy Tầng 1',
       category: IncidentCategory.ELEVATOR,
       locationLabel: 'Sảnh thang máy Tầng 1 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -96,7 +92,6 @@ async function main() {
     {
       qrCode: 'WP-1204',
       areaName: 'Căn hộ A-1204',
-      assetName: 'Căn hộ A-1204',
       category: IncidentCategory.PLUMBING,
       locationLabel: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -105,7 +100,6 @@ async function main() {
     {
       qrCode: 'AREA-HL-B',
       areaName: 'Hành lang khu B',
-      assetName: 'Hành lang khu B',
       category: IncidentCategory.OTHER,
       locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -114,7 +108,6 @@ async function main() {
     {
       qrCode: 'AREA-SANH-T1',
       areaName: 'Sảnh tầng 1',
-      assetName: 'Sảnh tầng 1',
       category: IncidentCategory.OTHER,
       locationLabel: 'Sảnh tầng 1 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -123,7 +116,6 @@ async function main() {
     {
       qrCode: 'AREA-HAM-B1',
       areaName: 'Hầm gửi xe B1',
-      assetName: 'Hầm gửi xe B1',
       category: IncidentCategory.OTHER,
       locationLabel: 'Hầm gửi xe B1 - Tòa S1',
       buildingBlock: 'Tòa S1',
@@ -133,11 +125,10 @@ async function main() {
 
   let aptAsset: any = null;
   for (const item of areasData) {
-    const saved = await prisma.equipmentAsset.upsert({
+    const saved = await prisma.buildingArea.upsert({
       where: { qrCode: item.qrCode },
       update: {
         areaName: item.areaName,
-        assetName: item.assetName,
         locationLabel: item.locationLabel,
         buildingBlock: item.buildingBlock,
         floor: item.floor,
@@ -162,7 +153,7 @@ async function main() {
       description: 'Ống nước dưới bồn rửa bị nứt, nước chảy tràn ra sàn nhiều.',
       isVoiceInput: true,
       locationNote: 'Căn hộ A-1204 - Tầng 12 - Tòa S1',
-      assetId: aptAsset?.id || null,
+      areaId: aptAsset?.id || null,
       isQrScannedByRes: true,
       aiSummary: 'Vỡ đường ống cấp nước bồn rửa tại căn hộ A-1204, nguy cơ ngập sàn.',
       aiSuggestedCategory: IncidentCategory.PLUMBING,

@@ -4,7 +4,7 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import {
   UiActivityIndicator as ActivityIndicator,
   UiText as Text,
@@ -52,7 +52,7 @@ export default function VoiceRecorderModal({
   token,
 }: VoiceRecorderModalProps) {
   const { t } = useUiPreferences();
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -65,16 +65,13 @@ export default function VoiceRecorderModal({
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (recording) {
-        recording.stopAndUnloadAsync().catch(() => {});
-      }
       if (recognitionRef.current) {
         try {
           recognitionRef.current.abort();
         } catch {}
       }
     };
-  }, [recording]);
+  }, []);
 
   // Bắt đầu ghi âm
   const startRecording = async () => {
@@ -125,8 +122,7 @@ export default function VoiceRecorderModal({
         }
       }
 
-      // Trên Mobile Native (Android & iOS): Dùng expo-av
-      const permission = await Audio.requestPermissionsAsync();
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         setErrorMessage(
           t('Ứng dụng cần quyền truy cập Microphone để ghi âm giọng nói. Vui lòng cấp quyền trong Cài đặt!')
@@ -134,16 +130,13 @@ export default function VoiceRecorderModal({
         return;
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-
-      setRecording(newRecording);
+      await recorder.prepareToRecordAsync();
+      recorder.record();
       setIsRecording(true);
 
       timerRef.current = setInterval(() => {
@@ -169,7 +162,7 @@ export default function VoiceRecorderModal({
       return;
     }
 
-    if (!recording) {
+    if (!recorder.isRecording) {
       setIsRecording(false);
       return;
     }
@@ -178,9 +171,8 @@ export default function VoiceRecorderModal({
       setIsRecording(false);
       setIsTranscribing(true);
 
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecording(null);
+      await recorder.stop();
+      const uri = recorder.uri;
 
       if (!uri) {
         throw new Error('Không lấy được file âm thanh');
@@ -209,7 +201,7 @@ export default function VoiceRecorderModal({
         },
         body: JSON.stringify({
           audioBase64: base64Audio,
-          mimeType: 'audio/m4a',
+          mimeType: audioBlob.type || (Platform.OS === 'web' ? 'audio/webm' : 'audio/mp4'),
         }),
       });
 
@@ -222,11 +214,7 @@ export default function VoiceRecorderModal({
         }
       }
 
-      // Fallback thông minh nếu Backend gặp lỗi mạng
-      onTranscribed(
-        'Bóng đèn hành lang khu B tầng 12 bị chớp tắt liên tục, khu vực rất tối và nguy hiểm.'
-      );
-      onClose();
+      throw new Error('Transcription unavailable');
     } catch (err: any) {
       console.error('Lỗi xử lý file ghi âm:', err);
       setErrorMessage(t('Lỗi khi chuyển đổi giọng nói. Vui lòng thử lại hoặc chọn câu mẫu!'));

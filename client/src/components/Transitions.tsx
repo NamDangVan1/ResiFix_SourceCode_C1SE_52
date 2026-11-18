@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AccessibilityInfo,
   Animated,
@@ -35,8 +35,7 @@ export function ScreenTransition({
   direction = 'up',
 }: ScreenTransitionProps) {
   const { themeMode } = useUiPreferences();
-  const anim = useRef(new Animated.Value(0)).current;
-  const prevKey = useRef(transitionKey);
+  const [anim] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
     let isReduced = false;
@@ -54,8 +53,7 @@ export function ScreenTransition({
       easing: Easing.bezier(0.16, 1, 0.3, 1), // Apple / Linear natural cubic-bezier curve
       useNativeDriver: Platform.OS !== 'web',
     }).start();
-    prevKey.current = transitionKey;
-  }, [transitionKey, duration]);
+  }, [anim, transitionKey, duration]);
 
   const opacity = anim;
 
@@ -118,7 +116,7 @@ export function AnimatedModalContent({
   style?: StyleProp<ViewStyle>;
 }) {
   const { themeMode } = useUiPreferences();
-  const anim = useRef(new Animated.Value(0)).current;
+  const [anim] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
     if (visible) {
@@ -137,7 +135,7 @@ export function AnimatedModalContent({
         useNativeDriver: Platform.OS !== 'web',
       }).start();
     }
-  }, [visible]);
+  }, [anim, visible]);
 
   const opacity = anim;
   const scale = anim.interpolate({

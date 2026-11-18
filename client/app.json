@@ -24,7 +24,8 @@
         {
           "photosPermission": "Cho phép ResiFix truy cập Thư viện ảnh để đính kèm minh chứng sự cố."
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "extra": {
       "eas": {

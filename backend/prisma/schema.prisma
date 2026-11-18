@@ -7,466 +7,399 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
-  RESIDENT   // Cư dân (Android App)
-  TECHNICIAN // Kỹ thuật viên (Android App)
-  BMB        // Ban quản lý tòa nhà (Web App)
-}
-
-enum TicketStatus {
-  PENDING     // Chờ duyệt
-  ASSIGNED    // Đã phân công
-  IN_PROGRESS // Đang xử lý
-  COMPLETED   // Hoàn thành
-  CLOSED      // Đã đóng 
-}
-
-// Mức độ ưu tiên sự cố 
-enum PriorityLevel {
-  LOW    // Thấp
-  MEDIUM // Trung bình
-  HIGH   // Cao
-}
-
-enum IncidentCategory {
-  PLUMBING        // Hệ thống Điện - Nước
-  ELECTRICAL      // Điện & Chiếu sáng 
-  ELEVATOR        // Thang máy & Cơ khí 
-  HVAC            // Điều hòa & Thông gió
-  ACCESS_SECURITY // Điện tử & An ninh
-  OTHER           // Khác
-}
-
-// Phân loại hình ảnh lưu trên Cloudinary
-enum MediaType {
-  SCENE_BEFORE // Ảnh hiện trường do Cư dân chụp
-  REPAIR_PROOF // Ảnh bằng chứng nghiệm thu do KTV chụp
-}
-
-// Phân loại thông báo trong Hộp thư & FCM 
-enum NotificationType {
-  NEW_INCIDENT_AI   // Báo cáo mới gửi về cho BMB kèm gợi ý AI
-  AI_TIMEOUT_ALERT  // Cảnh báo Gemini AI quá thời gian chờ (>4s - US-19)
-  TASK_ASSIGNED     // BMB giao việc mới cho Kỹ thuật viên
-  STATUS_UPDATED    // Cập nhật tiến độ (Đang xử lý / Hoàn thành) cho Cư dân
-  TICKET_CLOSED     // Cư dân đã xác nhận giải quyết & đánh giá sao
-}
-
-// 2. MODELS
-
-// BẢNG 1: NGƯỜI DÙNG (Cư dân, Kỹ thuật viên, Ban quản lý)
 model User {
-  id            String            @id @default(uuid())
-  phone         String            @unique // SĐT đăng nhập chính
-  email         String?           @unique // Email công vụ
-  passwordHash  String            // Mật khẩu mã hóa bằng Bcrypt
-  fullName      String            // Họ tên
-  avatarUrl     String?           // Ảnh đại diện trên màn hình Hồ sơ
-  role          Role              @default(RESIDENT)
-  isActive      Boolean           @default(true)
-  isActivated   Boolean           @default(false) // Cờ kích hoạt tài khoản qua OTP (Tài khoản mới tạo mặc định false)
-  mustChangePassword Boolean      @default(false) // Bắt buộc đổi mật khẩu ở lần đăng nhập đầu tiên (mật khẩu tạm)
-  tokenVersion  Int               @default(0)     // Phiên bản token (dùng để thu hồi token cũ khi đổi mật khẩu)
-
-  // Trường dành riêng cho CƯ DÂN
-  apartmentCode String?           // Mã căn hộ 
-  buildingBlock String?           // Tòa nhà
-  floorNumber   Int?              // Tầng
-
-  // Trường dành riêng cho KỸ THUẬT VIÊN
-  specialty     IncidentCategory? // Chuyên môn chính
-  specialtyLabel String?          // Nhãn hiển thị tiếng Việt
-  shiftName     String?           // Ca trực trên Figma
-  isOnDuty      Boolean           @default(false) // Nút gạt Toggle On-duty trên App KTV
-
-  // Thiết bị nhận Push Notification
-  fcmToken      String?           // Firebase Cloud Messaging Token của máy Android
-
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-
-  // Quan hệ
-  reportedTickets  IncidentTicket[]  @relation("ResidentTickets")
-  assignedTickets  IncidentTicket[]  @relation("TechnicianTickets")
-  approvedTickets  IncidentTicket[]  @relation("BmbApprovedTickets")
-  uploadedMedia    TicketMedia[]
-  statusLogs       TicketStatusLog[]
-  notifications    Notification[]
-  residencies      ResidencyRecord[]
-  attendances      AttendanceLog[]   @relation("TechnicianAttendance")
-  overtimes        OvertimeRequest[] @relation("TechnicianOvertime")
-  reviewedOvertimes OvertimeRequest[] @relation("BmbOvertimeReview")
-  lockedPayrolls   MonthlyPayrollLock[]
-  scheduleRequests ShiftScheduleRequest[] @relation("TechScheduleRequests")
-  receivedSwapRequests ShiftScheduleRequest[] @relation("TargetTechSwapRequests")
+  id                       String                 @id @default(uuid())
+  phone                    String                 @unique
+  email                    String?                @unique
+  passwordHash             String
+  fullName                 String
+  avatarUrl                String?
+  role                     Role                   @default(RESIDENT)
+  isActive                 Boolean                @default(true)
+  apartmentCode            String?
+  buildingBlock            String?
+  floorNumber              Int?
+  specialty                IncidentCategory?
+  specialtyLabel           String?
+  shiftName                String?
+  isOnDuty                 Boolean                @default(false)
+  fcmToken                 String?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  isActivated              Boolean                @default(true)
+  tokenVersion             Int                    @default(0)
+  mustChangePassword       Boolean                @default(false)
+  attendances              AttendanceLog[]        @relation("TechnicianAttendance")
+  assignedTickets          IncidentTicket[]       @relation("TechnicianTickets")
+  approvedTickets          IncidentTicket[]       @relation("BmbApprovedTickets")
+  reportedTickets          IncidentTicket[]       @relation("ResidentTickets")
+  lockedPayrolls           MonthlyPayrollLock[]
+  notifications            Notification[]
+  reviewedOvertimes        OvertimeRequest[]      @relation("BmbOvertimeReview")
+  overtimes                OvertimeRequest[]      @relation("TechnicianOvertime")
+  proposedCosts            RepairMaterialCost[]   @relation("ProposedCosts")
+  reviewedCosts            RepairMaterialCost[]   @relation("ReviewedCosts")
+  residencies              ResidencyRecord[]
   reviewedScheduleRequests ShiftScheduleRequest[] @relation("BmbScheduleReviews")
-  proposedCosts    RepairMaterialCost[] @relation("ProposedCosts")
-  reviewedCosts    RepairMaterialCost[] @relation("ReviewedCosts")
+  receivedSwapRequests     ShiftScheduleRequest[] @relation("TargetTechSwapRequests")
+  scheduleRequests         ShiftScheduleRequest[] @relation("TechScheduleRequests")
+  uploadedMedia            TicketMedia[]
+  statusLogs               TicketStatusLog[]
 
   @@index([role, isOnDuty])
   @@index([apartmentCode])
 }
 
-// BẢNG 2: KHU VỰC & VỊ TRÍ GẮN MÃ QR (Hành lang khu B, Sảnh tầng 1, Hầm xe,...)
-model EquipmentAsset {
+model BuildingArea {
   id            String           @id @default(uuid())
-  qrCode        String           @unique // Mã QR dán tại khu vực (VD: HL-B12, SANH-T1,...)
-  areaName      String?          // Tên khu vực chuẩn: "Hành lang khu B", "Sảnh tầng 1",...
-  assetName     String           // Tên vị trí/khu vực hiển thị (đồng bộ với areaName để tương thích ngược)
-  category      IncidentCategory @default(OTHER) // Phân loại tiện ích mặc định
-  locationLabel String           // Vị trí hiển thị đầy đủ (VD: "Hành lang khu B - Tầng 12 - Tòa S1")
-  buildingBlock String           // Tòa nhà 
-  floor         String           // Tầng 
+  qrCode        String           @unique
+  assetName     String?
+  category      IncidentCategory @default(OTHER)
+  locationLabel String
+  buildingBlock String
+  floor         String
   isActive      Boolean          @default(true)
   createdAt     DateTime         @default(now())
-
-  // Quan hệ: 1 Khu vực có nhiều sự cố báo cáo tại đây
+  areaName      String
   tickets       IncidentTicket[]
 
   @@index([qrCode])
 }
 
-// BẢNG 3: PHIẾU BÁO CÁO SỰ CỐ 
 model IncidentTicket {
-  id                  String            @id @default(uuid())
-  ticketCode          String            @unique // Mã Ticket duy nhất trên UI
-  title               String            // Tiêu đề sự cố 
-  description         String            @db.Text // Mô tả tự nhiên >= 10 ký tự 
-  isVoiceInput        Boolean           @default(false) // Có dùng Speech-to-Text tiếng Việt không
-  locationNote        String            // Địa điểm hiển thị trên Card
-
-  // Bước 1: Quét mã QR khu vực & Định danh Căn hộ
-  apartmentId         String?           // Khóa ngoại liên kết căn hộ (bảo toàn lịch sử khi cư dân đổi phòng)
-  apartment           Apartment?        @relation(fields: [apartmentId], references: [id], onDelete: SetNull)
-  areaId              String?           // Khóa ngoại liên kết BuildingArea (khớp 100% với 7 ticket thực tế)
-  area                BuildingArea?     @relation(fields: [areaId], references: [id])
-  isQrScannedByRes    Boolean           @default(false) // Hiện nhãn "Đã nhận diện từ mã QR"
-
-  // Phân tích & Gợi ý từ Trợ lý Gemini Flash AI 
-  aiSummary           String?           @db.Text // Tóm tắt AI trên Web BMB
-  aiSuggestedCategory IncidentCategory? // Danh mục do AI gợi ý
-  aiSuggestedPriority PriorityLevel?    // Độ ưu tiên do AI gợi ý
-  aiLatencyMs         Int?              // Thời gian phản hồi AI tính bằng ms
-  isAiValidJson       Boolean           @default(true)  // Kiểm tra JSON hợp lệ
-  isAiFallbackManual  Boolean           @default(false) // Cờ báo AI lỗi/timeout chuyển sang duyệt tay
-  aiRawResponse       Json?             // Lưu nguyên bản JSON trả về từ Gemini để kiểm thử >80%
-
-  // Bước 2: Ban Quản Lý (BMB) Duyệt & Điều phối
-  finalCategory       IncidentCategory? // Danh mục chốt cuối cùng
-  finalPriority       PriorityLevel?    // Độ ưu tiên chốt cuối cùng
-  bmbAdminNote        String?           // Ghi chú điều phối của BMB khi giao việc cho KTV
+  id                  String              @id @default(uuid())
+  ticketCode          String              @unique
+  title               String
+  description         String
+  isVoiceInput        Boolean             @default(false)
+  locationNote        String
+  isQrScannedByRes    Boolean             @default(false)
+  aiSummary           String?
+  aiSuggestedCategory IncidentCategory?
+  aiSuggestedPriority PriorityLevel?
+  aiLatencyMs         Int?
+  isAiValidJson       Boolean             @default(true)
+  isAiFallbackManual  Boolean             @default(false)
+  aiRawResponse       Json?
+  finalCategory       IncidentCategory?
+  finalPriority       PriorityLevel?
+  bmbAdminNote        String?
   bmbApprovedById     String?
-  bmbApprovedBy       User?             @relation("BmbApprovedTickets", fields: [bmbApprovedById], references: [id])
-  assignedAt          DateTime?         // Thời điểm BMB bấm "Xác nhận Phân loại & Giao việc"
-
-  // Bước 3: Kỹ thuật viên Nhận việc & Xử lý hiện trường
+  assignedAt          DateTime?
   assignedTechId      String?
-  assignedTech        User?             @relation("TechnicianTickets", fields: [assignedTechId], references: [id])
-  acknowledgedAt      DateTime?         // Thời điểm KTV bấm "Nhận việc ngay"
-  isQrVerifiedByTech  Boolean           @default(false) // KTV quét lại QR tại chỗ xác thực
-  techRepairNote      String?           @db.Text // Ghi chú KTV: "Đã thay mới đoạn ống dẫn nước..."
-  completedAt         DateTime?         // Thời điểm KTV bấm "Hoàn thành & Gửi ảnh nghiệm thu"
-
-  // Bước 4: Cư dân Nghiệm thu & Đánh giá 1-5 sao
-  status              TicketStatus      @default(PENDING)
-  resolvedConfirmedAt DateTime?         // Thời điểm Cư dân bấm "Xác nhận Đã giải quyết"
-  ratingStars         Int?              // Điểm đánh giá từ 1 đến 5 sao 
-  ratingComment       String?           @db.Text // Nhận xét tùy chọn của cư dân về KTV
-
-  // --- Người báo cáo (Cư dân) ---
+  acknowledgedAt      DateTime?
+  isQrVerifiedByTech  Boolean             @default(false)
+  techRepairNote      String?
+  completedAt         DateTime?
+  status              TicketStatus        @default(PENDING)
+  resolvedConfirmedAt DateTime?
+  ratingStars         Int?
+  ratingComment       String?
   residentId          String
-  resident            User              @relation("ResidentTickets", fields: [residentId], references: [id])
-
-  createdAt           DateTime          @default(now())
-  updatedAt           DateTime          @updatedAt
-
-  // Quan hệ phụ thuộc
-  media               TicketMedia[]     // Danh sách ảnh Trước (Cư dân) & Sau khi sửa (KTV)
-  statusLogs          TicketStatusLog[] // Lịch sử 5 mốc thời gian trên màn hình Chi tiết
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  areaId              String?
+  apartmentId         String?
+  area                BuildingArea?       @relation(fields: [areaId], references: [id])
+  assignedTech        User?               @relation("TechnicianTickets", fields: [assignedTechId], references: [id])
+  bmbApprovedBy       User?               @relation("BmbApprovedTickets", fields: [bmbApprovedById], references: [id])
+  resident            User                @relation("ResidentTickets", fields: [residentId], references: [id])
+  apartment           Apartment?          @relation(fields: [apartmentId], references: [id], onUpdate: NoAction, map: "fk_ticket_apartment")
   notifications       Notification[]
-  overtimes           OvertimeRequest[] // Lịch sử tăng ca gắn với sự cố này
-  repairCost          RepairMaterialCost? // Chi phí vật tư & nhân công của sự cố
-  slaTracking         SlaTracking?      // Tiến độ cam kết dịch vụ SLA & leo thang
+  overtimes           OvertimeRequest[]
+  repairCost          RepairMaterialCost?
+  slaTracking         SlaTracking?
+  media               TicketMedia[]
+  statusLogs          TicketStatusLog[]
 
   @@index([status])
   @@index([residentId, status])
   @@index([assignedTechId, status])
   @@index([ticketCode])
+  @@index([apartmentId], map: "idx_ticket_apartment")
 }
 
-// BẢNG 4: HÌNH ẢNH CLOUDINARY
 model TicketMedia {
   id           String         @id @default(uuid())
   ticketId     String
-  ticket       IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  
-  imageUrl     String         // Đường dẫn HTTPS ảnh lưu trên Cloudinary
-  publicId     String?        // Cloudinary public_id để tối ưu dung lượng Free Tier
-  mediaType    MediaType      // SCENE_BEFORE hoặc REPAIR_PROOF 
-  caption      String?        // Chú thích ảnh
-  
+  imageUrl     String
+  publicId     String?
+  mediaType    MediaType
+  caption      String?
   uploadedById String
-  uploadedBy   User           @relation(fields: [uploadedById], references: [id])
   createdAt    DateTime       @default(now())
+  ticket       IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  uploadedBy   User           @relation(fields: [uploadedById], references: [id])
 
   @@index([ticketId, mediaType])
 }
 
-// BẢNG 5: NHẬT KÝ TIẾN ĐỘ VÒNG ĐỜI SỰ CỐ 
-// Phục vụ hiển thị khung "Tiến độ xử lý sự cố"
 model TicketStatusLog {
   id          String         @id @default(uuid())
   ticketId    String
-  ticket      IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  
-  fromStatus  TicketStatus?  // Trạng thái cũ
-  toStatus    TicketStatus   // Trạng thái mới
-  title       String         // Tiêu đề mốc 
-  note        String?        // Mô tả chi tiết
-  
+  fromStatus  TicketStatus?
+  toStatus    TicketStatus
+  title       String
+  note        String?
   changedById String
+  createdAt   DateTime       @default(now())
   changedBy   User           @relation(fields: [changedById], references: [id])
-  createdAt   DateTime       @default(now()) // Giờ hiển thị trên Timeline 
+  ticket      IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
 }
 
-// BẢNG 6: HỘP THƯ THÔNG BÁO & LỊCH SỬ FCM 
-// Phục vụ màn hình "04. Hộp thư Thông báo" trên Mobile và "03. Thông báo hệ thống" trên BMB Web
 model Notification {
-  id          String           @id @default(uuid())
-  userId      String           // Người nhận thông báo
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  ticketId    String?          // Gắn với sự cố nào 
-  ticket      IncidentTicket?  @relation(fields: [ticketId], references: [id], onDelete: SetNull)
-  
-  type        NotificationType
-  title       String           // Tiêu đề
-  message     String           @db.Text // Nội dung chi tiết thông báo
-  isRead      Boolean          @default(false) // Chấm xanh/đỏ "chưa đọc" trên Figma (US-36)
-  fcmSent     Boolean          @default(false) // Đã bắn thành công qua Firebase Cloud Messaging chưa
-  
-  createdAt   DateTime         @default(now())
+  id        String           @id @default(uuid())
+  userId    String
+  ticketId  String?
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  fcmSent   Boolean          @default(false)
+  createdAt DateTime         @default(now())
+  ticket    IncidentTicket?  @relation(fields: [ticketId], references: [id])
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, isRead])
 }
 
-// ============================================================================
-// CÁC MODEL MỚI PHỤC VỤ CĂN HỘ, LỊCH SỬ CƯ TRÚ, CHẤM CÔNG & LƯƠNG
-// (CHUẨN BỊ CHO MIGRATION - KHÔNG DÙNG CASCADE ĐỂ BẢO VỆ DỮ LIỆU LỊCH SỬ)
-// ============================================================================
-
-// BẢNG 7: CẤU HÌNH HỆ THỐNG & LIÊN HỆ KHẨN CẤP
 model SystemSetting {
-  id        String   @id @default(uuid())
+  id        String   @id @default(dbgenerated("gen_random_uuid()"))
   key       String   @unique
   value     Json
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
-// BẢNG 8: CĂN HỘ TÒA NHÀ
 model Apartment {
-  id            String            @id @default(uuid())
-  apartmentCode String            @unique // Ví dụ: "A-1204"
-  buildingBlock String            // Tòa nhà (Block)
-  floorNumber   Int               // Tầng
-  roomQrCode    String            @unique // Mã QR phòng cố định: "ROOM:A-1204"
-  status        String            @default("OCCUPIED") // OCCUPIED, VACANT, MAINTENANCE
+  id            String            @id @default(dbgenerated("gen_random_uuid()"))
+  apartmentCode String            @unique
+  buildingBlock String
+  floorNumber   Int
+  roomQrCode    String            @unique
+  status        String            @default("OCCUPIED")
   createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-
+  updatedAt     DateTime          @default(now()) @updatedAt
   tickets       IncidentTicket[]
   residencies   ResidencyRecord[]
 
-  @@index([buildingBlock, floorNumber])
+  @@index([buildingBlock, floorNumber], map: "idx_apartment_block_floor")
 }
 
-// BẢNG 9: LỊCH SỬ CƯ TRÚ CỦA CƯ DÂN (BẢO TOÀN LỊCH SỬ KHI RỜI PHÒNG/CHUYỂN PHÒNG)
 model ResidencyRecord {
-  id               String    @id @default(uuid())
+  id               String    @id @default(dbgenerated("gen_random_uuid()"))
   residentId       String?
-  resident         User?     @relation(fields: [residentId], references: [id], onDelete: SetNull)
-  residentName     String    // Snapshot tên cư dân
-  residentPhone    String    // Snapshot số điện thoại
+  residentName     String
+  residentPhone    String
   apartmentId      String
-  apartment        Apartment @relation(fields: [apartmentId], references: [id], onDelete: Restrict)
   apartmentCode    String
   buildingBlock    String
   floorNumber      Int
-  residencyRole    String    @default("TENANT") // OWNER, TENANT, MEMBER
   moveInDate       DateTime  @default(now())
   moveOutDate      DateTime?
   isRepresentative Boolean   @default(false)
   createdAt        DateTime  @default(now())
+  residencyRole    String    @default("TENANT")
+  apartment        Apartment @relation(fields: [apartmentId], references: [id], onUpdate: NoAction, map: "fk_residency_apartment")
+  resident         User?     @relation(fields: [residentId], references: [id], onUpdate: NoAction, map: "fk_residency_user")
 
-  @@index([apartmentId])
-  @@index([residentId])
+  @@index([apartmentId], map: "idx_residency_apartment")
+  @@index([residentId], map: "idx_residency_resident")
 }
 
-// BẢNG 10: NHẬT KÝ CHẤM CÔNG KỸ THUẬT VIÊN (HỖ TRỢ NHIỀU CA/NGÀY & CHỐNG CHỒNG PHIÊN)
 model AttendanceLog {
-  id             String    @id @default(uuid())
+  id             String    @id @default(dbgenerated("gen_random_uuid()"))
   technicianId   String
-  technician     User      @relation("TechnicianAttendance", fields: [technicianId], references: [id], onDelete: Restrict)
-  technicianName String    // Snapshot tên KTV
-  date           String    // YYYY-MM-DD
-  sessionIndex   Int       @default(1) // 1, 2, 3... cho các phiên làm việc trong ngày
-  checkIn        DateTime  // Giờ check-in từ server
-  checkOut       DateTime? // Giờ check-out từ server
-  workMinutes    Int?      // Số phút làm việc chính xác (tránh lỗi làm tròn float)
+  technicianName String
+  date           String
+  sessionIndex   Int       @default(1)
+  checkIn        DateTime
+  checkOut       DateTime?
+  workMinutes    Int?
   workHours      Decimal?  @db.Decimal(5, 2)
   shiftScheduled String?
-  anomalyNotes   String?   // Ghi chú bất thường (ví dụ: làm >14h)
+  anomalyNotes   String?
   createdAt      DateTime  @default(now())
+  technician     User      @relation("TechnicianAttendance", fields: [technicianId], references: [id], onUpdate: NoAction, map: "fk_attendance_tech")
 
-  @@unique([technicianId, date, sessionIndex])
-  @@index([technicianId, date])
+  @@unique([technicianId, date, sessionIndex], map: "uq_attendance_tech_date_session")
+  @@index([technicianId, date], map: "idx_attendance_tech_date")
 }
 
-// BẢNG 11: YÊU CẦU TĂNG CA (CHỐNG GIAN LẬN & TRÙNG KHUNG GIỜ THỜI GIAN THỰC)
 model OvertimeRequest {
-  id              String          @id @default(uuid())
+  id              String          @id @default(dbgenerated("gen_random_uuid()"))
   technicianId    String
-  technician      User            @relation("TechnicianOvertime", fields: [technicianId], references: [id], onDelete: Restrict)
-  technicianName  String          // Snapshot tên KTV
+  technicianName  String
   ticketId        String?
-  ticket          IncidentTicket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
-  ticketCode      String?         // Snapshot mã sự cố (ví dụ #RF-2026-014)
-  date            String          // YYYY-MM-DD
-  fromTime        String          // Giờ bắt đầu (HH:mm)
-  toTime          String          // Giờ kết thúc (HH:mm)
-  durationMinutes Int             // Số phút làm tăng ca chính xác
+  ticketCode      String?
+  date            String
+  fromTime        String
+  toTime          String
+  durationMinutes Int
   requestedHours  Decimal         @db.Decimal(4, 2)
   approvedHours   Decimal?        @db.Decimal(4, 2)
   reason          String
-  status          String          @default("PENDING") // PENDING, APPROVED, REJECTED
-  reviewNote      String?         // Bắt buộc khi BMB từ chối hoặc điều chỉnh giờ
+  status          String          @default("PENDING")
+  reviewNote      String?
   reviewedById    String?
-  reviewedBy      User?           @relation("BmbOvertimeReview", fields: [reviewedById], references: [id], onDelete: SetNull)
-  reviewedByName  String?         // Snapshot người duyệt
+  reviewedByName  String?
   reviewedAt      DateTime?
   createdAt       DateTime        @default(now())
+  reviewedBy      User?           @relation("BmbOvertimeReview", fields: [reviewedById], references: [id], onUpdate: NoAction, map: "fk_ot_reviewer")
+  technician      User            @relation("TechnicianOvertime", fields: [technicianId], references: [id], onUpdate: NoAction, map: "fk_ot_tech")
+  ticket          IncidentTicket? @relation(fields: [ticketId], references: [id], onUpdate: NoAction, map: "fk_ot_ticket")
 
-  @@index([technicianId, date])
+  @@index([technicianId, date], map: "idx_ot_tech_date")
 }
 
-// BẢNG 12: KHÓA BẢNG LƯƠNG HÀNG THÁNG (TIỀN VND DÙNG BIGINT CHÍNH XÁC TUYỆT ĐỐI)
 model MonthlyPayrollLock {
-  id           String    @id @default(uuid())
-  month        String    @unique // YYYY-MM
-  totalPayout  BigInt    // Tổng tiền chi trả (VND) dạng BigInt
+  id           String   @id @default(dbgenerated("gen_random_uuid()"))
+  month        String   @unique
+  totalPayout  BigInt
   lockedById   String?
-  lockedBy     User?     @relation(fields: [lockedById], references: [id], onDelete: SetNull)
-  lockedByName String    // Snapshot người khóa
-  lockedAt     DateTime  @default(now())
+  lockedByName String
+  lockedAt     DateTime @default(now())
   auditNote    String?
+  lockedBy     User?    @relation(fields: [lockedById], references: [id], onUpdate: NoAction, map: "fk_payroll_lock_user")
 }
 
-// ============================================================================
-// 3 MODULE MỚI: ĐỔI CA/XIN NGHỈ, CHI PHÍ VẬT TƯ & THEO DÕI SLA
-// ============================================================================
-
-// BẢNG 13: YÊU CẦU ĐỔI CA & XIN NGHỈ PHÉP KỸ THUẬT VIÊN
 model ShiftScheduleRequest {
-  id             String    @id @default(uuid())
-  type           String    // LEAVE hoặc SHIFT_SWAP
+  id             String    @id @default(dbgenerated("gen_random_uuid()"))
+  type           String
   techId         String
-  tech           User      @relation("TechScheduleRequests", fields: [techId], references: [id], onDelete: Restrict)
   techName       String
-  date           String    // YYYY-MM-DD
-  endDate        String?   // Dùng khi xin nghỉ nhiều ngày
-  leaveType      String?   // ANNUAL, SICK, UNPAID
-  shiftName      String?   // Ca trực muốn đổi
+  date           String
+  endDate        String?
+  leaveType      String?
+  shiftName      String?
   targetTechId   String?
-  targetTech     User?     @relation("TargetTechSwapRequests", fields: [targetTechId], references: [id], onDelete: SetNull)
   targetTechName String?
   reason         String
-  status         String    @default("PENDING") // PENDING, APPROVED, REJECTED, CANCELLED
+  status         String    @default("PENDING")
   reviewNote     String?
   reviewedById   String?
-  reviewedBy     User?     @relation("BmbScheduleReviews", fields: [reviewedById], references: [id], onDelete: SetNull)
   reviewedByName String?
   reviewedAt     DateTime?
   createdAt      DateTime  @default(now())
+  reviewedBy     User?     @relation("BmbScheduleReviews", fields: [reviewedById], references: [id], onUpdate: NoAction, map: "fk_sched_reviewer")
+  targetTech     User?     @relation("TargetTechSwapRequests", fields: [targetTechId], references: [id], onUpdate: NoAction, map: "fk_sched_target_tech")
+  tech           User      @relation("TechScheduleRequests", fields: [techId], references: [id], onUpdate: NoAction, map: "fk_sched_tech")
 
-  @@index([techId, date])
+  @@index([techId, date], map: "idx_sched_tech_date")
 }
 
-// BẢNG 14: HỒ SƠ CHI PHÍ SỬA CHỮA GẮN VỚI SỰ CỐ
 model RepairMaterialCost {
-  id              String         @id @default(uuid())
+  id              String         @id @default(dbgenerated("gen_random_uuid()"))
   ticketId        String         @unique
-  ticket          IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
   ticketCode      String
   proposedById    String
-  proposedBy      User           @relation("ProposedCosts", fields: [proposedById], references: [id], onDelete: Restrict)
   proposedByName  String
-  status          String         @default("DRAFT") // DRAFT, PENDING, APPROVED, REJECTED
-  otherCost       BigInt         @default(0) // Chi phí phát sinh (VND BigInt)
-  totalCost       BigInt         // Tổng chi phí (VND BigInt)
-  receiptProofUrl String?        // Link ảnh hóa đơn/chứng từ
+  status          String         @default("DRAFT")
+  otherCost       BigInt         @default(0)
+  totalCost       BigInt
+  receiptProofUrl String?
   reviewNote      String?
   reviewedById    String?
-  reviewedBy      User?          @relation("ReviewedCosts", fields: [reviewedById], references: [id], onDelete: SetNull)
   reviewedByName  String?
   reviewedAt      DateTime?
   createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-
+  updatedAt       DateTime       @default(now()) @updatedAt
   items           MaterialItem[]
+  proposedBy      User           @relation("ProposedCosts", fields: [proposedById], references: [id], onUpdate: NoAction, map: "fk_cost_proposer")
+  reviewedBy      User?          @relation("ReviewedCosts", fields: [reviewedById], references: [id], onUpdate: NoAction, map: "fk_cost_reviewer")
+  ticket          IncidentTicket @relation(fields: [ticketId], references: [id], onUpdate: NoAction, map: "fk_cost_ticket")
 }
 
-// BẢNG 15: CHI TIẾT DANH MỤC VẬT TƯ SỬA CHỮA
 model MaterialItem {
-  id           String             @id @default(uuid())
+  id           String             @id @default(dbgenerated("gen_random_uuid()"))
   costId       String
-  cost         RepairMaterialCost @relation(fields: [costId], references: [id], onDelete: Cascade)
-  materialCode String             // Mã vật tư (VT-ONGNUOC-01...)
-  materialName String             // Tên vật tư
-  unit         String             // Cái, Mét, Bộ, Cuộn...
+  materialCode String
+  materialName String
+  unit         String
   quantity     Int
-  unitPrice    BigInt             // Đơn giá (VND BigInt)
-  totalPrice   BigInt             // Thành tiền (VND BigInt)
+  unitPrice    BigInt
+  totalPrice   BigInt
   notes        String?
+  cost         RepairMaterialCost @relation(fields: [costId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_item_cost")
 
-  @@index([costId])
+  @@index([costId], map: "idx_material_cost")
 }
 
-// BẢNG 16: THEO DÕI TIẾN ĐỘ CAM KẾT DỊCH VỤ (SLA) & LEO THANG SỰ CỐ
 model SlaTracking {
-  id                 String         @id @default(uuid())
+  id                 String         @id @default(dbgenerated("gen_random_uuid()"))
   ticketId           String         @unique
-  ticket             IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
   ticketCode         String
-  priority           String         // HIGH, MEDIUM, LOW
+  priority           String
   status             String
   responseDeadline   DateTime
   assignmentDeadline DateTime
   resolutionDeadline DateTime
-  slaStatus          String         @default("ON_TRACK") // ON_TRACK, AT_RISK, BREACHED
+  slaStatus          String         @default("ON_TRACK")
   isPaused           Boolean        @default(false)
   pauseReason        String?
   pausedAt           DateTime?
   escalationTier     Int            @default(0)
   lastAlertSentAt    DateTime?
   createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  updatedAt          DateTime       @default(now()) @updatedAt
+  ticket             IncidentTicket @relation(fields: [ticketId], references: [id], onUpdate: NoAction, map: "fk_sla_ticket")
 
-  @@index([slaStatus, escalationTier])
+  @@index([slaStatus, escalationTier], map: "idx_sla_status_tier")
 }
 
-// BẢNG 17: MÃ XÁC THỰC OTP EMAIL (KÍCH HOẠT TÀI KHOẢN & ĐẶT LẠI MẬT KHẨU)
 model OtpVerification {
   id        String   @id @default(uuid())
   email     String
-  otpHash   String   // Mã OTP được băm HMAC-SHA256 kèm secret
-  purpose   String   // ACCOUNT_ACTIVATION | PASSWORD_RESET
-  expiresAt DateTime // Hiệu lực 5 phút
-  attempts  Int      @default(0) // Tối đa 5 lần thử sai
+  otpHash   String
+  purpose   String
+  expiresAt DateTime
+  attempts  Int      @default(0)
   isUsed    Boolean  @default(false)
   createdAt DateTime @default(now())
 
   @@index([email, purpose])
   @@index([expiresAt])
+}
+
+enum Role {
+  RESIDENT
+  TECHNICIAN
+  BMB
+}
+
+enum TicketStatus {
+  PENDING
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+}
+
+enum PriorityLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum IncidentCategory {
+  PLUMBING
+  ELECTRICAL
+  ELEVATOR
+  HVAC
+  ACCESS_SECURITY
+  OTHER
+}
+
+enum MediaType {
+  SCENE_BEFORE
+  REPAIR_PROOF
+}
+
+enum NotificationType {
+  NEW_INCIDENT_AI
+  AI_TIMEOUT_ALERT
+  TASK_ASSIGNED
+  STATUS_UPDATED
+  TICKET_CLOSED
 }

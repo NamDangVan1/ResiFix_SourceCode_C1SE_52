@@ -89,29 +89,27 @@ Quy tắc mức độ khẩn cấp priority:
 - LOW: lỗi nhỏ ít ảnh hưởng.`;
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const candidateModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
-
-  for (const modelName of candidateModels) {
-    try {
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: SchemaType.OBJECT,
-            properties: {
-              category: {
-                type: SchemaType.STRING,
-                description: 'One of: PLUMBING, ELECTRICAL, ELEVATOR, HVAC, ACCESS_SECURITY, OTHER',
-              },
-              priority: {
-                type: SchemaType.STRING,
-                description: 'One of: LOW, MEDIUM, HIGH',
-              },
-              summary: {
-                type: SchemaType.STRING,
-                description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 25 từ cho Ban quản lý tòa nhà.',
-              },
+  const modelName = 'gemini-2.5-flash';
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: SchemaType.OBJECT,
+          properties: {
+            category: {
+              type: SchemaType.STRING,
+              description: 'One of: PLUMBING, ELECTRICAL, ELEVATOR, HVAC, ACCESS_SECURITY, OTHER',
+            },
+            priority: {
+              type: SchemaType.STRING,
+              description: 'One of: LOW, MEDIUM, HIGH',
+            },
+            summary: {
+              type: SchemaType.STRING,
+              description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 25 từ cho Ban quản lý tòa nhà.',
             },
           },
           required: ['category', 'priority', 'summary'],
@@ -136,9 +134,24 @@ Quy tắc mức độ khẩn cấp priority:
       throw new Error('Invalid Gemini response values.');
     }
 
-  // Nếu cả 3 model đều lỗi hoặc mạng chặn thì trả về kết quả từ bộ phân loại dự phòng thông minh
-  const latencyMs = Date.now() - startTime;
-  return analyzeWithSmartFallback(description, latencyMs, 'FALLBACK_USED');
+    return {
+      category: candidate.category as IncidentCategory,
+      priority: candidate.priority as PriorityLevel,
+      summary,
+      latencyMs: Date.now() - startTime,
+      isValidJson: true,
+      isFallbackManual: false,
+      rawResponse: { modelUsed: modelName, category: candidate.category, priority: candidate.priority, summary },
+    };
+  } catch (error) {
+    return analyzeWithSmartFallback(
+      description,
+      Date.now() - startTime,
+      error instanceof Error && error.message === 'GEMINI_TIMEOUT_EXCEEDED' ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
+    );
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 // Chuyển đổi giọng nói (Voice-to-Text) tiếng Việt bằng Gemini Multimodal AI
@@ -150,11 +163,7 @@ export async function transcribeAudioWithGemini(
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
 
   if (!apiKey || apiKey.includes('YOUR_GEMINI_API_KEY')) {
-    return {
-      text: 'Bóng đèn hành lang chớp tắt liên tục, khu vực rất tối và nguy hiểm.',
-      latencyMs: 350,
-      mode: 'SMART_FALLBACK',
-    };
+    throw new Error('GEMINI_KEY_NOT_CONFIGURED');
   }
 
   const prompt =
@@ -166,12 +175,7 @@ export async function transcribeAudioWithGemini(
   for (const modelName of candidateModels) {
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('GEMINI_AUDIO_TIMEOUT')), 8000)
-      );
-
-      const result = await Promise.race([
-        model.generateContent([
+      const result = await model.generateContent([
           {
             inlineData: {
               mimeType: mimeType || 'audio/m4a',
@@ -179,9 +183,7 @@ export async function transcribeAudioWithGemini(
             },
           },
           { text: prompt },
-        ]),
-        timeoutPromise,
-      ]);
+      ], { timeout: 8000 });
 
       const transcribed = result.response.text().trim();
       if (transcribed) {
@@ -197,9 +199,5 @@ export async function transcribeAudioWithGemini(
     }
   }
 
-  return {
-    text: 'Bóng đèn hành lang khu B tầng 12 bị chớp tắt liên tục, khu vực rất tối và nguy hiểm.',
-    latencyMs: Date.now() - startTime,
-    mode: 'SMART_FALLBACK',
-  };
+  throw new Error('GEMINI_TRANSCRIPTION_UNAVAILABLE');
 }

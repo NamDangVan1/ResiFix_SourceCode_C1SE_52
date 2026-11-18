@@ -200,8 +200,6 @@ const UI = {
   success: '#10B981',
 } as const;
 
-// Đặt true khi nhóm cần nút demo đăng nhập nhanh, false để màn hình đúng Figma.
-const SHOW_DEMO_SHORTCUTS = false;
 
 function ResiFixLogoMark({ size = 68 }: { size?: number }) {
   const stroke = Math.max(1.25, size * 0.033);
@@ -316,7 +314,6 @@ function OutlineIcon({
   );
 }
 
-function AppContent() {
 const calculateDistanceMeters = (
   lat1: number,
   lon1: number,
@@ -358,8 +355,6 @@ function AppContent() {
   const [techLiveLocation, setTechLiveLocation] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
   const [techLocationError, setTechLocationError] = useState<string | null>(null);
   const [techGpsRefreshing, setTechGpsRefreshing] = useState(false);
-  const [unifiedAccountModalVisible, setUnifiedAccountModalVisible] = useState(false);
-  const [selectedAccountType, setSelectedAccountType] = useState<'RESIDENT' | 'TECHNICIAN'>('RESIDENT');
 
   // 2. Điều hướng màn hình theo từng vai trò (Chuẩn 15 màn hình Figma)
   const [resScreen, setResScreen] = useState<
@@ -462,7 +457,6 @@ function AppContent() {
   const [matQtyInput, setMatQtyInput] = useState('1');
   const [matPriceInput, setMatPriceInput] = useState('50000');
   const [matUnitInput, setMatUnitInput] = useState('Cái');
-  const [otherCostInput, setOtherCostInput] = useState('0');
 
   // SLA & Escalation
   const [ticketSlas, setTicketSlas] = useState<Record<string, any>>({});
@@ -611,25 +605,6 @@ function AppContent() {
     assetName: string;
     locationLabel: string;
     areaName?: string;
-  } | null>({
-    qrCode: 'HL-B12',
-    assetName: 'Hành lang khu B',
-    areaName: 'Hành lang khu B',
-    locationLabel: 'Hành lang khu B - Tầng 12 - Tòa S1',
-  });
-  const [reportPhotos, setReportPhotos] = useState<{ label: string; url: string }[]>([
-    {
-      label: 'Hành lang khu B',
-      url: 'https://images.unsplash.com/photo-1585704032915-c3400ca199e7?auto=format&fit=crop&w=600&q=80',
-    },
-    {
-      label: 'Sàn hành lang khu B',
-      url: 'https://images.unsplash.com/photo-1504328345606-18bbc8c9d7d1?auto=format&fit=crop&w=600&q=80',
-    },
-  ]);
-  const [reportDesc, setReportDesc] = useState(
-    'Bóng đèn hành lang khu B bị chập chờn nhấp nháy liên tục, sàn gạch có nước đọng trơn trượt.'
-  );
   } | null>(null);
   const [manualLocation, setManualLocation] = useState('');
   const [reportPhotos, setReportPhotos] = useState<{ label: string; url: string }[]>([]);
@@ -657,14 +632,14 @@ function AppContent() {
   // State xem ảnh phóng to của cư dân cho BMB
   const [bmbPhotoViewerVisible, setBmbPhotoViewerVisible] = useState<boolean>(false);
   const [bmbPhotoViewerIndex, setBmbPhotoViewerIndex] = useState<number>(0);
-  const [bmbPhotoViewerList, setBmbPhotoViewerList] = useState<Array<{ id: string; url: string; caption?: string }>>([]);
+  const [bmbPhotoViewerList, setBmbPhotoViewerList] = useState<{ id: string; url: string; caption?: string }[]>([]);
   const [bmbPhotoModalLoading, setBmbPhotoModalLoading] = useState<boolean>(false);
   const [bmbPhotoModalError, setBmbPhotoModalError] = useState<boolean>(false);
 
   // Trích xuất danh sách ảnh ban đầu do Cư dân báo cáo (chỉ lấy SCENE_BEFORE, tuyệt đối loại trừ REPAIR_PROOF của KTV)
-  const getResidentReportedMedia = (ticket: any): Array<{ id: string; url: string; caption?: string }> => {
+  const getResidentReportedMedia = (ticket: any): { id: string; url: string; caption?: string }[] => {
     if (!ticket) return [];
-    const items: Array<{ id: string; url: string; caption?: string }> = [];
+    const items: { id: string; url: string; caption?: string }[] = [];
     const seenUrls = new Set<string>();
 
     // 1. Lấy từ ticket.media (quan hệ Prisma chuẩn của IncidentTicket)
@@ -1447,7 +1422,7 @@ function AppContent() {
               'bypass-tunnel-reminder': 'true',
             },
           });
-        } catch (netErr) {
+        } catch {
           // Khi Backend chưa bật hoặc đang khởi động, thử lại tối đa 2 lần với backoff
           if (retryCount < 2) {
             await new Promise((r) => setTimeout(r, 1500 * (retryCount + 1)));
@@ -3533,7 +3508,7 @@ function AppContent() {
     }
     const qty = Number(matQtyInput) || 1;
     const price = Number(matPriceInput) || 50000;
-    const other = Number(otherCostInput) || 0;
+    const other = 0;
 
     try {
       setLoading(true);
@@ -3685,7 +3660,6 @@ function AppContent() {
 
 
   // Quét QR tự động điền thiết bị (Màn hình 02 Cư dân)
-  const [qrModalVisible, setQrModalVisible] = useState(false);
 
   // Hàm xử lý khi Camera quét được mã QR thiết bị (FR05, US-09)
   const handleQrCodeDetected = async (rawCode: string) => {
@@ -3703,8 +3677,8 @@ function AppContent() {
         }
       );
 
-      if (res.ok) {
-        const data = await res.json();
+      if (response.ok) {
+        const data = await response.json();
         if (data.success && (data.area || data.asset)) {
           const item = data.area || data.asset;
           const areaTitle = item.areaName || item.assetName;
@@ -3719,24 +3693,7 @@ function AppContent() {
         }
       }
 
-      // Nếu Backend chưa seed kịp hoặc đang đứt mạng, tra cứu ngay trong Catalog chuẩn:
-      if (RESIFIX_ASSET_CATALOG[cleanCode]) {
-        const fallbackAsset = RESIFIX_ASSET_CATALOG[cleanCode];
-        setScannedAsset(fallbackAsset);
-        showToast(translate(`✅ Đã xác định khu vực: ${fallbackAsset.areaName || fallbackAsset.assetName}`));
-      } else {
-        showToast(translate(`⚠️ Mã QR "${cleanCode}" không tồn tại trong danh mục khu vực tòa nhà!`));
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data?.success || !data?.asset) {
-        showToast(data?.message || translate('QR code was not found in the active asset list.'));
-        return;
-      }
-      setScannedAsset({
-        qrCode: data.asset.qrCode,
-        assetName: data.asset.assetName,
-        locationLabel: data.asset.locationLabel,
-      });
-      showToast(translate(`QR code identified: ${data.asset.assetName}`));
+      showToast(translate("Mã QR không hợp lệ hoặc bạn chưa có quyền sử dụng."));
     } catch {
       // Nếu lỗi mạng khi gọi API, vẫn tự động điền nếu mã QR hợp lệ
       if (RESIFIX_ASSET_CATALOG[cleanCode]) {
@@ -3746,7 +3703,6 @@ function AppContent() {
       } else {
         showToast(translate(`❌ Không thể tra cứu mã "${cleanCode}". Kiểm tra lại kết nối Backend!`));
       }
-      showToast(translate(`Could not look up QR code "${cleanCode}". Check the backend connection and try again.`));
     } finally {
       setLoading(false);
     }
@@ -3900,9 +3856,6 @@ function AppContent() {
     }
     try {
       setLoading(true);
-      const locationStr = scannedAsset
-        ? scannedAsset.locationLabel
-        : `Căn hộ ${user?.apartmentCode || 'A-1204'} • Tòa S1`;
 
       const res = await fetch(`${API_BASE_URL}/tickets`, {
         method: 'POST',
@@ -3931,8 +3884,11 @@ function AppContent() {
       }
 
       if (res.ok && data?.success) {
-        showToast(`🎉 Đã gửi ${data.ticket.ticketCode} thành công!`);
-        await fetchAllData();
+        setReportDesc('');
+        setManualLocation('');
+        setScannedAsset(null);
+        setReportPhotos([]);
+        setIsVoiceUsed(false);
         setResScreen('HOME');
         showToast(translate(data.message || `Đã gửi ${data.ticket.ticketCode} thành công.`));
         await fetchAllData();
@@ -4213,7 +4169,7 @@ function AppContent() {
               <Text style={styles.technicianModalDescription}>
                 {forgotStep === 1
                   ? translate('Nhập địa chỉ email đã đăng ký để nhận mã OTP khôi phục mật khẩu.')
-                  : `${translate('Nhập mã OTP 6 số đã gửi tới:')} ${forgotEmail}`}
+                  : `${translate('Nhập mã OTP 6 số đã gửi tới:')} ${forgotMaskedEmail || forgotEmail}`}
               </Text>
 
               {forgotStep === 1 ? (
@@ -5231,6 +5187,10 @@ function AppContent() {
                   />
                 )}
 
+                {!scannedAsset && (
+                  <TextInput style={styles.technicianFormInput} value={manualLocation} onChangeText={setManualLocation}
+                    placeholder={translate("Nhập vị trí sự cố")} />
+                )}
                 {scannedAsset && (
                   <View style={styles.qrRecognizedBox}>
                     <Text style={styles.qrRecognizedTitle}>
@@ -5315,13 +5275,7 @@ function AppContent() {
                       {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
                     <TouchableOpacity
                       style={styles.voicePillBtn}
-                      onPress={() => {
-                        setIsVoiceUsed(true);
-                        setReportDesc(
-                          'Máy lạnh ở sảnh B tầng 1 bị chảy nước nhiều xuống sàn gây trơn trượt, có tiếng kêu to.'
-                        );
-                        showToast('Đã nhận diện giọng nói tiếng Việt!');
-                      }}
+                      onPress={() => setVoiceModalVisible(true)}
                     >
                       <Text style={styles.voicePillText}>{translate("Nhập giọng nói")}</Text>
                     </TouchableOpacity>
@@ -5792,7 +5746,6 @@ function AppContent() {
   // PHÂN HỆ 2: KỸ THUẬT VIÊN (TECHNICIAN) — BÁM BỐ CỤC 5 MÀN HÌNH FIGMA KTV
   // ============================================================================
   if (user.role === 'TECHNICIAN') {
-    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const assignedCount = tickets.filter((t) => t.status === 'ASSIGNED').length;
     const inProgressCount = tickets.filter((t) => t.status === 'IN_PROGRESS').length;
     const completedCount = tickets.filter(
@@ -5800,10 +5753,6 @@ function AppContent() {
     ).length;
     const closedCount = tickets.filter((t) => t.status === 'CLOSED').length;
     const waitingResidentCount = tickets.filter((t) => t.status === 'COMPLETED').length;
-    const completedThisMonth = tickets.filter((t) => {
-      const completedAt = t.completedAt ? new Date(t.completedAt) : null;
-      return completedAt && completedAt >= monthStart;
-    });
     const ratedTickets = tickets.filter((t) => Number.isInteger(t.ratingStars) && t.ratingStars >= 1 && t.ratingStars <= 5);
     const averageRating = ratedTickets.length
       ? (ratedTickets.reduce((total, ticket) => total + ticket.ratingStars, 0) / ratedTickets.length).toFixed(1)
@@ -6753,13 +6702,13 @@ function AppContent() {
 
                             {log.explanationText && (
                               <Text style={{ fontSize: 11.5, color: '#2563EB', marginTop: 4, fontStyle: 'italic' }}>
-                                💬 Đã giải trình: "{log.explanationText}"
+                                💬 Đã giải trình: &quot;{log.explanationText}&quot;
                               </Text>
                             )}
 
                             {log.reviewNote && (
                               <Text style={{ fontSize: 11.5, color: '#475569', marginTop: 2, fontWeight: '600' }}>
-                                📝 Phản hồi BMB: "{log.reviewNote}"
+                                📝 Phản hồi BMB: &quot;{log.reviewNote}&quot;
                               </Text>
                             )}
 
@@ -9692,7 +9641,7 @@ function AppContent() {
                             {log.explanationText && (
                               <View style={{ backgroundColor: '#F5F3FF', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#DDD6FE' }}>
                                 <Text style={{ fontSize: 12.5, color: '#6D28D9', fontWeight: '700' }}>
-                                  💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>"{log.explanationText}"</Text>
+                                  💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>&quot;{log.explanationText}&quot;</Text>
                                 </Text>
                               </View>
                             )}
@@ -9701,7 +9650,7 @@ function AppContent() {
                             {log.reviewNote && (
                               <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
                                 <Text style={{ fontSize: 12.5, color: '#334155' }}>
-                                  📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> "{log.reviewNote}" ({formatDateTime(log.reviewedAt)})
+                                  📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> &quot;{log.reviewNote}&quot; ({formatDateTime(log.reviewedAt)})
                                 </Text>
                               </View>
                             )}

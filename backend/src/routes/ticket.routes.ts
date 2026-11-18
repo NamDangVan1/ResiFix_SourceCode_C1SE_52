@@ -11,7 +11,7 @@ import {
 } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
-import { analyzeIncidentWithGemini } from '../services/gemini.service';
+import { analyzeIncidentWithGemini, transcribeAudioWithGemini } from '../services/gemini.service';
 import { prisma } from '../db';
 import { createAndSaveOtp } from '../services/otp.service';
 import { safeSendOtpEmail } from '../services/mail.service';
@@ -177,7 +177,7 @@ const getParamAsString = (param: string | string[] | undefined): string => {
   return String(param || '');
 };
 
-// Danh mục Khu vực / Vị trí chuẩn của tòa nhà ResiFix để tự động đồng bộ vào PostgreSQL nếu chưa seed
+// ============================================================================
 const DEFAULT_BUILDING_ASSETS: Record<
   string,
   { areaName: string; assetName: string; category: IncidentCategory; locationLabel: string; buildingBlock: string; floorNumber: string }
@@ -257,7 +257,26 @@ const DEFAULT_BUILDING_ASSETS: Record<
 };
 
 // ============================================================================
-// 1. GET /api/tickets/assets/qr/:qrCode - Quét mã QR khu vực tự điền vị trí (FR05, US-09)
+async function findActiveArea(qrCode: string) {
+  const def = DEFAULT_BUILDING_ASSETS[qrCode];
+  if (!def) return prisma.buildingArea.findFirst({ where: { qrCode, isActive: true } });
+
+  const area = await prisma.buildingArea.upsert({
+    where: { qrCode },
+    update: {},
+    create: {
+      qrCode,
+      areaName: def.areaName,
+      category: def.category,
+      locationLabel: def.locationLabel,
+      buildingBlock: def.buildingBlock,
+      floor: def.floorNumber,
+    },
+  });
+  return area.isActive ? area : null;
+}
+
+// 1. GET /api/tickets/assets/qr/:qrCode - Quét mã QR thiết bị tự điền vị trí (FR05, US-09)
 // ============================================================================
 router.get(
   '/assets/qr/:qrCode',
@@ -265,9 +284,7 @@ router.get(
   authorizeRoles(Role.RESIDENT),
   async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const rawParam = decodeURIComponent(getParamAsString(req.params.qrCode)).trim().toUpperCase();
-
-    // Trích xuất mã chuẩn nếu camera quét trúng cả URL (VD: ...?data=HL-B12)
+    const rawParam = getParamAsString(req.params.qrCode).trim();
     let qrCode = rawParam;
     try {
       const parsedUrl = new URL(rawParam);
@@ -295,22 +312,18 @@ router.get(
       }
     }
 
-    let asset = await prisma.equipmentAsset.findUnique({
-      where: { qrCode },
-    });
-
-    // Nếu khu vực nằm trong danh mục chuẩn mà DB chưa có, tự động tạo luôn vào PostgreSQL
-    if (!asset && DEFAULT_BUILDING_ASSETS[qrCode]) {
-      const def = DEFAULT_BUILDING_ASSETS[qrCode];
-      asset = await prisma.equipmentAsset.create({
-        data: {
-          qrCode,
-          areaName: def.areaName,
-          assetName: def.assetName,
-          category: def.category,
-          locationLabel: def.locationLabel,
-          buildingBlock: def.buildingBlock,
-          floor: def.floorNumber,
+    if (aptRecord && roomCode) {
+      // Xác minh quyền cư dân đối với phòng riêng (Section VI)
+      const residentUser = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { id: true, apartmentCode: true },
+      });
+      const userApt = residentUser?.apartmentCode ? residentUser.apartmentCode.trim().toUpperCase() : null;
+      const activeResidency = await prisma.residencyRecord.findFirst({
+        where: {
+          residentId: req.user!.userId,
+          apartmentCode: roomCode,
+          moveOutDate: null,
         },
       });
       const hasResidency = userApt === roomCode || Boolean(activeResidency);
@@ -359,35 +372,36 @@ router.get(
     }
 
     // 2. Tra cứu trong bảng BuildingArea (khu vực chung: WP-1204, v.v.)
-    const area = await prisma.buildingArea.findFirst({
-      where: { qrCode, isActive: true },
-    });
+    const area = await findActiveArea(qrCode);
 
     if (!area) {
       res.status(404).json({
         success: false,
-        message: `Không tìm thấy khu vực nào khớp với mã QR [${qrCode}]. Vui lòng chọn hoặc nhập vị trí thủ công!`,
+        message: `Không tìm thấy phòng hoặc khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
       });
       return;
     }
 
-    const recognizedArea = asset.areaName || asset.assetName;
-
     res.status(200).json({
       success: true,
-      message: `Đã xác định khu vực từ mã QR: ${recognizedArea}`,
-      area: {
-        id: asset.id,
-        qrCode: asset.qrCode,
-        areaName: recognizedArea,
-        locationLabel: asset.locationLabel,
-        buildingBlock: asset.buildingBlock,
-        floor: asset.floor,
+      message: `Đã nhận diện từ mã QR: ${area.areaName}`,
+      area,
+      // Tương thích ngược 100% với Frontend phiên bản hiện tại
+      asset: {
+        id: area.id,
+        qrCode: area.qrCode,
+        assetName: area.areaName,
+        areaName: area.areaName,
+        category: area.category,
+        locationLabel: area.locationLabel,
+        buildingBlock: area.buildingBlock,
+        floor: area.floor,
+        isActive: area.isActive,
       },
-      asset,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực', error });
+    console.error('Lỗi khi tra cứu mã QR khu vực:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực.' });
   }
   }
 );
@@ -950,9 +964,7 @@ router.post(
           roomApartmentCode = roomCode;
         } else {
           // 2. Tra cứu trong BuildingArea (khu vực chung)
-          area = await prisma.buildingArea.findFirst({
-            where: { qrCode: cleanQr, isActive: true },
-          });
+          area = await findActiveArea(cleanQr);
           if (!area) {
             res.status(404).json({ success: false, message: 'Không tìm thấy phòng hoặc khu vực đang hoạt động với mã QR này.' });
             return;
@@ -980,8 +992,10 @@ router.post(
         finalLocation = `${area.locationLabel} • Khu vực: ${area.qrCode}`;
       }
 
-      const finalLocation =
-        locationNote || (asset ? asset.locationLabel : 'Khu vực chung tòa nhà');
+      if (!finalLocation || finalLocation.length > 300) {
+        res.status(400).json({ success: false, message: 'Vui lòng nhập vị trí sự cố hợp lệ.' });
+        return;
+      }
 
       const aiResult = await analyzeIncidentWithGemini(cleanDesc, finalLocation);
       const autoTitle =
@@ -1612,10 +1626,9 @@ router.patch(
   }
 );
 
-// ============================================================================
 // 12. POST /api/tickets/transcribe-voice - Chuyển đổi giọng nói tiếng Việt thành văn bản
 // ============================================================================
-router.post('/transcribe-voice', async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/transcribe-voice', authenticateJWT, authorizeRoles(Role.RESIDENT), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { audioBase64, mimeType } = req.body;
     if (!audioBase64 || typeof audioBase64 !== 'string') {
