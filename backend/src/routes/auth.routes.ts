@@ -5,9 +5,19 @@ import { Role } from '@prisma/client';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../db';
 import { createAndSaveOtp, verifyOtpCode, OtpServiceError } from '../services/otp.service';
-import { safeSendOtpEmail } from '../services/mail.service';
+import { hasOtpMailCredentials, safeSendOtpEmail } from '../services/mail.service';
 
 const router = Router();
+
+function checkOtpMailAvailable(res: Response): boolean {
+  if (hasOtpMailCredentials()) return true;
+  res.status(503).json({
+    success: false,
+    code: 'OTP_MAIL_UNAVAILABLE',
+    message: 'Dịch vụ email OTP chưa được cấu hình. Vui lòng liên hệ Ban quản lý.',
+  });
+  return false;
+}
 
 function maskEmail(email: string): string {
   const parts = email.split('@');
@@ -129,15 +139,13 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
     const isUnactivated = (user as any).isActivated === false || isTempUnactivated;
     if (isUnactivated) {
       let emailSent = false;
-      if (user.email) {
+      if (user.email && hasOtpMailCredentials()) {
         try {
           const { otp } = await createAndSaveOtp(user.email, 'ACCOUNT_ACTIVATION', 5);
           const mailResult = await safeSendOtpEmail(user.email, otp, 'ACCOUNT_ACTIVATION', user.role);
           emailSent = mailResult.success;
         } catch (otpErr: any) {
-          if (otpErr?.code === 'OTP_COOLDOWN_ACTIVE') {
-            emailSent = true;
-          }
+          if (otpErr?.code !== 'OTP_COOLDOWN_ACTIVE') console.warn('[AUTH_ACTIVATION_OTP_ERROR]', otpErr?.code);
         }
       }
 
@@ -493,6 +501,7 @@ router.post('/otp/request-activation', async (req: Request, res: Response): Prom
       return;
     }
 
+    if (!checkOtpMailAvailable(res)) return;
     const { otp } = await createAndSaveOtp(user.email, 'ACCOUNT_ACTIVATION', 5);
     const mailResult = await safeSendOtpEmail(user.email, otp, 'ACCOUNT_ACTIVATION', user.role);
 
@@ -672,12 +681,13 @@ router.post('/otp/request-reset', async (req: Request, res: Response): Promise<v
     }
 
     // Thông điệp bảo mật chung chống rò rỉ danh sách tài khoản (Email Enumeration Mitigation)
+    if (!checkOtpMailAvailable(res)) return;
     const genericSuccessMessage = 'Nếu thông tin hợp lệ và tồn tại trên hệ thống ResiFix, mã OTP đặt lại mật khẩu đã được gửi tới email đăng ký của bạn.';
 
     const user = await findUserForAuth({
       OR: [
         { phone: cleanInput },
-        { email: cleanInput.toLowerCase() },
+        { email: { equals: cleanInput.toLowerCase(), mode: 'insensitive' } },
       ],
     });
 
@@ -697,14 +707,20 @@ router.post('/otp/request-reset', async (req: Request, res: Response): Promise<v
 
       try {
         const { otp } = await createAndSaveOtp(user.email, 'PASSWORD_RESET', 5);
-        await safeSendOtpEmail(user.email, otp, 'PASSWORD_RESET');
+        const delivery = await safeSendOtpEmail(user.email, otp, 'PASSWORD_RESET', user.role);
+        if (!delivery.success) {
+          res.status(502).json({ success: false, message: 'Không thể gửi email OTP lúc này. Vui lòng thử lại sau.' });
+          return;
+        }
         maskedEmail = maskEmail(user.email);
       } catch (err: any) {
         if (err instanceof OtpServiceError && err.code === 'OTP_COOLDOWN_ACTIVE') {
           res.status(429).json({ success: false, message: err.message, code: err.code });
           return;
         }
-        console.warn('[AUTH] Không thể gửi OTP reset mật khẩu:', err);
+        console.warn('[AUTH_RESET_OTP_ERROR]', err?.code);
+        res.status(503).json({ success: false, message: 'Không thể tạo mã OTP lúc này. Vui lòng thử lại sau.' });
+        return;
       }
     }
 

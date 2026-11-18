@@ -7651,7 +7651,7 @@ function AppContent() {
                 const isAssigned = t.status === 'ASSIGNED';
                 const isHigh =
                   (t.finalPriority || t.aiSuggestedPriority) === 'HIGH';
-                const isFallbackWarning = t.isAiFallbackManual;
+                const needsManualReview = t.isAiFallbackManual || !t.aiSuggestedCategory;
 
                 return (
                   <TouchableOpacity
@@ -7711,7 +7711,7 @@ function AppContent() {
                     <Text style={styles.cardLocationText}>{t.locationNote}</Text>
 
                     <View style={[styles.cardTopRow, { marginTop: 10, marginBottom: 0 }]}>
-                      {isFallbackWarning && isPending ? (
+                      {needsManualReview && !t.finalCategory ? (
                         <View style={styles.bmbAiTimeoutTag}>
                           <Text style={styles.bmbAiTimeoutText}>
                             {translate("Cần phân loại thủ công")}</Text>
@@ -7719,7 +7719,7 @@ function AppContent() {
                       ) : (
                         <View style={styles.bmbAiPurpleMiniTag}>
                           <Text style={styles.bmbAiPurpleMiniText}>
-                            {translate("Gemini:")}{' '}
+                            {translate(t.finalCategory ? "BMB đã duyệt" : "Gemini:")}{' '}
                             {translate(CATEGORY_SHORT_VN[
                               t.finalCategory || t.aiSuggestedCategory
                             ] || 'Điện - Nước')}
@@ -7895,18 +7895,24 @@ function AppContent() {
                   <View style={styles.bmbGeminiPurpleCard}>
                     <View style={styles.cardTopRow}>
                       <Text style={styles.bmbGeminiCardTitle}>
-                        {translate("Gợi ý phân loại từ Gemini")}
+                        {translate(bmbSelectedTicket.isAiFallbackManual ? "Gợi ý theo từ khóa" : bmbSelectedTicket.aiSuggestedCategory ? "Gợi ý phân loại từ Gemini" : "Phân loại sự cố")}
                       </Text>
                       <View style={styles.bmbLatencyGreenPill}>
                         <Text style={styles.bmbLatencyGreenText}>
-                          {translate("Tự động")}
+                          {translate(bmbSelectedTicket.isAiFallbackManual || !bmbSelectedTicket.aiSuggestedCategory ? "Cần phân loại thủ công" : "Tự động")}
                         </Text>
                       </View>
                     </View>
 
                     <Text style={styles.bmbAiSummaryBullet}>
-                      {translate("Tóm tắt: ")}{bmbSelectedTicket.aiSummary || bmbSelectedTicket.title}
+                      {translate("Tóm tắt: ")}{bmbSelectedTicket.aiSummary?.replace(/^\[Trợ lý AI ResiFix\]\s*/, '') || bmbSelectedTicket.description || bmbSelectedTicket.title}
                     </Text>
+
+                    {bmbSelectedTicket.aiSuggestedCategory && bmbSelectedTicket.aiSuggestedPriority && (
+                      <Text style={styles.bmbRiskR1Hint}>
+                        {translate("Gợi ý ban đầu")} · {translate(CATEGORY_VN[bmbSelectedTicket.aiSuggestedCategory])} · {translate(PRIORITY_VN[bmbSelectedTicket.aiSuggestedPriority])}
+                      </Text>
+                    )}
 
                     <Text style={styles.fieldLabel}>{translate("Danh mục sự cố")}</Text>
                     <TouchableOpacity

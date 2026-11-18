@@ -23,6 +23,10 @@ interface SmtpConfig {
   from: string;
 }
 
+export function hasOtpMailCredentials(): boolean {
+  return Boolean(process.env.SMTP_USER?.trim() && process.env.SMTP_APP_PASSWORD?.trim());
+}
+
 /**
  * Đọc cấu hình SMTP an toàn từ process.env.
  * Tuyệt đối không log mật khẩu hoặc bí mật ra console.
@@ -54,12 +58,10 @@ function createMailTransporter(config: SmtpConfig): Transporter {
     host: config.host,
     port: config.port,
     secure: isSecure,
+    requireTLS: !isSecure,
     auth: {
       user: config.user,
       pass: config.pass,
-    },
-    tls: {
-      rejectUnauthorized: false,
     },
   });
 }

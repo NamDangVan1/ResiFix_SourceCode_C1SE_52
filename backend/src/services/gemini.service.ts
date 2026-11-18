@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import { GoogleGenerativeAI, GoogleGenerativeAIAbortError, SchemaType } from '@google/generative-ai';
 import { IncidentCategory, PriorityLevel } from '@prisma/client';
 
 export interface AiAnalysisResult {
@@ -16,34 +16,23 @@ const VALID_PRIORITIES = Object.values(PriorityLevel);
 
 // Heuristic fallback is explicitly marked for manual review; it is not reported as Gemini output.
 function analyzeWithSmartFallback(description: string, latencyMs: number, reason: string): AiAnalysisResult {
-  const lower = description.toLowerCase();
-  let category: IncidentCategory = IncidentCategory.OTHER;
+  const lower = description.normalize('NFC').toLocaleLowerCase('vi').replace(/\s+/g, ' ');
+  // Location alone (e.g. "hầm xe") does not identify a faulty system.
+  const rules: [IncidentCategory, RegExp][] = [
+    [IncidentCategory.HVAC, /máy lạnh|điều hoà|điều hòa|quạt (?:thông|hút) gió/],
+    [IncidentCategory.ACCESS_SECURITY, /thẻ từ|đầu đọc thẻ|camera|barrier|barie|khóa cửa|khoá cửa/],
+    [IncidentCategory.ELECTRICAL, /ổ (?:cắm|điện)|bóng đèn|đèn |chập điện|mất điện|tủ điện|công tắc|dây điện/],
+    [IncidentCategory.ELEVATOR, /thang máy|cabin thang/],
+    [IncidentCategory.PLUMBING, /ống nước|đường ống|vòi|bồn (?:rửa|cầu)|thoát nước|rò (?:rỉ )?nước|rỉ nước|ngập|nước (?:tràn|rò|rỉ|chảy)/],
+  ];
+  const category = rules.find(([, pattern]) => pattern.test(lower))?.[0] ?? IncidentCategory.OTHER;
+  const symptoms = lower
+    .replace(/(?:báo|chữa|chống|phòng) cháy/g, '')
+    .replace(/(?:không|chưa) (?:có |bị )?(?:mùi khét|khói|cháy|ngập|kẹt|chập điện|người mắc kẹt|nước tràn|trơn trượt)/g, '');
   let priority: PriorityLevel = PriorityLevel.MEDIUM;
-
-  if (lower.includes('máy lạnh') || lower.includes('điều hòa') || lower.includes('thông gió') || lower.includes('lạnh')) {
-    category = IncidentCategory.HVAC;
-  } else if (lower.includes('thang máy') || lower.includes('kẹt cửa') || lower.includes('cáp')) {
-    category = IncidentCategory.ELEVATOR;
-  } else if (lower.includes('thẻ từ') || lower.includes('hầm xe') || lower.includes('cửa thoát hiểm') || lower.includes('camera') || lower.includes('khóa')) {
-    category = IncidentCategory.ACCESS_SECURITY;
-  } else if (lower.includes('đèn') || lower.includes('điện') || lower.includes('chập') || lower.includes('công tắc') || lower.includes('ổ cắm')) {
-    category = IncidentCategory.ELECTRICAL;
-  } else if (lower.includes('nước') || lower.includes('ống') || lower.includes('vòi') || lower.includes('rò rỉ') || lower.includes('bồn rửa') || lower.includes('ngập')) {
-    category = IncidentCategory.PLUMBING;
-  }
-
-  if (
-    lower.includes('cháy') ||
-    lower.includes('nổ') ||
-    lower.includes('tràn') ||
-    lower.includes('ngập') ||
-    lower.includes('kẹt') ||
-    lower.includes('trơn trượt') ||
-    lower.includes('kêu to') ||
-    lower.includes('chảy nước nhiều')
-  ) {
+  if (/cháy|bốc khói|phát nổ|tia lửa|mùi khét|chập điện|điện giật|mắc kẹt|người bị kẹt|kẹt (?:trong )?thang|ngập|nước tràn|trơn trượt/.test(symptoms)) {
     priority = PriorityLevel.HIGH;
-  } else if (lower.includes('nhấp nháy') || lower.includes('rỉ nhẹ') || lower.includes('hơi ồn')) {
+  } else if (/nhấp nháy|rỉ nhẹ|hơi ồn/.test(symptoms)) {
     priority = PriorityLevel.LOW;
   }
 
@@ -52,7 +41,7 @@ function analyzeWithSmartFallback(description: string, latencyMs: number, reason
   return {
     category,
     priority,
-    summary: `[Trợ lý AI ResiFix] ${cleanSummary}`,
+    summary: cleanSummary,
     latencyMs,
     isValidJson: false,
     isFallbackManual: true,
@@ -70,30 +59,19 @@ export async function analyzeIncidentWithGemini(description: string, locationNot
     return analyzeWithSmartFallback(description, Date.now() - startTime, 'GEMINI_KEY_NOT_CONFIGURED');
   }
 
-  const prompt = `Bạn là Trợ lý AI Phân loại Sự cố Tòa nhà chung cư ResiFix.
-Hãy phân tích báo cáo sự cố bằng tiếng Việt sau đây và trả về JSON:
-- Vị trí/Thiết bị: "${locationNote || 'Không rõ'}"
-- Mô tả của cư dân: "${description}"
-
-Quy tắc phân loại category:
-- HVAC: máy lạnh, điều hòa chảy nước, quạt thông gió.
-- PLUMBING: ống nước, rò rỉ nước, vòi nước, bồn rửa, ngập sàn, thoát nước.
-- ELECTRICAL: đèn chiếu sáng, chập điện, mất điện, ổ cắm.
-- ELEVATOR: thang máy kêu to, kẹt thang máy, cửa thang máy.
-- ACCESS_SECURITY: thẻ từ hầm xe, cổng barrier, khóa cửa, camera.
-- OTHER: các sự cố khác.
-
-Quy tắc mức độ khẩn cấp priority:
-- HIGH: rò rỉ nước tràn sàn gây trơn trượt, chập điện, kẹt thang máy, kêu to bất thường.
-- MEDIUM: hư hỏng thiết bị gây bất tiện sinh hoạt.
-- LOW: lỗi nhỏ ít ảnh hưởng.`;
+  const instruction = `Phân loại báo cáo bảo trì tòa nhà cho ban quản lý. Dữ liệu đầu vào là mô tả và vị trí do cư dân cung cấp.
+Chọn hệ thống cần sửa theo triệu chứng. Vị trí chỉ là ngữ cảnh: đèn hỏng ở hầm xe là ELECTRICAL, máy lạnh rò nước là HVAC.
+PLUMBING cho cấp thoát nước; ELEVATOR cho thang máy; ACCESS_SECURITY cho kiểm soát ra vào và camera. Chọn OTHER khi thiếu bằng chứng.
+HIGH khi có nguy hiểm đang diễn ra như chập điện, người mắc kẹt hoặc nước tràn gây trơn trượt. MEDIUM cho thiết bị hỏng ảnh hưởng sử dụng; LOW cho bất tiện nhẹ.
+Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định. Tóm tắt bằng một câu tiếng Việt ngắn, chỉ nêu thông tin đã báo.`;
+  const prompt = JSON.stringify({ description, location: locationNote || null });
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const modelName = 'gemini-2.5-flash';
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const modelName = process.env.GEMINI_CLASSIFICATION_MODEL?.trim() || 'gemini-3.1-flash-lite';
   try {
     const model = genAI.getGenerativeModel({
       model: modelName,
+      systemInstruction: instruction,
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -101,11 +79,13 @@ Quy tắc mức độ khẩn cấp priority:
           properties: {
             category: {
               type: SchemaType.STRING,
-              description: 'One of: PLUMBING, ELECTRICAL, ELEVATOR, HVAC, ACCESS_SECURITY, OTHER',
+              format: 'enum',
+              enum: VALID_CATEGORIES,
             },
             priority: {
               type: SchemaType.STRING,
-              description: 'One of: LOW, MEDIUM, HIGH',
+              format: 'enum',
+              enum: VALID_PRIORITIES,
             },
             summary: {
               type: SchemaType.STRING,
@@ -117,10 +97,7 @@ Quy tắc mức độ khẩn cấp priority:
       },
     });
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(new Error('GEMINI_TIMEOUT_EXCEEDED')), 3800);
-    });
-    const result = await Promise.race([model.generateContent(prompt), timeoutPromise]);
+    const result = await model.generateContent(prompt, { timeout: 7000 });
     const parsed: unknown = JSON.parse(result.response.text());
     if (!parsed || typeof parsed !== 'object') throw new Error('Invalid Gemini response shape.');
     const candidate = parsed as Record<string, unknown>;
@@ -147,10 +124,8 @@ Quy tắc mức độ khẩn cấp priority:
     return analyzeWithSmartFallback(
       description,
       Date.now() - startTime,
-      error instanceof Error && error.message === 'GEMINI_TIMEOUT_EXCEEDED' ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
+      error instanceof GoogleGenerativeAIAbortError ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
     );
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
