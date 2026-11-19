@@ -95,7 +95,11 @@ model IncidentTicket {
   resolvedConfirmedAt DateTime?
   ratingStars         Int?
   ratingComment       String?
-  residentId          String
+  residentId          String?
+  isAnonymous         Boolean             @default(false)
+  locationVerificationStatus String?     // "VERIFIED" | "UNVERIFIED"
+  locationVerificationLabel  String?     // "Đã xác minh vị trí" | "Chưa xác minh vị trí"
+  locationVerificationReason String?     // Lý do đối soát vị trí
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   areaId              String?
@@ -103,7 +107,7 @@ model IncidentTicket {
   area                BuildingArea?       @relation(fields: [areaId], references: [id])
   assignedTech        User?               @relation("TechnicianTickets", fields: [assignedTechId], references: [id])
   bmbApprovedBy       User?               @relation("BmbApprovedTickets", fields: [bmbApprovedById], references: [id])
-  resident            User                @relation("ResidentTickets", fields: [residentId], references: [id])
+  resident            User?               @relation("ResidentTickets", fields: [residentId], references: [id])
   apartment           Apartment?          @relation(fields: [apartmentId], references: [id], onUpdate: NoAction, map: "fk_ticket_apartment")
   notifications       Notification[]
   overtimes           OvertimeRequest[]
@@ -117,6 +121,7 @@ model IncidentTicket {
   @@index([assignedTechId, status])
   @@index([ticketCode])
   @@index([apartmentId], map: "idx_ticket_apartment")
+  @@index([isAnonymous])
 }
 
 model TicketMedia {
@@ -126,10 +131,10 @@ model TicketMedia {
   publicId     String?
   mediaType    MediaType
   caption      String?
-  uploadedById String
+  uploadedById String?
   createdAt    DateTime       @default(now())
   ticket       IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  uploadedBy   User           @relation(fields: [uploadedById], references: [id])
+  uploadedBy   User?          @relation(fields: [uploadedById], references: [id])
 
   @@index([ticketId, mediaType])
 }
@@ -141,9 +146,9 @@ model TicketStatusLog {
   toStatus    TicketStatus
   title       String
   note        String?
-  changedById String
+  changedById String?
   createdAt   DateTime       @default(now())
-  changedBy   User           @relation(fields: [changedById], references: [id])
+  changedBy   User?          @relation(fields: [changedById], references: [id])
   ticket      IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])

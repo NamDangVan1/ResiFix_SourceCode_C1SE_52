@@ -61,4 +61,52 @@ router.post('/', authenticateJWT, async (req: AuthRequest, res: Response): Promi
   }
 });
 
+// POST /api/upload/anonymous - Upload ảnh hiện trường sự cố dành cho khách vãng lai quét QR
+router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const imageBase64 = body.imageBase64;
+  const folder = body.folder;
+
+  if (typeof imageBase64 !== 'string' || !IMAGE_DATA_URI.test(imageBase64)) {
+    res.status(400).json({ success: false, message: 'Ảnh phải là dữ liệu JPEG, PNG hoặc WebP hợp lệ.' });
+    return;
+  }
+  if (imageBase64.length > 9_500_000) {
+    res.status(413).json({ success: false, message: 'Ảnh vượt quá dung lượng cho phép.' });
+    return;
+  }
+  if (folder !== 'incident_scene') {
+    res.status(400).json({ success: false, message: 'Khách chỉ được tải lên ảnh hiện trường sự cố.' });
+    return;
+  }
+
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (!cloudName || !apiKey || !apiSecret) {
+    res.status(503).json({ success: false, message: 'Dịch vụ lưu ảnh chưa được cấu hình.' });
+    return;
+  }
+
+  try {
+    cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret });
+    const uploadResult = await cloudinary.uploader.upload(imageBase64, {
+      folder: 'resifix_c1se52/incident_scene_anonymous',
+      transformation: [{ width: 1080, crop: 'limit', quality: 'auto:good', fetch_format: 'auto' }],
+      resource_type: 'image',
+    });
+
+    res.status(201).json({
+      success: true,
+      mode: 'CLOUDINARY_CLOUD',
+      message: 'Đã tải ảnh lên Cloudinary thành công.',
+      imageUrl: uploadResult.secure_url,
+      publicId: uploadResult.public_id,
+    });
+  } catch (error) {
+    console.error('Lỗi upload ảnh hiện trường ẩn danh:', error);
+    res.status(502).json({ success: false, message: 'Không thể tải ảnh lên máy chủ. Vui lòng thử lại.' });
+  }
+});
+
 export default router;

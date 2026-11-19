@@ -7,6 +7,7 @@ import {
   Alert,
   Modal,
   Linking,
+  AppState,
   useWindowDimensions,
 } from 'react-native';
 import {
@@ -27,6 +28,7 @@ import VoiceRecorderButton from './VoiceRecorderButton';
 import { QrCodeView, printQrCode, downloadQrSvg } from './QrCodeView';
 import { ScreenTransition, AnimatedModalContent } from './Transitions';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ============================================================================
@@ -611,6 +613,47 @@ function AppContent() {
   const [reportDesc, setReportDesc] = useState('');
   const [isVoiceUsed, setIsVoiceUsed] = useState(false);
   const [reportVoiceBusy, setReportVoiceBusy] = useState(false);
+
+  // 5.1. State Báo cáo sự cố ẩn danh qua QR (Khách vãng lai chưa đăng nhập)
+  const [guestQrModalVisible, setGuestQrModalVisible] = useState<boolean>(false);
+  const [isAnonymousReporting, setIsAnonymousReporting] = useState<boolean>(false);
+  const [anonymousArea, setAnonymousArea] = useState<{
+    id: string;
+    qrCode: string;
+    areaName: string;
+    category?: string;
+    locationLabel: string;
+    buildingBlock: string;
+    floor?: string;
+    buildingName: string;
+    buildingAddress: string;
+    hasBoundaryConfig: boolean;
+  } | null>(null);
+  const [anonymousTitle, setAnonymousTitle] = useState<string>('');
+  const [anonymousDesc, setAnonymousDesc] = useState<string>('');
+  const [anonymousPhotos, setAnonymousPhotos] = useState<string[]>([]);
+  const [anonymousUploading, setAnonymousUploading] = useState<boolean>(false);
+  const [anonymousVoiceBusy, setAnonymousVoiceBusy] = useState<boolean>(false);
+  const [anonymousIsVoiceUsed, setAnonymousIsVoiceUsed] = useState<boolean>(false);
+  const [anonymousLocationCoords, setAnonymousLocationCoords] = useState<{
+    latitude: number;
+    longitude: number;
+    accuracy: number;
+  } | null>(null);
+  const [anonymousGpsStatus, setAnonymousGpsStatus] = useState<
+    'IDLE' | 'FETCHING' | 'ACQUIRED' | 'DENIED' | 'BLOCKED' | 'SERVICE_DISABLED' | 'FAILED' | 'SKIPPED'
+  >('IDLE');
+  const [anonymousCanAskAgain, setAnonymousCanAskAgain] = useState<boolean>(true);
+  const [anonymousLocationError, setAnonymousLocationError] = useState<string | null>(null);
+  const [anonymousReceipt, setAnonymousReceipt] = useState<{
+    ticketCode: string;
+    status: string;
+    verificationStatus: string;
+    verificationLabel: string;
+    verificationReason: string;
+    areaName: string;
+    buildingName: string;
+  } | null>(null);
 
   // 6. State Chi tiết Sự cố (Cư dân & Kỹ thuật viên)
   const [activeTicket, setActiveTicket] = useState<any | null>(null);
@@ -2109,6 +2152,22 @@ function AppContent() {
   };
 
   const getDeviceLocation = async (): Promise<{ latitude: number; longitude: number; accuracy: number } | null> => {
+    try {
+      const perm = await Location.getForegroundPermissionsAsync();
+      if (perm.granted) {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (loc?.coords) {
+          return {
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+            accuracy: Math.round(loc.coords.accuracy || 10),
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('Location.getCurrentPositionAsync fallback warning:', err);
+    }
+
     if (typeof navigator !== 'undefined' && navigator.geolocation) {
       return new Promise((resolve) => {
         navigator.geolocation.getCurrentPosition(
@@ -3659,11 +3718,341 @@ function AppContent() {
 
 
 
-  // Quét QR tự động điền thiết bị (Màn hình 02 Cư dân)
+  // ============================================================================
+  // QUẢN LÝ BÁO CÁO SỰ CỐ ẨN DANH QUA QR (KHÁCH VÃNG LAI CHƯA ĐĂNG NHẬP)
+  // ============================================================================
+  const requestGuestLocation = async (userInitiated = false) => {
+    setAnonymousGpsStatus('FETCHING');
+    setAnonymousLocationError(null);
 
-  // Hàm xử lý khi Camera quét được mã QR thiết bị (FR05, US-09)
+    try {
+      // 1. Đọc trạng thái quyền vị trí foreground hiện tại bằng API expo-location
+      let perm = await Location.getForegroundPermissionsAsync();
+
+      // 2. Nếu chưa được cấp quyền
+      if (!perm.granted) {
+        if (perm.canAskAgain) {
+          setAnonymousCanAskAgain(true);
+          // Yêu cầu quyền nếu người dùng chủ động bấm hoặc hệ thống chưa hỏi lần nào (UNDETERMINED)
+          if (userInitiated || perm.status === Location.PermissionStatus.UNDETERMINED) {
+            perm = await Location.requestForegroundPermissionsAsync();
+          } else {
+            setAnonymousGpsStatus('DENIED');
+            setAnonymousLocationCoords(null);
+            return;
+          }
+        } else {
+          // canAskAgain là false: Người dùng đã từ chối vĩnh viễn hoặc hệ thống chặn hỏi lại
+          setAnonymousCanAskAgain(false);
+          setAnonymousGpsStatus('BLOCKED');
+          setAnonymousLocationCoords(null);
+          if (userInitiated) {
+            Alert.alert(
+              translate('Quyền vị trí đã bị chặn'),
+              translate(
+                'Hệ điều hành đã chặn yêu cầu quyền vị trí. Vui lòng nhấn "Mở Cài đặt" để cho phép ResiFix truy cập vị trí.'
+              ),
+              [
+                { text: translate('Hủy'), style: 'cancel' },
+                { text: translate('Mở Cài đặt'), onPress: () => Linking.openSettings() },
+              ]
+            );
+          }
+          return;
+        }
+      }
+
+      // 3. Kiểm tra kết quả sau khi xin quyền
+      if (!perm.granted) {
+        setAnonymousCanAskAgain(perm.canAskAgain);
+        setAnonymousLocationCoords(null);
+        if (!perm.canAskAgain) {
+          setAnonymousGpsStatus('BLOCKED');
+        } else {
+          setAnonymousGpsStatus('DENIED');
+        }
+        return;
+      }
+
+      setAnonymousCanAskAgain(true);
+
+      // 4. Kiểm tra dịch vụ định vị (GPS) trên thiết bị có đang bật không
+      let servicesEnabled = true;
+      try {
+        servicesEnabled = await Location.hasServicesEnabledAsync();
+      } catch (svcErr) {
+        console.warn('Location.hasServicesEnabledAsync check warning:', svcErr);
+      }
+
+      if (!servicesEnabled) {
+        setAnonymousGpsStatus('SERVICE_DISABLED');
+        setAnonymousLocationCoords(null);
+        setAnonymousLocationError(
+          translate('Dịch vụ vị trí (GPS) trên thiết bị đang tắt. Vui lòng bật GPS để xác minh vị trí.')
+        );
+        if (userInitiated) {
+          Alert.alert(
+            translate('Dịch vụ vị trí đang tắt'),
+            translate('Vui lòng bật định vị GPS trong cài đặt thiết bị để ResiFix có thể xác minh vị trí của bạn.')
+          );
+        }
+        return;
+      }
+
+      // 5. Đã có quyền và GPS bật: Lấy tọa độ hiện tại của thiết bị
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      if (loc?.coords) {
+        const coords = {
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+          accuracy: Math.round(loc.coords.accuracy || 10),
+        };
+        setAnonymousLocationCoords(coords);
+        setAnonymousGpsStatus('ACQUIRED');
+        setAnonymousLocationError(null);
+        showToast(translate('📍 Đã ghi nhận vị trí thiết bị (Sẵn sàng đối chiếu phạm vi khi gửi)'));
+      } else {
+        throw new Error('Không thể lấy tọa độ từ thiết bị.');
+      }
+    } catch (err: any) {
+      console.warn('Lỗi lấy vị trí khách vãng lai:', err?.message || err);
+      setAnonymousLocationCoords(null);
+      setAnonymousGpsStatus('FAILED');
+      setAnonymousLocationError(
+        translate('Không thể lấy tọa độ hiện tại. Vui lòng kiểm tra GPS và thử lại.')
+      );
+      if (userInitiated) {
+        showToast(translate('⚠️ Không thể lấy tọa độ. Báo cáo vẫn được gửi bình thường.'));
+      }
+    }
+  };
+
+  // Tự động kiểm tra lại quyền vị trí khi người dùng quay lại app từ màn hình Cài đặt hệ thống
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (nextAppState) => {
+      if (nextAppState === 'active') {
+        if (isAnonymousReporting && anonymousArea && !anonymousLocationCoords) {
+          try {
+            const perm = await Location.getForegroundPermissionsAsync();
+            if (perm.granted) {
+              await requestGuestLocation(false);
+            } else {
+              setAnonymousCanAskAgain(perm.canAskAgain);
+              if (!perm.canAskAgain) {
+                setAnonymousGpsStatus('BLOCKED');
+              }
+            }
+          } catch (err) {
+            console.warn('AppState change permission check warning:', err);
+          }
+        }
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [isAnonymousReporting, anonymousArea, anonymousLocationCoords]);
+
+  const handlePickAnonymousPhoto = async (fromCamera: boolean) => {
+    try {
+      if (anonymousPhotos.length >= 3) {
+        Alert.alert(translate('Thông báo'), translate('Bạn chỉ có thể đính kèm tối đa 3 ảnh hiện trường.'));
+        return;
+      }
+      const { status } = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (status !== 'granted') {
+        Alert.alert(
+          translate('Quyền truy cập'),
+          translate('Vui lòng cấp quyền truy cập để chụp hoặc chọn ảnh hiện trường.')
+        );
+        return;
+      }
+
+      const result = fromCamera
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            quality: 0.7,
+            base64: true,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            quality: 0.7,
+            base64: true,
+          });
+
+      if (result.canceled || !result.assets || !result.assets[0]?.base64) return;
+
+      setAnonymousUploading(true);
+      const asset = result.assets[0];
+      const mimeType = asset.mimeType || 'image/jpeg';
+      const base64DataUri = `data:${mimeType};base64,${asset.base64}`;
+
+      const res = await fetch(`${API_BASE_URL}/upload/anonymous`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'bypass-tunnel-reminder': 'true',
+        },
+        body: JSON.stringify({
+          imageBase64: base64DataUri,
+          folder: 'incident_scene',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.imageUrl) {
+        setAnonymousPhotos((prev) => [...prev, data.imageUrl]);
+        showToast(translate('Đã tải ảnh hiện trường thành công!'));
+      } else {
+        Alert.alert(translate('Lỗi tải ảnh'), translate(data.message || 'Không thể tải ảnh lên máy chủ.'));
+      }
+    } catch {
+      Alert.alert(translate('Lỗi'), translate('Lỗi khi tải ảnh hiện trường. Vui lòng thử lại.'));
+    } finally {
+      setAnonymousUploading(false);
+    }
+  };
+
+  const handleGuestSubmitReport = async () => {
+    if (!anonymousArea) {
+      Alert.alert(translate('Thông báo'), translate('Vui lòng quét mã QR khu vực sự cố.'));
+      return;
+    }
+    if (anonymousDesc.trim().length < 10) {
+      Alert.alert(translate('Mô tả quá ngắn'), translate('Mô tả sự cố cần tối thiểu 10 ký tự để kỹ thuật viên nắm rõ.'));
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const payload: any = {
+        qrCode: anonymousArea.qrCode,
+        title: anonymousTitle.trim() || undefined,
+        description: anonymousDesc.trim(),
+        isVoiceInput: anonymousIsVoiceUsed,
+        imageUrls: anonymousPhotos,
+      };
+
+      if (anonymousLocationCoords && typeof anonymousLocationCoords.latitude === 'number') {
+        payload.locationCoords = {
+          latitude: anonymousLocationCoords.latitude,
+          longitude: anonymousLocationCoords.longitude,
+          accuracy: anonymousLocationCoords.accuracy,
+        };
+      }
+
+      const res = await fetch(`${API_BASE_URL}/tickets/anonymous`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'bypass-tunnel-reminder': 'true',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success && data.ticket) {
+        setAnonymousReceipt({
+          ticketCode: data.ticket.ticketCode,
+          status: data.ticket.status,
+          verificationStatus: data.locationVerification?.status || 'UNVERIFIED',
+          verificationLabel: data.locationVerification?.label || 'Chưa xác minh vị trí',
+          verificationReason: data.locationVerification?.reason || '',
+          areaName: anonymousArea.areaName,
+          buildingName: anonymousArea.buildingName,
+        });
+        showToast(translate(data.message || 'Tiếp nhận báo cáo thành công!'));
+      } else {
+        Alert.alert(
+          translate('Không thể gửi báo cáo'),
+          translate(data.message || 'Đã có lỗi xảy ra. Vui lòng thử lại.')
+        );
+      }
+    } catch {
+      Alert.alert(
+        translate('Lỗi kết nối'),
+        translate('Không thể kết nối đến máy chủ. Vui lòng kiểm tra mạng và thử lại.')
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Quét QR tự động điền thiết bị (Màn hình 02 Cư dân) & Khách vãng lai báo sự cố qua QR
   const handleQrCodeDetected = async (rawCode: string) => {
     const cleanCode = rawCode.trim().toUpperCase();
+
+    // 1. NẾU LÀ KHÁCH VÃNG LAI CHƯA ĐĂNG NHẬP
+    if (!token) {
+      try {
+        setLoading(true);
+        const response = await fetch(
+          `${API_BASE_URL}/tickets/anonymous/qr/${encodeURIComponent(cleanCode)}`,
+          {
+            headers: {
+              'bypass-tunnel-reminder': 'true',
+            },
+          }
+        );
+
+        const data = await response.json();
+        if (response.ok && data.success && data.area) {
+          setAnonymousArea({
+            id: data.area.id,
+            qrCode: data.area.qrCode,
+            areaName: data.area.areaName,
+            category: data.area.category,
+            locationLabel: data.area.locationLabel,
+            buildingBlock: data.area.buildingBlock,
+            floor: data.area.floor,
+            buildingName: data.building?.buildingName || 'Tòa nhà ResiFix',
+            buildingAddress: data.building?.buildingAddress || '',
+            hasBoundaryConfig: Boolean(data.building?.hasBoundaryConfig),
+          });
+          setAnonymousTitle('');
+          setAnonymousDesc('');
+          setAnonymousPhotos([]);
+          setAnonymousReceipt(null);
+          setAnonymousLocationCoords(null);
+          setAnonymousGpsStatus('IDLE');
+          setGuestQrModalVisible(false);
+          setQrModalVisible(false);
+          setIsAnonymousReporting(true);
+          showToast(translate(`✅ Đã nhận diện khu vực: ${data.area.areaName}`));
+
+          // Tự động yêu cầu quyền vị trí và giải thích mục đích đối chiếu phạm vi tòa nhà
+          setTimeout(() => {
+            requestGuestLocation();
+          }, 400);
+          return;
+        }
+
+        // Mã QR không hợp lệ hoặc khu vực không còn hoạt động: Thông báo và cho khách quét lại
+        Alert.alert(
+          translate('Mã QR không hợp lệ'),
+          translate(
+            data.message ||
+              'Mã QR không hợp lệ hoặc khu vực hiện không còn hoạt động. Vui lòng quét lại mã QR tại khu vực sự cố.'
+          )
+        );
+      } catch {
+        Alert.alert(
+          translate('Lỗi kết nối máy chủ'),
+          translate('Không thể kiểm tra mã QR khu vực. Vui lòng kiểm tra lại kết nối mạng và thử lại.')
+        );
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // 2. NẾU LÀ CƯ DÂN ĐÃ ĐĂNG NHẬP (GIỮ NGUYÊN TOÀN VẸN 100%)
     try {
       setScannedAsset(null);
       setLoading(true);
@@ -4523,8 +4912,675 @@ function AppContent() {
             </AnimatedModalContent>
           </View>
         </Modal>
+
+        {/* Modal Quét QR dành cho Khách vãng lai báo cáo sự cố (Không cần đăng nhập) */}
+        {guestQrModalVisible && (
+          <QrScannerModal
+            visible
+            onClose={() => setGuestQrModalVisible(false)}
+            onScannedCode={handleQrCodeDetected}
+            roleTitle={translate("Quét mã QR Khu vực báo sự cố (Khách vãng lai)")}
+          />
+        )}
       </>
     );
+
+    // ========================================================================
+    // MÀN HÌNH BÁO CÁO SỰ CỐ ẨN DANH (KHÁCH QUÉT MÃ QR KHU VỰC)
+    // ========================================================================
+    if (isAnonymousReporting && anonymousArea) {
+      if (anonymousReceipt) {
+        return (
+          <SafeAreaView style={[styles.screenBg, { backgroundColor: '#F8FAFC' }]}>
+            <ThemedStatusBar barStyle="dark-content" />
+            <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center', justifyContent: 'center', minHeight: '100%' }}>
+              <View style={{
+                backgroundColor: '#FFFFFF',
+                borderRadius: 16,
+                padding: 24,
+                width: '100%',
+                maxWidth: 480,
+                alignItems: 'center',
+                borderWidth: 1,
+                borderColor: '#E2E8F0',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.08,
+                shadowRadius: 12,
+                elevation: 4,
+              }}>
+                <View style={{
+                  width: 72,
+                  height: 72,
+                  borderRadius: 36,
+                  backgroundColor: '#ECFDF5',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginBottom: 16,
+                }}>
+                  <Text style={{ fontSize: 36 }}>✅</Text>
+                </View>
+
+                <Text style={{ fontSize: 20, fontWeight: '800', color: '#0F172A', textAlign: 'center', marginBottom: 8 }}>
+                  {translate('Tiếp nhận báo cáo thành công!')}
+                </Text>
+
+                <Text style={{ fontSize: 13.5, color: '#64748B', textAlign: 'center', lineHeight: 20, marginBottom: 20 }}>
+                  {translate('Cảm ơn bạn đã hỗ trợ Ban quản lý phát hiện sự cố. Báo cáo của bạn đã được tiếp nhận và sẽ sớm được xử lý.')}
+                </Text>
+
+                <View style={{
+                  width: '100%',
+                  backgroundColor: '#F1F5F9',
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 20,
+                  gap: 10,
+                }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{translate('Mã sự cố:')}</Text>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: '#2563EB' }}>{anonymousReceipt.ticketCode}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{translate('Khu vực:')}</Text>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#0F172A', flex: 1, textAlign: 'right' }}>
+                      {anonymousReceipt.areaName}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{translate('Tòa nhà:')}</Text>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: '#334155' }}>
+                      {anonymousReceipt.buildingName}
+                    </Text>
+                  </View>
+                  <View style={{ borderTopWidth: 1, borderTopColor: '#E2E8F0', paddingTop: 8, marginTop: 2 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{translate('Trạng thái vị trí:')}</Text>
+                      {anonymousReceipt.verificationStatus === 'VERIFIED' ? (
+                        <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                          <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                        </View>
+                      ) : (
+                        <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: '#FDE68A' }}>
+                          <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic', lineHeight: 17 }}>
+                      {anonymousReceipt.verificationReason}
+                    </Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#2563EB',
+                    width: '100%',
+                    paddingVertical: 14,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                    marginBottom: 10,
+                  }}
+                  onPress={() => {
+                    setIsAnonymousReporting(false);
+                    setAnonymousArea(null);
+                    setAnonymousReceipt(null);
+                  }}
+                >
+                  <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 15 }}>
+                    {translate('Quay về trang đăng nhập')}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#FFFFFF',
+                    borderWidth: 1,
+                    borderColor: '#CBD5E1',
+                    width: '100%',
+                    paddingVertical: 12,
+                    borderRadius: 10,
+                    alignItems: 'center',
+                  }}
+                  onPress={() => {
+                    setAnonymousReceipt(null);
+                    setGuestQrModalVisible(true);
+                  }}
+                >
+                  <Text style={{ color: '#334155', fontWeight: '600', fontSize: 14 }}>
+                    📷 {translate('Báo cáo sự cố khác (Quét QR)')}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+            {renderAuthModals()}
+          </SafeAreaView>
+        );
+      }
+
+      // Màn hình Form điền thông tin sự cố ẩn danh
+      return (
+        <SafeAreaView style={[styles.screenBg, { backgroundColor: '#F8FAFC' }]}>
+          <ThemedStatusBar barStyle="dark-content" />
+          <View style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            paddingHorizontal: 16,
+            paddingVertical: 14,
+            backgroundColor: '#FFFFFF',
+            borderBottomWidth: 1,
+            borderBottomColor: '#E2E8F0',
+          }}>
+            <TouchableOpacity
+              onPress={() => {
+                setIsAnonymousReporting(false);
+                setAnonymousArea(null);
+              }}
+              style={{ flexDirection: 'row', alignItems: 'center' }}
+            >
+              <Text style={{ fontSize: 18, color: '#2563EB', marginRight: 6 }}>←</Text>
+              <Text style={{ fontSize: 14, color: '#2563EB', fontWeight: '600' }}>{translate('Đăng nhập')}</Text>
+            </TouchableOpacity>
+
+            <View style={{ alignItems: 'center' }}>
+              <Text style={{ fontSize: 15, fontWeight: '800', color: '#0F172A' }}>
+                {translate('Báo cáo sự cố ẩn danh')}
+              </Text>
+              <Text style={{ fontSize: 11, color: '#64748B' }}>
+                {translate('Khách vãng lai (Không cần tài khoản)')}
+              </Text>
+            </View>
+
+            <TouchableOpacity onPress={() => setGuestQrModalVisible(true)}>
+              <Text style={{ fontSize: 13, color: '#059669', fontWeight: '700' }}>📷 {translate('Quét lại')}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 100 }}>
+            {/* Card 1: Khu vực đã quét mã QR */}
+            <View style={{
+              backgroundColor: '#FFFFFF',
+              borderRadius: 12,
+              padding: 16,
+              marginBottom: 14,
+              borderWidth: 1,
+              borderColor: '#E2E8F0',
+            }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontSize: 16 }}>🏷️</Text>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: '#0F172A' }}>
+                    {translate('Khu vực gặp sự cố (Tự động từ mã QR)')}
+                  </Text>
+                </View>
+                <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                  <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700' }}>✓ {anonymousArea.qrCode}</Text>
+                </View>
+              </View>
+
+              <Text style={{ fontSize: 16, fontWeight: '800', color: '#1E293B', marginBottom: 4 }}>
+                {anonymousArea.areaName}
+              </Text>
+              <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 6 }}>
+                📍 {anonymousArea.locationLabel}
+              </Text>
+              <Text style={{ fontSize: 12, color: '#475569' }}>
+                🏢 {translate('Tòa nhà:')} <Text style={{ fontWeight: '600' }}>{anonymousArea.buildingName}</Text>
+                {anonymousArea.buildingBlock ? ` • ${anonymousArea.buildingBlock}` : ''}
+                {anonymousArea.floor ? ` • Tầng ${anonymousArea.floor}` : ''}
+              </Text>
+            </View>
+
+            {/* Card 2: Yêu cầu quyền vị trí & Giải thích phạm vi ranh giới */}
+            <View
+              style={{
+                backgroundColor: '#FFFFFF',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 14,
+                borderWidth: 1,
+                borderColor:
+                  anonymousGpsStatus === 'ACQUIRED'
+                    ? '#A7F3D0'
+                    : anonymousGpsStatus === 'BLOCKED'
+                      ? '#FECACA'
+                      : anonymousGpsStatus === 'SERVICE_DISABLED' || anonymousGpsStatus === 'FAILED'
+                        ? '#FDE68A'
+                        : '#E2E8F0',
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: 8,
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontSize: 16 }}>📍</Text>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: '#0F172A' }}>
+                    {translate('Xác minh vị trí thiết bị')}
+                  </Text>
+                </View>
+
+                {anonymousGpsStatus === 'FETCHING' && (
+                  <ActivityIndicator size="small" color="#2563EB" />
+                )}
+                {anonymousGpsStatus === 'ACQUIRED' && (
+                  <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, color: '#059669', fontWeight: '700' }}>✓ {translate('Đã có tọa độ')}</Text>
+                  </View>
+                )}
+                {anonymousGpsStatus === 'BLOCKED' && (
+                  <View style={{ backgroundColor: '#FEF2F2', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, color: '#DC2626', fontWeight: '700' }}>🚫 {translate('Bị chặn hỏi lại')}</Text>
+                  </View>
+                )}
+                {anonymousGpsStatus === 'SERVICE_DISABLED' && (
+                  <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, color: '#D97706', fontWeight: '700' }}>⚠️ {translate('GPS đang tắt')}</Text>
+                  </View>
+                )}
+                {(anonymousGpsStatus === 'DENIED' || anonymousGpsStatus === 'IDLE' || anonymousGpsStatus === 'SKIPPED') && (
+                  <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, color: '#D97706', fontWeight: '700' }}>⚠️ {translate('Chưa cấp quyền')}</Text>
+                  </View>
+                )}
+                {anonymousGpsStatus === 'FAILED' && (
+                  <View style={{ backgroundColor: '#FEF2F2', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, color: '#DC2626', fontWeight: '700' }}>⚠️ {translate('Lỗi định vị')}</Text>
+                  </View>
+                )}
+              </View>
+
+              <Text style={{ fontSize: 12.5, color: '#64748B', lineHeight: 18, marginBottom: 10 }}>
+                {translate(
+                  'Vị trí hiện tại dùng để xác minh bạn có đang ở trong khuôn viên tòa nhà hay không. Bạn vẫn có thể gửi báo cáo nếu bỏ qua hoặc từ chối cấp quyền.'
+                )}
+              </Text>
+
+              {anonymousGpsStatus === 'FETCHING' && (
+                <View style={{ backgroundColor: '#EFF6FF', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#1D4ED8' }}>
+                    {translate('Đang yêu cầu quyền và định vị...')}
+                  </Text>
+                </View>
+              )}
+
+              {anonymousGpsStatus === 'ACQUIRED' && (
+                <View style={{ backgroundColor: '#F0FDF4', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#BBF7D0', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#166534', fontWeight: '600' }}>
+                    {translate('Đã ghi nhận vị trí thiết bị (Sẵn sàng đối chiếu phạm vi khi gửi)')}
+                    {anonymousLocationCoords?.accuracy ? ` • Sai số ~${anonymousLocationCoords.accuracy}m` : ''}
+                  </Text>
+                </View>
+              )}
+
+              {anonymousGpsStatus === 'BLOCKED' && (
+                <View style={{ backgroundColor: '#FEF2F2', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FECACA', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#B91C1C' }}>
+                    {translate(
+                      'Quyền vị trí đã bị tắt trong Cài đặt hệ thống. Báo cáo vẫn được gửi bình thường ở trạng thái Chưa xác minh vị trí.'
+                    )}
+                  </Text>
+                </View>
+              )}
+
+              {anonymousGpsStatus === 'SERVICE_DISABLED' && (
+                <View style={{ backgroundColor: '#FFFBEB', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FDE68A', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#B45309' }}>
+                    {anonymousLocationError ||
+                      translate('Dịch vụ vị trí (GPS) trên thiết bị đang tắt. Vui lòng bật GPS để xác minh vị trí.')}
+                  </Text>
+                </View>
+              )}
+
+              {anonymousGpsStatus === 'FAILED' && (
+                <View style={{ backgroundColor: '#FFFBEB', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FDE68A', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#B45309' }}>
+                    {anonymousLocationError ||
+                      translate('Không thể lấy tọa độ hiện tại. Vui lòng kiểm tra GPS và thử lại.')}
+                  </Text>
+                </View>
+              )}
+
+              {(anonymousGpsStatus === 'DENIED' || anonymousGpsStatus === 'IDLE') && (
+                <View style={{ backgroundColor: '#FFFBEB', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FDE68A', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#B45309' }}>
+                    {translate('Chưa cấp quyền vị trí (Báo cáo sẽ được tiếp nhận ở trạng thái Chưa xác minh vị trí)')}
+                  </Text>
+                </View>
+              )}
+
+              {anonymousGpsStatus === 'SKIPPED' && (
+                <View style={{ backgroundColor: '#F8FAFC', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#64748B' }}>
+                    {translate('Bạn đã chọn bỏ qua bước vị trí. Báo cáo sẽ được tiếp nhận ở trạng thái Chưa xác minh vị trí.')}
+                  </Text>
+                </View>
+              )}
+
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                {anonymousGpsStatus === 'BLOCKED' ? (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#FEF2F2',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1.5,
+                      borderColor: '#F87171',
+                    }}
+                    onPress={() => Linking.openSettings()}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#DC2626' }}>
+                      ⚙️ {translate('Mở Cài đặt')}
+                    </Text>
+                  </TouchableOpacity>
+                ) : anonymousGpsStatus === 'SERVICE_DISABLED' ? (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#EFF6FF',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#BFDBFE',
+                    }}
+                    onPress={() => requestGuestLocation(true)}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1D4ED8' }}>
+                      🔄 {translate('Bật GPS & Thử lại')}
+                    </Text>
+                  </TouchableOpacity>
+                ) : anonymousGpsStatus === 'FAILED' ? (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#EFF6FF',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#BFDBFE',
+                    }}
+                    onPress={() => requestGuestLocation(true)}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1D4ED8' }}>
+                      🔄 {translate('Thử lại lấy vị trí')}
+                    </Text>
+                  </TouchableOpacity>
+                ) : anonymousGpsStatus === 'ACQUIRED' ? (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#F0FDF4',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#BBF7D0',
+                    }}
+                    onPress={() => requestGuestLocation(true)}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#15803D' }}>
+                      🔄 {translate('Cập nhật lại vị trí')}
+                    </Text>
+                  </TouchableOpacity>
+                ) : anonymousGpsStatus === 'SKIPPED' ? (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#EFF6FF',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#BFDBFE',
+                    }}
+                    onPress={() => requestGuestLocation(true)}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1D4ED8' }}>
+                      📍 {translate('Định vị lại')}
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#EFF6FF',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#BFDBFE',
+                    }}
+                    onPress={() => requestGuestLocation(true)}
+                    disabled={anonymousGpsStatus === 'FETCHING'}
+                  >
+                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1D4ED8' }}>
+                      📍 {translate('Cấp quyền vị trí')}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {anonymousGpsStatus !== 'SKIPPED' && anonymousGpsStatus !== 'ACQUIRED' && (
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#F8FAFC',
+                      paddingVertical: 9,
+                      borderRadius: 8,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: '#E2E8F0',
+                    }}
+                    onPress={() => setAnonymousGpsStatus('SKIPPED')}
+                  >
+                    <Text style={{ fontSize: 12.5, color: '#64748B' }}>
+                      {translate('Bỏ qua vị trí')}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {/* Card 3: Form nhập mô tả và hình ảnh */}
+            <View style={{
+              backgroundColor: '#FFFFFF',
+              borderRadius: 12,
+              padding: 16,
+              marginBottom: 14,
+              borderWidth: 1,
+              borderColor: '#E2E8F0',
+            }}>
+              <Text style={styles.fieldLabel}>{translate('Tiêu đề sự cố (Tùy chọn)')}</Text>
+              <TextInput
+                style={[styles.technicianFormInput, { marginBottom: 14 }]}
+                value={anonymousTitle}
+                onChangeText={setAnonymousTitle}
+                placeholder={translate('Ví dụ: Đèn hành lang bị chập, Rò rỉ nước...')}
+                placeholderTextColor="#94A3B8"
+              />
+
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <Text style={styles.fieldLabel}>{translate('Mô tả chi tiết sự cố *')}</Text>
+                <Text style={{ fontSize: 11, color: anonymousDesc.trim().length >= 10 ? '#059669' : '#DC2626' }}>
+                  {anonymousDesc.trim().length}/10 {translate('ký tự tối thiểu')}
+                </Text>
+              </View>
+
+              <TextInput
+                style={[styles.descTextArea, { minHeight: 90 }]}
+                value={anonymousDesc}
+                onChangeText={setAnonymousDesc}
+                placeholder={translate('Nhập chi tiết hiện trạng sự cố, tiếng kêu, rò rỉ hoặc bấm "Nhấn để nói" bên dưới...')}
+                placeholderTextColor="#94A3B8"
+                multiline
+                numberOfLines={4}
+              />
+
+              <View style={{ marginTop: 10, marginBottom: 16 }}>
+                <VoiceRecorderButton
+                  apiBaseUrl={API_BASE_URL}
+                  token={null}
+                  disabled={loading}
+                  onBusyChange={setAnonymousVoiceBusy}
+                  onTranscribed={(text) => {
+                    setAnonymousDesc((prev) => (prev.trimEnd() ? `${prev.trimEnd()} ${text}` : text));
+                    setAnonymousIsVoiceUsed(true);
+                  }}
+                />
+              </View>
+
+              <View style={{ borderTopWidth: 1, borderTopColor: '#F1F5F9', paddingTop: 14 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Text style={styles.fieldLabel}>{translate('Hình ảnh hiện trường (Tối đa 3 ảnh)')}</Text>
+                  <Text style={{ fontSize: 12, color: '#64748B' }}>{anonymousPhotos.length}/3</Text>
+                </View>
+
+                {anonymousPhotos.length > 0 && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+                    {anonymousPhotos.map((url, idx) => (
+                      <View key={idx} style={{ position: 'relative', width: 80, height: 80, borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#CBD5E1' }}>
+                        <Image source={{ uri: url }} style={{ width: '100%', height: '100%' }} />
+                        <TouchableOpacity
+                          style={{
+                            position: 'absolute',
+                            top: 2,
+                            right: 2,
+                            backgroundColor: 'rgba(0,0,0,0.6)',
+                            width: 20,
+                            height: 20,
+                            borderRadius: 10,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                          onPress={() => setAnonymousPhotos((prev) => prev.filter((_, i) => i !== idx))}
+                        >
+                          <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {anonymousUploading && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <ActivityIndicator size="small" color="#2563EB" />
+                    <Text style={{ fontSize: 12, color: '#2563EB' }}>{translate('Đang tải ảnh lên...')}</Text>
+                  </View>
+                )}
+
+                {anonymousPhotos.length < 3 && (
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        backgroundColor: '#F8FAFC',
+                        borderWidth: 1.5,
+                        borderColor: '#CBD5E1',
+                        borderStyle: 'dashed',
+                        paddingVertical: 10,
+                        borderRadius: 8,
+                        alignItems: 'center',
+                        flexDirection: 'row',
+                        justifyContent: 'center',
+                        gap: 6,
+                      }}
+                      onPress={() => handlePickAnonymousPhoto(true)}
+                      disabled={anonymousUploading}
+                    >
+                      <Text style={{ fontSize: 16 }}>📷</Text>
+                      <Text style={{ fontSize: 12.5, fontWeight: '600', color: '#334155' }}>
+                        {translate('Chụp ảnh')}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        backgroundColor: '#F8FAFC',
+                        borderWidth: 1.5,
+                        borderColor: '#CBD5E1',
+                        borderStyle: 'dashed',
+                        paddingVertical: 10,
+                        borderRadius: 8,
+                        alignItems: 'center',
+                        flexDirection: 'row',
+                        justifyContent: 'center',
+                        gap: 6,
+                      }}
+                      onPress={() => handlePickAnonymousPhoto(false)}
+                      disabled={anonymousUploading}
+                    >
+                      <Text style={{ fontSize: 16 }}>🖼️</Text>
+                      <Text style={{ fontSize: 12.5, fontWeight: '600', color: '#334155' }}>
+                        {translate('Chọn từ máy')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            <View style={{
+              backgroundColor: '#EFF6FF',
+              borderRadius: 10,
+              padding: 12,
+              borderWidth: 1,
+              borderColor: '#BFDBFE',
+              marginBottom: 16,
+            }}>
+              <Text style={{ fontSize: 12, color: '#1E40AF', lineHeight: 18 }}>
+                ✨ {translate('Bạn không cần đăng nhập. Báo cáo sẽ được tiếp nhận dưới dạng Ẩn danh và Trợ lý Gemini AI sẽ tự động phân loại mức độ khẩn cấp để chuyển giao Ban quản lý.')}
+              </Text>
+            </View>
+          </ScrollView>
+
+          {/* Sticky Bottom Bar */}
+          <View style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            backgroundColor: '#FFFFFF',
+            borderTopWidth: 1,
+            borderTopColor: '#E2E8F0',
+            paddingHorizontal: 16,
+            paddingVertical: 12,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: -2 },
+            shadowOpacity: 0.05,
+            shadowRadius: 4,
+            elevation: 4,
+          }}>
+            <TouchableOpacity
+              style={[
+                styles.loginSubmitBtn,
+                (loading || anonymousVoiceBusy || anonymousDesc.trim().length < 10) && { opacity: 0.6 },
+              ]}
+              onPress={handleGuestSubmitReport}
+              disabled={loading || anonymousVoiceBusy || anonymousDesc.trim().length < 10}
+            >
+              {loading ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.loginSubmitText}>
+                  🚀 {translate('Gửi báo cáo sự cố (Ẩn danh)')}
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {renderAuthModals()}
+        </SafeAreaView>
+      );
+    }
 
     // A. Giao diện Đăng nhập Ban Quản Lý BMB Web (Split-Card 2 cột chuẩn Figma 00 BMB)
     if (loginMode === 'BMB_WEB') {
@@ -4703,6 +5759,40 @@ function AppContent() {
                 )}
               </TouchableOpacity>
 
+              {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
+              <View style={{ marginTop: 14, alignItems: 'center' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 6, width: '100%' }}>
+                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                  <Text style={{ marginHorizontal: 8, color: '#94A3B8', fontSize: 11, fontWeight: '600' }}>
+                    {translate('HOẶC')}
+                  </Text>
+                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                </View>
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: '#ECFDF5',
+                    borderWidth: 1.5,
+                    borderColor: '#10B981',
+                    paddingVertical: 10,
+                    paddingHorizontal: 14,
+                    borderRadius: 10,
+                    width: '100%',
+                  }}
+                  onPress={() => setGuestQrModalVisible(true)}
+                >
+                  <Text style={{ fontSize: 16, marginRight: 6 }}>📷</Text>
+                  <Text style={{ color: '#047857', fontWeight: '700', fontSize: 13.5 }}>
+                    {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={{ fontSize: 11, color: '#64748B', marginTop: 4, textAlign: 'center' }}>
+                  {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
+                </Text>
+              </View>
+
               {/* Chuyển đổi linh hoạt giữa giao diện Web và Mobile khi thử nghiệm trên trình duyệt */}
               <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 20 }]}>
                 <TouchableOpacity
@@ -4852,6 +5942,45 @@ function AppContent() {
                   <Text style={styles.loginSubmitText}>{translate("Đăng nhập")}</Text>
                 )}
               </TouchableOpacity>
+
+              {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
+              <View style={{ marginTop: 16, alignItems: 'center' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 8, width: '100%' }}>
+                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                  <Text style={{ marginHorizontal: 10, color: '#94A3B8', fontSize: 12, fontWeight: '600' }}>
+                    {translate('HOẶC')}
+                  </Text>
+                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                </View>
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: '#ECFDF5',
+                    borderWidth: 1.5,
+                    borderColor: '#10B981',
+                    paddingVertical: 12,
+                    paddingHorizontal: 16,
+                    borderRadius: 10,
+                    width: '100%',
+                    shadowColor: '#10B981',
+                    shadowOffset: { width: 0, height: 2 },
+                    shadowOpacity: 0.1,
+                    shadowRadius: 4,
+                    elevation: 2,
+                  }}
+                  onPress={() => setGuestQrModalVisible(true)}
+                >
+                  <Text style={{ fontSize: 18, marginRight: 8 }}>📷</Text>
+                  <Text style={{ color: '#047857', fontWeight: '700', fontSize: 14 }}>
+                    {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={{ fontSize: 11.5, color: '#64748B', marginTop: 6, textAlign: 'center' }}>
+                  {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
+                </Text>
+              </View>
             </View>
 
             {Platform.OS === 'web' && (
@@ -5087,7 +6216,23 @@ function AppContent() {
                     onPress={() => openResidentTicket(t)}
                   >
                     <View style={styles.cardTopRow}>
-                      <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                        {t.isAnonymous && (
+                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                          </View>
+                        )}
+                        {t.locationVerificationStatus === 'VERIFIED' ? (
+                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          </View>
+                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       <View
                         style={[
                           styles.statusPill,
@@ -5956,7 +7101,23 @@ function AppContent() {
                     onPress={() => openTechnicianTask(t)}
                   >
                     <View style={styles.cardTopRow}>
-                      <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                        {t.isAnonymous && (
+                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                          </View>
+                        )}
+                        {t.locationVerificationStatus === 'VERIFIED' ? (
+                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          </View>
+                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       <View
                         style={[
                           styles.statusPill,
@@ -6060,6 +7221,32 @@ function AppContent() {
 
                 <View style={styles.whiteSectionCard}>
                   <Text style={styles.cardBlockTitle}>{translate("Thông tin kỹ thuật")}</Text>
+                  {activeTicket.isAnonymous && (
+                    <View style={{
+                      backgroundColor: '#F8FAFC',
+                      padding: 8,
+                      borderRadius: 6,
+                      borderWidth: 1,
+                      borderColor: '#E2E8F0',
+                      marginBottom: 8,
+                    }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#334155' }}>
+                          👤 {translate("Nguồn: Khách vãng lai (Ẩn danh)")}
+                        </Text>
+                        {activeTicket.locationVerificationStatus === 'VERIFIED' ? (
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                        ) : (
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                        )}
+                      </View>
+                      {activeTicket.locationVerificationReason ? (
+                        <Text style={{ fontSize: 11, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+                          {activeTicket.locationVerificationReason}
+                        </Text>
+                      ) : null}
+                    </View>
+                  )}
                   <Text style={styles.techInfoLine}>
                     {translate("Vị trí:")} {activeTicket.locationNote || translate('Vị trí sự cố')}
                   </Text>
@@ -6486,7 +7673,23 @@ function AppContent() {
                     onPress={() => openTechnicianTask(t)}
                   >
                     <View style={styles.cardTopRow}>
-                      <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                        {t.isAnonymous && (
+                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                          </View>
+                        )}
+                        {t.locationVerificationStatus === 'VERIFIED' ? (
+                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          </View>
+                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       {!isWaitingAccept && (
                         <View style={[styles.statusPill, { backgroundColor: '#E2E8F0' }]}>
                           <Text style={[styles.statusPillText, { color: '#475569' }]}>
@@ -7651,7 +8854,7 @@ function AppContent() {
                     onPress={() => handleSelectBmbTicket(t)}
                   >
                     <View style={styles.cardTopRow}>
-                      <View style={styles.rowCenter}>
+                      <View style={[styles.rowCenter, { flexWrap: 'wrap', gap: 4 }]}>
                         <Text
                           style={[
                             styles.cardCodeText,
@@ -7660,6 +8863,20 @@ function AppContent() {
                         >
                           {t.ticketCode}
                         </Text>
+                        {t.isAnonymous && (
+                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                          </View>
+                        )}
+                        {t.locationVerificationStatus === 'VERIFIED' ? (
+                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          </View>
+                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          </View>
+                        ) : null}
                         {isHigh && (
                           <Text style={styles.bmbUrgentInlineDot}> {translate("Khẩn cấp")}</Text>
                         )}
@@ -7779,7 +8996,41 @@ function AppContent() {
                   </View>
 
                   <Text style={styles.bmbSmallSectionHead}>
-                    {translate("THÔNG TIN CƯ DÂN PHẢN ÁNH")}</Text>
+                    {bmbSelectedTicket.isAnonymous
+                      ? translate("THÔNG TIN KHÁCH BÁO CÁO (ẨN DANH)")
+                      : translate("THÔNG TIN CƯ DÂN PHẢN ÁNH")}
+                  </Text>
+
+                  {bmbSelectedTicket.isAnonymous ? (
+                    <View style={{
+                      backgroundColor: '#F8FAFC',
+                      borderWidth: 1,
+                      borderColor: '#E2E8F0',
+                      borderRadius: 8,
+                      padding: 10,
+                      marginTop: 6,
+                      marginBottom: 8,
+                    }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
+                          👤 {translate("Khách vãng lai (Báo cáo ẩn danh qua QR)")}
+                        </Text>
+                        {bmbSelectedTicket.locationVerificationStatus === 'VERIFIED' ? (
+                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          </View>
+                        ) : (
+                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#FDE68A' }}>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={{ fontSize: 12, color: '#475569', fontStyle: 'italic' }}>
+                        {bmbSelectedTicket.locationVerificationReason || translate("Chưa có thông tin đối chiếu vị trí")}
+                      </Text>
+                    </View>
+                  ) : null}
+
                   <View style={[styles.cardTopRow, { marginTop: 6 }]}>
                     <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#0F172A', flex: 1 }}>
                       {bmbSelectedTicket.locationNote}
