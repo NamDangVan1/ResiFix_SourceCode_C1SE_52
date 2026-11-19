@@ -11,7 +11,8 @@ import {
 } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
-import { analyzeIncidentWithGemini, transcribeAudioWithGemini } from '../services/gemini.service';
+import { analyzeIncidentWithGemini, TranscriptionError, transcribeAudioWithGemini } from '../services/gemini.service';
+import { recordingMimeType } from '../utils/recording';
 import { prisma } from '../db';
 import { createAndSaveOtp } from '../services/otp.service';
 import { safeSendOtpEmail } from '../services/mail.service';
@@ -1630,14 +1631,24 @@ router.patch(
 // ============================================================================
 router.post('/transcribe-voice', authenticateJWT, authorizeRoles(Role.RESIDENT), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { audioBase64, mimeType } = req.body;
+    const { audioBase64, mimeType } = req.body || {};
     if (!audioBase64 || typeof audioBase64 !== 'string') {
       res.status(400).json({ success: false, message: 'Thiếu dữ liệu âm thanh ghi âm (audioBase64)!' });
       return;
     }
 
-    const cleanBase64 = audioBase64.replace(/^data:audio\/[a-zA-Z0-9.-]+;base64,/, '').trim();
-    const result = await transcribeAudioWithGemini(cleanBase64, mimeType || 'audio/m4a');
+    const cleanBase64 = audioBase64.replace(/^data:audio\/[^,]+;base64,/i, '').trim();
+    if (!cleanBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64) || cleanBase64.length % 4 === 1) {
+      res.status(400).json({ success: false, message: 'Dữ liệu ghi âm trống hoặc không hợp lệ. Vui lòng ghi lại.' });
+      return;
+    }
+    const declared = typeof mimeType === 'string' ? mimeType.split(';')[0].trim().toLowerCase() : '';
+    const format = recordingMimeType(Buffer.from(cleanBase64, 'base64'), declared);
+    if (!format) {
+      res.status(422).json({ success: false, code: 'INVALID_RECORDING', message: 'File ghi âm chưa hoàn chỉnh hoặc sai định dạng. Hãy ghi lại và bấm dừng sau khi nói xong.' });
+      return;
+    }
+    const result = await transcribeAudioWithGemini(cleanBase64, format);
 
     res.status(200).json({
       success: true,
@@ -1646,8 +1657,11 @@ router.post('/transcribe-voice', authenticateJWT, authorizeRoles(Role.RESIDENT),
       mode: result.mode,
     });
   } catch (error) {
-    console.error('Lỗi API transcribe-voice:', error);
-    res.status(500).json({ success: false, message: 'Lỗi server khi chuyển đổi giọng nói', error });
+    if (error instanceof TranscriptionError) {
+      res.status(error.status).json({ success: false, code: error.code, message: error.message });
+      return;
+    }
+    res.status(500).json({ success: false, message: 'Lỗi server khi chuyển đổi giọng nói.' });
   }
 });
 

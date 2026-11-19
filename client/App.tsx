@@ -23,7 +23,7 @@ import {
   useUiPreferences,
 } from './UiPreferences';
 import QrScannerModal from './QrScannerModal';
-import VoiceRecorderModal from './VoiceRecorderModal';
+import VoiceRecorderButton from './VoiceRecorderButton';
 import { QrCodeView, printQrCode, downloadQrSvg } from './QrCodeView';
 import { ScreenTransition, AnimatedModalContent } from './Transitions';
 import * as ImagePicker from 'expo-image-picker';
@@ -33,7 +33,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // CẤU HÌNH ĐỊA CHỈ BACKEND CHUẨN CHO CẢ WEB & ĐIỆN THOẠI
 // ============================================================================
 
-const COMPUTER_LAN_IP = '172.16.2.211'; // IP Wi-Fi hiện tại của máy tính
+const COMPUTER_LAN_IP = '172.26.42.138'; // IP Wi-Fi hiện tại của máy tính
 
 const getApiBaseUrl = () => {
   if (Platform.OS === 'web') {
@@ -610,7 +610,7 @@ function AppContent() {
   const [reportPhotos, setReportPhotos] = useState<{ label: string; url: string }[]>([]);
   const [reportDesc, setReportDesc] = useState('');
   const [isVoiceUsed, setIsVoiceUsed] = useState(false);
-  const [voiceModalVisible, setVoiceModalVisible] = useState(false);
+  const [reportVoiceBusy, setReportVoiceBusy] = useState(false);
 
   // 6. State Chi tiết Sự cố (Cư dân & Kỹ thuật viên)
   const [activeTicket, setActiveTicket] = useState<any | null>(null);
@@ -5265,40 +5265,28 @@ function AppContent() {
                     onChangeText={setReportDesc}
                     placeholder={translate("Nhập mô tả sự cố bằng tiếng Việt...")}
                   />
-                  <View style={styles.descBottomBar}>
-                    <Text
-                      style={[
-                        styles.charCountText,
-                        reportDesc.trim().length < 10 && { color: '#DC2626' },
-                      ]}
-                    >
-                      {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
-                    <TouchableOpacity
-                      style={styles.voicePillBtn}
-                      onPress={() => setVoiceModalVisible(true)}
-                    >
-                      <Text style={styles.voicePillText}>{translate("Nhập giọng nói")}</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <Text
+                    style={[
+                      styles.charCountText,
+                      reportDesc.trim().length < 10 && { color: '#DC2626' },
+                    ]}
+                  >
+                    {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
+                  <VoiceRecorderButton
+                    apiBaseUrl={API_BASE_URL}
+                    token={token}
+                    disabled={loading}
+                    onBusyChange={setReportVoiceBusy}
+                    onTranscribed={(text) => {
+                      setReportDesc(previous => previous.trimEnd() ? `${previous.trimEnd()} ${text}` : text);
+                      setIsVoiceUsed(true);
+                    }}
+                  />
                 </View>
                 {reportDesc.length > 0 && reportDesc.trim().length < 10 && (
                   <Text style={[styles.inlineFieldError, { marginTop: -8, marginBottom: 12 }]}>
                     {translate('Mô tả sự cố cần tối thiểu 10 ký tự!')}
                   </Text>
-                )}
-
-                {voiceModalVisible && (
-                  <VoiceRecorderModal
-                    visible={voiceModalVisible}
-                    onClose={() => setVoiceModalVisible(false)}
-                    onTranscribed={(text) => {
-                      setReportDesc(text);
-                      setIsVoiceUsed(true);
-                      showToast(translate('🎤 Đã nhận diện giọng nói tiếng Việt thành công!'));
-                    }}
-                    apiBaseUrl={API_BASE_URL}
-                    token={token || undefined}
-                  />
                 )}
 
                 <View style={styles.geminiInfoBox}>
@@ -5309,9 +5297,9 @@ function AppContent() {
 
               <View style={styles.stickyBottomBar}>
                 <TouchableOpacity
-                  style={[styles.loginSubmitBtn, (loading || reportDesc.trim().length < 10) && { opacity: 0.6 }]}
+                  style={[styles.loginSubmitBtn, (loading || reportVoiceBusy || reportDesc.trim().length < 10) && { opacity: 0.6 }]}
                   onPress={handleSubmitReport}
-                  disabled={loading || reportDesc.trim().length < 10}
+                  disabled={loading || reportVoiceBusy || reportDesc.trim().length < 10}
                 >
                   {loading ? (
                     <ActivityIndicator color="#FFF" />
@@ -13138,29 +13126,10 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     textAlignVertical: 'top',
   },
-  descBottomBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 6,
-  },
   charCountText: {
     fontSize: 11.5,
     fontWeight: '600',
     color: '#059669',
-  },
-  voicePillBtn: {
-    backgroundColor: '#FAF5FF',
-    borderWidth: 1,
-    borderColor: '#E9D5FF',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 14,
-  },
-  voicePillText: {
-    color: '#7E22CE',
-    fontSize: 12,
-    fontWeight: '700',
   },
   geminiInfoBox: {
     backgroundColor: '#FAF5FF',

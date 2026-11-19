@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI, GoogleGenerativeAIAbortError, SchemaType } from '@google/generative-ai';
+import { GoogleGenerativeAI, GoogleGenerativeAIAbortError, GoogleGenerativeAIFetchError, SchemaType } from '@google/generative-ai';
 import { IncidentCategory, PriorityLevel } from '@prisma/client';
 
 export interface AiAnalysisResult {
@@ -129,50 +129,60 @@ Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định.
   }
 }
 
-// Chuyển đổi giọng nói (Voice-to-Text) tiếng Việt bằng Gemini Multimodal AI
+export class TranscriptionError extends Error {
+  constructor(readonly status: number, message: string, readonly code?: string) {
+    super(message);
+  }
+}
+
 export async function transcribeAudioWithGemini(
   audioBase64: string,
-  mimeType: string = 'audio/m4a'
+  mimeType = 'audio/mp4'
 ): Promise<{ text: string; latencyMs: number; mode: string }> {
-  const startTime = Date.now();
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey || apiKey.includes('YOUR_GEMINI_API_KEY')) {
-    throw new Error('GEMINI_KEY_NOT_CONFIGURED');
+    throw new TranscriptionError(503, 'Backend chưa cấu hình API key Gemini cho dịch vụ ghi âm.');
   }
 
-  const prompt =
-    'Bạn là trợ lý nhận diện giọng nói tiếng Việt cho hệ thống báo cáo sự cố tòa nhà ResiFix. Hãy nghe đoạn ghi âm sau và chép lại chính xác (transcribe) toàn bộ lời nói của người dân thành câu văn mô tả sự cố rõ ràng, chuẩn chính tả tiếng Việt. Chỉ trả về văn bản tiếng Việt thuần túy của lời nói, không thêm lời dẫn, không giải thích, không bọc dấu ngoặc kép.';
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const candidateModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
-
-  for (const modelName of candidateModels) {
-    try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([
-          {
-            inlineData: {
-              mimeType: mimeType || 'audio/m4a',
-              data: audioBase64,
-            },
-          },
-          { text: prompt },
-      ], { timeout: 8000 });
-
-      const transcribed = result.response.text().trim();
-      if (transcribed) {
-        return {
-          text: transcribed,
-          latencyMs: Date.now() - startTime,
-          mode: modelName,
-        };
-      }
-    } catch (err: any) {
-      console.warn(`Lỗi Gemini Audio (${modelName}):`, err?.message || err);
-      continue;
+  const modelName = process.env.GEMINI_TRANSCRIPTION_MODEL?.trim() || 'gemini-3.1-flash-lite';
+  const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: modelName });
+  const startTime = Date.now();
+  try {
+    const result = await model.generateContent([
+      { inlineData: { mimeType, data: audioBase64 } },
+      { text: 'Chép lại nguyên văn lời nói trong bản ghi, giữ nguyên ngôn ngữ. Chỉ trả về lời nói. Nếu không nghe được lời nào, trả về [NO_SPEECH].' },
+    ], { timeout: 20000 });
+    const text = result.response.text().trim();
+    if (!text || text === '[NO_SPEECH]') {
+      throw new TranscriptionError(422, 'Không nghe rõ lời nói. Vui lòng ghi âm lại.');
     }
+    return { text, latencyMs: Date.now() - startTime, mode: modelName };
+  } catch (error) {
+    if (error instanceof TranscriptionError) throw error;
+    if (error instanceof GoogleGenerativeAIAbortError) {
+      throw new TranscriptionError(504, 'Gemini phản hồi quá chậm. Vui lòng thử lại.');
+    }
+    if (error instanceof GoogleGenerativeAIFetchError) {
+      const googleReason = error.errorDetails?.find(detail => detail.reason)?.reason;
+      const reason = googleReason && /^[A-Z][A-Z0-9_]{0,79}$/.test(googleReason) ? googleReason : undefined;
+      console.warn('[Gemini Audio]', modelName, error.status, reason || 'NO_REASON', mimeType, Buffer.byteLength(audioBase64, 'base64'));
+      if (error.status === 429) throw new TranscriptionError(429, 'Gemini đã đạt giới hạn sử dụng. Vui lòng thử lại sau.');
+      if (error.status === 401 || error.status === 403 || error.status === 404) {
+        throw new TranscriptionError(503, 'Backend chưa truy cập được model phiên âm. Vui lòng kiểm tra cấu hình Gemini.');
+      }
+      if (error.status === 400) {
+        if (reason?.startsWith('API_KEY_') || /API key (?:not valid|expired|is invalid)/i.test(error.message)) {
+          throw new TranscriptionError(503, 'Gemini từ chối API key. Hãy kiểm tra GEMINI_API_KEY trong backend/.env và khởi động lại backend.', reason || 'API_KEY_INVALID');
+        }
+        if (/location is not supported|failed.precondition.*billing/i.test(error.message)) {
+          throw new TranscriptionError(503, 'Gemini chưa khả dụng với khu vực hoặc cấu hình thanh toán của dự án Google.', reason || 'GEMINI_PROJECT_UNAVAILABLE');
+        }
+        if (/unable to process (?:input |the )?audio|invalid audio|audio.*(?:too short|unsupported|corrupt)|unsupported mime/i.test(error.message)) {
+          throw new TranscriptionError(422, 'Gemini không đọc được bản ghi này. Hãy ghi lại một câu đầy đủ rồi bấm dừng.', reason || 'GEMINI_INVALID_AUDIO');
+        }
+        throw new TranscriptionError(502, 'Google trả về lỗi 400 khi phiên âm.', reason || 'GEMINI_INVALID_ARGUMENT');
+      }
+    }
+    throw new TranscriptionError(502, 'Không nhận được bản phiên âm từ Gemini. Vui lòng thử lại.');
   }
-
-  throw new Error('GEMINI_TRANSCRIPTION_UNAVAILABLE');
 }
