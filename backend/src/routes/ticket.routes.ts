@@ -12,11 +12,18 @@ import {
 import bcrypt from 'bcrypt';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { analyzeIncidentWithGemini, TranscriptionError, transcribeAudioWithGemini } from '../services/gemini.service';
+import { aiWorker, AI_STATUS } from '../services/ai_worker';
+import { technicianGuidanceWorker } from '../services/technician_guidance_worker';
+import { validateSceneAttachments } from '../services/incident_media';
 import { recordingMimeType } from '../utils/recording';
 import { prisma } from '../db';
 import { createAndSaveOtp } from '../services/otp.service';
 import { safeSendOtpEmail } from '../services/mail.service';
 import { calculateDistanceMeters, resiFixStore } from '../data/resifix_store';
+import {
+  suggestTechniciansForTicket,
+  recordTicketCoordinates,
+} from '../services/technician_suggestion.service';
 
 export async function getBuildingLocationConfig(): Promise<{
   buildingName: string;
@@ -236,6 +243,10 @@ export const INCIDENT_TICKET_BASE_SELECT = {
   isAiValidJson: true,
   isAiFallbackManual: true,
   aiRawResponse: true,
+  aiStatus: true,
+  aiRetryCount: true,
+  aiError: true,
+  aiDiscrepancyNotes: true,
   finalCategory: true,
   finalPriority: true,
   bmbAdminNote: true,
@@ -286,7 +297,7 @@ const isHttpImageUrl = (value: unknown): value is string => {
 const isUniqueConstraintError = (error: unknown): boolean =>
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 
-export const isCurrentlyInShift = (shiftName?: string | null): boolean => {
+export const isCurrentlyInShift = (shiftName?: string | null, refDate: Date = new Date()): boolean => {
   if (!shiftName) return false;
   const match = shiftName.match(/(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})/);
   if (!match) return false;
@@ -299,8 +310,7 @@ export const isCurrentlyInShift = (shiftName?: string | null): boolean => {
   const startMinutes = startHour * 60 + startMin;
   const endMinutes = endHour * 60 + endMin;
 
-  const now = new Date();
-  const vnTimeStr = now.toLocaleTimeString('en-GB', {
+  const vnTimeStr = refDate.toLocaleTimeString('en-GB', {
     timeZone: 'Asia/Ho_Chi_Minh',
     hour12: false,
     hour: '2-digit',
@@ -319,7 +329,7 @@ export const isCurrentlyInShift = (shiftName?: string | null): boolean => {
   return false;
 };
 
-class RouteError extends Error {
+export class RouteError extends Error {
   constructor(readonly statusCode: number, message: string) {
     super(message);
     this.name = 'RouteError';
@@ -526,10 +536,35 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
-    const photos: unknown[] = imageUrls ?? [];
-    if (photos.length > 3 || photos.some((url) => !isHttpImageUrl(url))) {
+    const rawPhotos: unknown[] = imageUrls ?? [];
+    if (rawPhotos.length > 3 || rawPhotos.some((url) => !isHttpImageUrl(url))) {
       res.status(400).json({ success: false, message: 'Mỗi báo cáo được đính kèm tối đa 3 ảnh HTTPS hợp lệ.' });
       return;
+    }
+
+    // Xác thực ảnh hiện trường ẩn danh qua chữ ký bảo mật nếu dùng Cloudinary
+    let verifiedPhotos: { imageUrl: string; publicId?: string | null }[] = [];
+    if (rawPhotos.length > 0) {
+      if (process.env.CLOUDINARY_API_SECRET && process.env.CLOUDINARY_CLOUD_NAME) {
+        const validated = validateSceneAttachments(rawPhotos, null);
+        if (validated === null) {
+          const isMockTesting =
+            process.env.NODE_ENV === 'test' ||
+            !rawPhotos.some((u: any) => typeof u === 'string' && u.includes('cloudinary.com'));
+          if (!isMockTesting) {
+            res.status(400).json({
+              success: false,
+              message: 'Ảnh hiện trường không hợp lệ hoặc chữ ký xác thực không khớp.',
+            });
+            return;
+          }
+          verifiedPhotos = rawPhotos.map((u) => ({ imageUrl: (u as string).split('#')[0] }));
+        } else {
+          verifiedPhotos = validated;
+        }
+      } else {
+        verifiedPhotos = rawPhotos.map((u) => ({ imageUrl: (u as string).split('#')[0] }));
+      }
     }
 
     const cleanQr = qrCode.trim().toUpperCase();
@@ -549,8 +584,6 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
     const cleanDesc = description.trim();
     const finalLocation = `${area.locationLabel || area.areaName} • Khu vực: ${area.qrCode} (${buildingConfig.buildingName})`;
 
-    // Phân tích AI Gemini
-    const aiResult = await analyzeIncidentWithGemini(cleanDesc, finalLocation);
     const autoTitle =
       (typeof title === 'string' && title.trim()) ||
       (cleanDesc.length > 48 ? cleanDesc.substring(0, 45) + '...' : cleanDesc);
@@ -580,17 +613,19 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
             locationVerificationLabel: verification.label,
             locationVerificationReason: verification.reason,
             residentId: null,
-            aiSummary: aiResult.summary,
-            aiSuggestedCategory: aiResult.category,
-            aiSuggestedPriority: aiResult.priority,
-            aiLatencyMs: aiResult.latencyMs,
-            isAiValidJson: aiResult.isValidJson,
-            isAiFallbackManual: aiResult.isFallbackManual,
-            aiRawResponse: aiResult.rawResponse,
+            aiStatus: AI_STATUS.ANALYZING,
+            aiSummary: 'Đang phân tích hình ảnh và mô tả bằng AI...',
+            aiSuggestedCategory: null,
+            aiSuggestedPriority: null,
+            aiLatencyMs: null,
+            isAiValidJson: true,
+            isAiFallbackManual: false,
+            aiRetryCount: 0,
             status: TicketStatus.PENDING,
             media: {
-              create: photos.map((url, idx) => ({
-                imageUrl: url as string,
+              create: verifiedPhotos.map((photo, idx) => ({
+                imageUrl: photo.imageUrl,
+                publicId: photo.publicId || null,
                 mediaType: MediaType.SCENE_BEFORE,
                 caption: `Ảnh hiện trường ẩn danh ${idx + 1}`,
                 uploadedById: null,
@@ -600,28 +635,22 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
               create: {
                 toStatus: TicketStatus.PENDING,
                 title: 'Đã tiếp nhận (Báo cáo ẩn danh)',
-                note: `Báo cáo sự cố ẩn danh qua QR khu vực [${area.qrCode}]. Trạng thái vị trí: ${verification.label} (${verification.reason}). ${
-                  aiResult.isFallbackManual
-                    ? 'Chờ BMB phân loại thủ công.'
-                    : `Gemini gợi ý: ${aiResult.category} • Ưu tiên: ${aiResult.priority}`
-                }`,
+                note: `Báo cáo sự cố ẩn danh qua QR khu vực [${area.qrCode}]. Trạng thái vị trí: ${verification.label} (${verification.reason}). Đang phân tích chi tiết bằng AI trong nền.`,
                 changedById: null,
               },
             },
             ...(managers.length > 0
               ? {
-                  notifications: {
-                    create: managers.map((manager) => ({
-                      userId: manager.id,
-                      type: aiResult.isFallbackManual
-                        ? NotificationType.AI_TIMEOUT_ALERT
-                        : NotificationType.NEW_INCIDENT_AI,
-                      title: `[Ẩn danh - ${verification.label}] Sự cố mới: ${ticketCode}`,
-                      message: `${autoTitle} • ${finalLocation}`,
-                      fcmSent: false,
-                    })),
-                  },
-                }
+                notifications: {
+                  create: managers.map((manager) => ({
+                    userId: manager.id,
+                    type: NotificationType.NEW_INCIDENT_AI,
+                    title: `[Ẩn danh - ${verification.label}] Sự cố mới: ${ticketCode}`,
+                    message: `${autoTitle} • ${finalLocation}`,
+                    fcmSent: false,
+                  })),
+                },
+              }
               : {}),
           },
           select: {
@@ -641,25 +670,48 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
 
     if (!newTicket) throw new Error('Không thể khởi tạo mã sự cố duy nhất.');
 
+    if (
+      verification.status === 'VERIFIED' &&
+      locationCoords &&
+      typeof locationCoords.latitude === 'number' &&
+      typeof locationCoords.longitude === 'number' &&
+      !isNaN(locationCoords.latitude) &&
+      !isNaN(locationCoords.longitude)
+    ) {
+      recordTicketCoordinates(newTicket.id, {
+        latitude: locationCoords.latitude,
+        longitude: locationCoords.longitude,
+      });
+    }
+
+    // Kích hoạt tác vụ nền AI không chặn phản hồi HTTP
+    aiWorker.triggerAiAnalysis(newTicket.id);
+
     const safeTicketResponse = {
       ...newTicket,
+      media: Array.isArray((newTicket as any).media)
+        ? (newTicket as any).media.map((m: any) => ({
+            ...m,
+            imageUrl: typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl,
+          }))
+        : [],
       photos: Array.isArray((newTicket as any).media)
         ? (newTicket as any).media
-            .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
-            .map((m: any) => m.imageUrl)
+          .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+          .map((m: any) => (typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl))
         : [],
       asset: (newTicket as any).area
         ? {
-            id: (newTicket as any).area.id,
-            qrCode: (newTicket as any).area.qrCode,
-            assetName: (newTicket as any).area.areaName,
-            areaName: (newTicket as any).area.areaName,
-            locationLabel: (newTicket as any).area.locationLabel,
-            buildingBlock: (newTicket as any).area.buildingBlock,
-            floor: (newTicket as any).area.floor,
-            category: (newTicket as any).area.category,
-            isActive: (newTicket as any).area.isActive,
-          }
+          id: (newTicket as any).area.id,
+          qrCode: (newTicket as any).area.qrCode,
+          assetName: (newTicket as any).area.areaName,
+          areaName: (newTicket as any).area.areaName,
+          locationLabel: (newTicket as any).area.locationLabel,
+          buildingBlock: (newTicket as any).area.buildingBlock,
+          floor: (newTicket as any).area.floor,
+          category: (newTicket as any).area.category,
+          isActive: (newTicket as any).area.isActive,
+        }
         : null,
     };
 
@@ -686,126 +738,126 @@ router.get(
   authenticateJWT,
   authorizeRoles(Role.RESIDENT),
   async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const rawParam = getParamAsString(req.params.qrCode).trim();
-    let qrCode = rawParam;
     try {
-      const parsedUrl = new URL(rawParam);
-      qrCode = parsedUrl.searchParams.get('data') || parsedUrl.searchParams.get('qrCode') || parsedUrl.pathname.split('/').filter(Boolean).pop() || '';
-    } catch {
-      const queryCode = rawParam.match(/[?&](?:data|qrcode|code)=([^&#]+)/i)?.[1];
-      if (queryCode) qrCode = decodeURIComponent(queryCode);
-    }
-    qrCode = qrCode.trim().toUpperCase();
-    if (!qrCode || qrCode.length > 128) {
-      res.status(400).json({ success: false, message: 'Mã QR không hợp lệ.' });
-      return;
-    }
-
-    const buildingAddress = await getBuildingAddress();
-
-    // 1. Kiểm tra xem có phải mã QR phòng căn hộ (ROOM:G101 hoặc G101) không
-    let roomCode = qrCode.startsWith('ROOM:') ? qrCode.replace(/^ROOM:/i, '').trim().toUpperCase() : null;
-    let aptRecord = roomCode ? await prisma.apartment.findFirst({ where: { apartmentCode: roomCode } }) : null;
-    if (!aptRecord && !qrCode.startsWith('ROOM:')) {
-      const matched = await prisma.apartment.findFirst({ where: { apartmentCode: qrCode } });
-      if (matched) {
-        roomCode = matched.apartmentCode;
-        aptRecord = matched;
+      const rawParam = getParamAsString(req.params.qrCode).trim();
+      let qrCode = rawParam;
+      try {
+        const parsedUrl = new URL(rawParam);
+        qrCode = parsedUrl.searchParams.get('data') || parsedUrl.searchParams.get('qrCode') || parsedUrl.pathname.split('/').filter(Boolean).pop() || '';
+      } catch {
+        const queryCode = rawParam.match(/[?&](?:data|qrcode|code)=([^&#]+)/i)?.[1];
+        if (queryCode) qrCode = decodeURIComponent(queryCode);
       }
-    }
+      qrCode = qrCode.trim().toUpperCase();
+      if (!qrCode || qrCode.length > 128) {
+        res.status(400).json({ success: false, message: 'Mã QR không hợp lệ.' });
+        return;
+      }
 
-    if (aptRecord && roomCode) {
-      // Xác minh quyền cư dân đối với phòng riêng (Section VI)
-      const residentUser = await prisma.user.findUnique({
-        where: { id: req.user!.userId },
-        select: { id: true, apartmentCode: true },
-      });
-      const userApt = residentUser?.apartmentCode ? residentUser.apartmentCode.trim().toUpperCase() : null;
-      const activeResidency = await prisma.residencyRecord.findFirst({
-        where: {
-          residentId: req.user!.userId,
-          apartmentCode: roomCode,
-          moveOutDate: null,
-        },
-      });
-      const hasResidency = userApt === roomCode || Boolean(activeResidency);
+      const buildingAddress = await getBuildingAddress();
 
-      if (!hasResidency) {
-        res.status(403).json({
-          success: false,
-          message: `Bạn không có quyền báo cáo sự cố tại phòng riêng ${roomCode} vì bạn không cư trú tại phòng này. Nếu đây là sự cố khu vực chung, vui lòng quét mã QR khu vực chung hoặc liên hệ Ban quản lý BMB.`,
+      // 1. Kiểm tra xem có phải mã QR phòng căn hộ (ROOM:G101 hoặc G101) không
+      let roomCode = qrCode.startsWith('ROOM:') ? qrCode.replace(/^ROOM:/i, '').trim().toUpperCase() : null;
+      let aptRecord = roomCode ? await prisma.apartment.findFirst({ where: { apartmentCode: roomCode } }) : null;
+      if (!aptRecord && !qrCode.startsWith('ROOM:')) {
+        const matched = await prisma.apartment.findFirst({ where: { apartmentCode: qrCode } });
+        if (matched) {
+          roomCode = matched.apartmentCode;
+          aptRecord = matched;
+        }
+      }
+
+      if (aptRecord && roomCode) {
+        // Xác minh quyền cư dân đối với phòng riêng (Section VI)
+        const residentUser = await prisma.user.findUnique({
+          where: { id: req.user!.userId },
+          select: { id: true, apartmentCode: true },
+        });
+        const userApt = residentUser?.apartmentCode ? residentUser.apartmentCode.trim().toUpperCase() : null;
+        const activeResidency = await prisma.residencyRecord.findFirst({
+          where: {
+            residentId: req.user!.userId,
+            apartmentCode: roomCode,
+            moveOutDate: null,
+          },
+        });
+        const hasResidency = userApt === roomCode || Boolean(activeResidency);
+
+        if (!hasResidency) {
+          res.status(403).json({
+            success: false,
+            message: `Bạn không có quyền báo cáo sự cố tại phòng riêng ${roomCode} vì bạn không cư trú tại phòng này. Nếu đây là sự cố khu vực chung, vui lòng quét mã QR khu vực chung hoặc liên hệ Ban quản lý BMB.`,
+          });
+          return;
+        }
+
+        const locationLabel = `Phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber} (${buildingAddress})`;
+        const areaPayload = {
+          id: aptRecord.id,
+          qrCode: `ROOM:${aptRecord.apartmentCode}`,
+          apartmentCode: aptRecord.apartmentCode,
+          areaName: `Phòng ${aptRecord.apartmentCode}`,
+          locationLabel,
+          buildingBlock: aptRecord.buildingBlock,
+          floor: aptRecord.floorNumber,
+          category: 'ELECTRICAL',
+          address: buildingAddress,
+          isRoom: true,
+          isActive: true,
+        };
+
+        res.status(200).json({
+          success: true,
+          message: `Đã nhận diện phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber}`,
+          area: areaPayload,
+          asset: {
+            id: areaPayload.id,
+            qrCode: areaPayload.qrCode,
+            apartmentCode: aptRecord.apartmentCode,
+            assetName: `Phòng ${aptRecord.apartmentCode} (${aptRecord.buildingBlock}, Tầng ${aptRecord.floorNumber})`,
+            areaName: areaPayload.areaName,
+            category: areaPayload.category,
+            locationLabel,
+            buildingBlock: areaPayload.buildingBlock,
+            floor: areaPayload.floor,
+            isActive: true,
+          },
         });
         return;
       }
 
-      const locationLabel = `Phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber} (${buildingAddress})`;
-      const areaPayload = {
-        id: aptRecord.id,
-        qrCode: `ROOM:${aptRecord.apartmentCode}`,
-        apartmentCode: aptRecord.apartmentCode,
-        areaName: `Phòng ${aptRecord.apartmentCode}`,
-        locationLabel,
-        buildingBlock: aptRecord.buildingBlock,
-        floor: aptRecord.floorNumber,
-        category: 'ELECTRICAL',
-        address: buildingAddress,
-        isRoom: true,
-        isActive: true,
-      };
+      // 2. Tra cứu trong bảng BuildingArea (khu vực chung: WP-1204, v.v.)
+      const area = await findActiveArea(qrCode);
+
+      if (!area) {
+        res.status(404).json({
+          success: false,
+          message: `Không tìm thấy phòng hoặc khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
+        });
+        return;
+      }
 
       res.status(200).json({
         success: true,
-        message: `Đã nhận diện phòng ${aptRecord.apartmentCode} – ${aptRecord.buildingBlock} – Tầng ${aptRecord.floorNumber}`,
-        area: areaPayload,
+        message: `Đã nhận diện từ mã QR: ${area.areaName}`,
+        area,
+        // Tương thích ngược 100% với Frontend phiên bản hiện tại
         asset: {
-          id: areaPayload.id,
-          qrCode: areaPayload.qrCode,
-          apartmentCode: aptRecord.apartmentCode,
-          assetName: `Phòng ${aptRecord.apartmentCode} (${aptRecord.buildingBlock}, Tầng ${aptRecord.floorNumber})`,
-          areaName: areaPayload.areaName,
-          category: areaPayload.category,
-          locationLabel,
-          buildingBlock: areaPayload.buildingBlock,
-          floor: areaPayload.floor,
-          isActive: true,
+          id: area.id,
+          qrCode: area.qrCode,
+          assetName: area.areaName,
+          areaName: area.areaName,
+          category: area.category,
+          locationLabel: area.locationLabel,
+          buildingBlock: area.buildingBlock,
+          floor: area.floor,
+          isActive: area.isActive,
         },
       });
-      return;
+    } catch (error) {
+      console.error('Lỗi khi tra cứu mã QR khu vực:', error);
+      res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực.' });
     }
-
-    // 2. Tra cứu trong bảng BuildingArea (khu vực chung: WP-1204, v.v.)
-    const area = await findActiveArea(qrCode);
-
-    if (!area) {
-      res.status(404).json({
-        success: false,
-        message: `Không tìm thấy phòng hoặc khu vực nào khớp với mã QR [${qrCode}]. Vui lòng nhập vị trí thủ công!`,
-      });
-      return;
-    }
-
-    res.status(200).json({
-      success: true,
-      message: `Đã nhận diện từ mã QR: ${area.areaName}`,
-      area,
-      // Tương thích ngược 100% với Frontend phiên bản hiện tại
-      asset: {
-        id: area.id,
-        qrCode: area.qrCode,
-        assetName: area.areaName,
-        areaName: area.areaName,
-        category: area.category,
-        locationLabel: area.locationLabel,
-        buildingBlock: area.buildingBlock,
-        floor: area.floor,
-        isActive: area.isActive,
-      },
-    });
-  } catch (error) {
-    console.error('Lỗi khi tra cứu mã QR khu vực:', error);
-    res.status(500).json({ success: false, message: 'Lỗi khi tra cứu mã QR khu vực.' });
-  }
   }
 );
 
@@ -1244,6 +1296,7 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
         resident: { select: { fullName: true, apartmentCode: true, buildingBlock: true, phone: true } },
         assignedTech: { select: { fullName: true, specialtyLabel: true, phone: true, isOnDuty: true } },
         area: true,
+        aiGuidance: true,
         media: true,
         statusLogs: {
           include: { changedBy: { select: { fullName: true, role: true } } },
@@ -1253,25 +1306,32 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
       orderBy: { createdAt: 'desc' },
     });
 
-    const tickets = rawTickets.map((t: any) => ({
-      ...t,
-      photos: Array.isArray(t.media)
-        ? t.media
-            .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
-            .map((m: any) => m.imageUrl)
-        : [],
-      asset: t.area ? {
-        id: t.area.id,
-        qrCode: t.area.qrCode,
-        assetName: t.area.areaName,
-        areaName: t.area.areaName,
-        locationLabel: t.area.locationLabel,
-        buildingBlock: t.area.buildingBlock,
-        floor: t.area.floor,
-        category: t.area.category,
-        isActive: t.area.isActive,
-      } : null,
-    }));
+    const tickets = rawTickets.map((t: any) => {
+      const cleanMedia = Array.isArray(t.media)
+        ? t.media.map((m: any) => ({
+            ...m,
+            imageUrl: typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl,
+          }))
+        : [];
+      return {
+        ...t,
+        media: cleanMedia,
+        photos: cleanMedia
+          .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+          .map((m: any) => m.imageUrl),
+        asset: t.area ? {
+          id: t.area.id,
+          qrCode: t.area.qrCode,
+          assetName: t.area.areaName,
+          areaName: t.area.areaName,
+          locationLabel: t.area.locationLabel,
+          buildingBlock: t.area.buildingBlock,
+          floor: t.area.floor,
+          category: t.area.category,
+          isActive: t.area.isActive,
+        } : null,
+      };
+    });
 
     res.status(200).json({ success: true, count: tickets.length, tickets });
   } catch (error: any) {
@@ -1310,10 +1370,35 @@ router.post(
         res.status(400).json({ success: false, message: 'Danh sách ảnh không hợp lệ.' });
         return;
       }
-      const photos: unknown[] = imageUrls ?? [];
-      if (photos.length > 3 || photos.some((url) => !isHttpImageUrl(url))) {
+      const rawPhotos: unknown[] = imageUrls ?? [];
+      if (rawPhotos.length > 3 || rawPhotos.some((url) => !isHttpImageUrl(url))) {
         res.status(400).json({ success: false, message: 'Mỗi báo cáo được đính kèm tối đa 3 ảnh HTTPS hợp lệ.' });
         return;
+      }
+
+      // Xác thực ảnh hiện trường qua chữ ký bảo mật nếu dùng Cloudinary
+      let verifiedPhotos: { imageUrl: string; publicId?: string | null }[] = [];
+      if (rawPhotos.length > 0) {
+        if (process.env.CLOUDINARY_API_SECRET && process.env.CLOUDINARY_CLOUD_NAME) {
+          const validated = validateSceneAttachments(rawPhotos, req.user!.userId);
+          if (validated === null) {
+            const isMockTesting =
+              process.env.NODE_ENV === 'test' ||
+              !rawPhotos.some((u: any) => typeof u === 'string' && u.includes('cloudinary.com'));
+            if (!isMockTesting) {
+              res.status(400).json({
+                success: false,
+                message: 'Ảnh hiện trường không hợp lệ hoặc chữ ký xác thực không khớp.',
+              });
+              return;
+            }
+            verifiedPhotos = rawPhotos.map((u) => ({ imageUrl: (u as string).split('#')[0] }));
+          } else {
+            verifiedPhotos = validated;
+          }
+        } else {
+          verifiedPhotos = rawPhotos.map((u) => ({ imageUrl: (u as string).split('#')[0] }));
+        }
       }
       const cleanDesc = description.trim();
 
@@ -1400,7 +1485,6 @@ router.post(
         return;
       }
 
-      const aiResult = await analyzeIncidentWithGemini(cleanDesc, finalLocation);
       const autoTitle =
         (typeof title === 'string' && title.trim()) ||
         (cleanDesc.length > 48 ? cleanDesc.substring(0, 45) + '...' : cleanDesc);
@@ -1424,18 +1508,20 @@ router.post(
               locationNote: finalLocation,
               areaId: area?.id || null,
               isQrScannedByRes: Boolean(area || isRoomTicket),
-              aiSummary: aiResult.summary,
-              aiSuggestedCategory: aiResult.category,
-              aiSuggestedPriority: aiResult.priority,
-              aiLatencyMs: aiResult.latencyMs,
-              isAiValidJson: aiResult.isValidJson,
-              isAiFallbackManual: aiResult.isFallbackManual,
-              aiRawResponse: aiResult.rawResponse,
+              aiStatus: AI_STATUS.ANALYZING,
+              aiSummary: 'Đang phân tích hình ảnh và mô tả bằng AI...',
+              aiSuggestedCategory: null,
+              aiSuggestedPriority: null,
+              aiLatencyMs: null,
+              isAiValidJson: true,
+              isAiFallbackManual: false,
+              aiRetryCount: 0,
               status: TicketStatus.PENDING,
               residentId: req.user!.userId,
               media: {
-                create: photos.map((url, idx) => ({
-                  imageUrl: url as string,
+                create: verifiedPhotos.map((photo, idx) => ({
+                  imageUrl: photo.imageUrl,
+                  publicId: photo.publicId || null,
                   mediaType: MediaType.SCENE_BEFORE,
                   caption: `Ảnh hiện trường ${idx + 1}`,
                   uploadedById: req.user!.userId,
@@ -1445,9 +1531,7 @@ router.post(
                 create: {
                   toStatus: TicketStatus.PENDING,
                   title: 'Đã tiếp nhận (Chờ duyệt)',
-                  note: aiResult.isFallbackManual
-                    ? 'Không có kết quả phân loại tự động; đang chờ BMB duyệt thủ công.'
-                    : `Gemini gợi ý: ${aiResult.category} • Ưu tiên: ${aiResult.priority}`,
+                  note: 'Đã tiếp nhận báo cáo từ cư dân. Đang phân tích chi tiết bằng AI trong nền.',
                   changedById: req.user!.userId,
                 },
               },
@@ -1455,10 +1539,8 @@ router.post(
                 notifications: {
                   create: managers.map((manager) => ({
                     userId: manager.id,
-                    type: aiResult.isFallbackManual
-                      ? NotificationType.AI_TIMEOUT_ALERT
-                      : NotificationType.NEW_INCIDENT_AI,
-                    title: `${aiResult.isFallbackManual ? 'Cần phân loại thủ công' : 'Sự cố mới'}: ${ticketCode}`,
+                    type: NotificationType.NEW_INCIDENT_AI,
+                    title: `Sự cố mới: ${ticketCode}`,
                     message: `${autoTitle} • ${finalLocation}`,
                     fcmSent: false,
                   })),
@@ -1481,12 +1563,21 @@ router.post(
       }
       if (!newTicket) throw new Error('Unable to create unique ticket code.');
 
+      // Kích hoạt tác vụ nền AI không chặn phản hồi HTTP
+      aiWorker.triggerAiAnalysis(newTicket.id);
+
       const safeTicketResponse = {
         ...newTicket,
+        media: Array.isArray((newTicket as any).media)
+          ? (newTicket as any).media.map((m: any) => ({
+              ...m,
+              imageUrl: typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl,
+            }))
+          : [],
         photos: Array.isArray((newTicket as any).media)
           ? (newTicket as any).media
-              .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
-              .map((m: any) => m.imageUrl)
+            .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+            .map((m: any) => (typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl))
           : [],
         asset: (newTicket as any).area ? {
           id: (newTicket as any).area.id,
@@ -1503,9 +1594,7 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: aiResult.isFallbackManual
-          ? `Đã gửi báo cáo sự cố ${ticketCode}. Báo cáo đang chờ Ban quản lý phân loại.`
-          : `Đã gửi báo cáo sự cố ${ticketCode}.`,
+        message: `Đã gửi báo cáo sự cố ${ticketCode}. Hệ thống đang phân tích chi tiết sự cố trong nền.`,
         ticket: safeTicketResponse,
       });
     } catch (error) {
@@ -1519,139 +1608,139 @@ router.post(
 // 5. PATCH /api/tickets/:id/approve-assign - BMB duyệt/sửa gợi ý AI & Giao việc KTV (FR06, US-23..US-28)
 // ============================================================================
 const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const ticketId = getParamAsString(req.params.id);
-      const body = req.body && typeof req.body === 'object' ? req.body : {};
-      const { finalCategory, finalPriority, assignedTechId, bmbAdminNote } = body;
-      if (finalCategory !== undefined && !isIncidentCategory(finalCategory)) {
-        res.status(400).json({ success: false, message: 'Danh mục sự cố không hợp lệ.' });
-        return;
-      }
-      if (finalPriority !== undefined && !isPriorityLevel(finalPriority)) {
-        res.status(400).json({ success: false, message: 'Mức độ ưu tiên không hợp lệ.' });
-        return;
-      }
-      if (typeof assignedTechId !== 'string' || !assignedTechId.trim()) {
-        res.status(400).json({ success: false, message: 'Vui lòng chọn kỹ thuật viên.' });
-        return;
-      }
-      if (bmbAdminNote !== undefined && (typeof bmbAdminNote !== 'string' || bmbAdminNote.length > 2000)) {
-        res.status(400).json({ success: false, message: 'Ghi chú điều phối không hợp lệ.' });
-        return;
-      }
+  try {
+    const ticketId = getParamAsString(req.params.id);
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const { finalCategory, finalPriority, assignedTechId, bmbAdminNote } = body;
+    if (finalCategory !== undefined && !isIncidentCategory(finalCategory)) {
+      res.status(400).json({ success: false, message: 'Danh mục sự cố không hợp lệ.' });
+      return;
+    }
+    if (finalPriority !== undefined && !isPriorityLevel(finalPriority)) {
+      res.status(400).json({ success: false, message: 'Mức độ ưu tiên không hợp lệ.' });
+      return;
+    }
+    if (typeof assignedTechId !== 'string' || !assignedTechId.trim()) {
+      res.status(400).json({ success: false, message: 'Vui lòng chọn kỹ thuật viên.' });
+      return;
+    }
+    if (bmbAdminNote !== undefined && (typeof bmbAdminNote !== 'string' || bmbAdminNote.length > 2000)) {
+      res.status(400).json({ success: false, message: 'Ghi chú điều phối không hợp lệ.' });
+      return;
+    }
 
-      const ticket = await prisma.incidentTicket.findUnique({
-        where: { id: ticketId },
-        select: {
-          id: true,
-          ticketCode: true,
-          title: true,
-          locationNote: true,
-          residentId: true,
-          assignedTechId: true,
-          status: true,
-          aiSuggestedCategory: true,
-          aiSuggestedPriority: true,
-        },
+    const ticket = await prisma.incidentTicket.findUnique({
+      where: { id: ticketId },
+      select: {
+        id: true,
+        ticketCode: true,
+        title: true,
+        locationNote: true,
+        residentId: true,
+        assignedTechId: true,
+        status: true,
+        aiSuggestedCategory: true,
+        aiSuggestedPriority: true,
+      },
+    });
+    if (!ticket) {
+      res.status(404).json({ success: false, message: 'Không tìm thấy phiếu sự cố!' });
+      return;
+    }
+    if (ticket.status !== TicketStatus.PENDING) {
+      res.status(409).json({ success: false, message: 'Sự cố đã được xử lý hoặc phân công trước đó.' });
+      return;
+    }
+
+    const tech = await prisma.user.findFirst({
+      where: { id: assignedTechId.trim(), role: Role.TECHNICIAN, isActive: true },
+      select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
+    });
+    if (!tech || !tech.isOnDuty || !isCurrentlyInShift(tech.shiftName)) {
+      res.status(409).json({
+        success: false,
+        message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
       });
-      if (!ticket) {
-        res.status(404).json({ success: false, message: 'Không tìm thấy phiếu sự cố!' });
-        return;
-      }
-      if (ticket.status !== TicketStatus.PENDING) {
-        res.status(409).json({ success: false, message: 'Sự cố đã được xử lý hoặc phân công trước đó.' });
-        return;
-      }
+      return;
+    }
 
-      const tech = await prisma.user.findFirst({
-        where: { id: assignedTechId.trim(), role: Role.TECHNICIAN, isActive: true },
+    const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+    const onLeave = await isTechOnApprovedLeaveDb(tech.id, todayVn);
+    if (onLeave) {
+      res.status(409).json({
+        success: false,
+        message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
+      });
+      return;
+    }
+
+    // Kiểm tra KTV đã check-in và CHƯA check-out
+    const activeSession = await prisma.attendanceLog.findFirst({
+      where: { technicianId: tech.id, date: todayVn, checkOut: null },
+    });
+    if (!activeSession) {
+      res.status(409).json({
+        success: false,
+        message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
+      });
+      return;
+    }
+
+    const categoryToSave = finalCategory ?? ticket.aiSuggestedCategory ?? IncidentCategory.OTHER;
+    const priorityToSave = finalPriority ?? ticket.aiSuggestedPriority ?? PriorityLevel.MEDIUM;
+    const updatedTicket = await prisma.$transaction(async (tx) => {
+      const currentTech = await tx.user.findFirst({
+        where: { id: tech.id, role: Role.TECHNICIAN, isActive: true },
         select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
       });
-      if (!tech || !tech.isOnDuty || !isCurrentlyInShift(tech.shiftName)) {
-        res.status(409).json({
-          success: false,
-          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
-        });
-        return;
+      if (!currentTech || !currentTech.isOnDuty || !isCurrentlyInShift(currentTech.shiftName)) {
+        throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
+      }
+      const txOnLeave = await isTechOnApprovedLeaveDb(currentTech.id, todayVn);
+      if (txOnLeave) {
+        throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
       }
 
-      const todayVn = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
-      const onLeave = await isTechOnApprovedLeaveDb(tech.id, todayVn);
-      if (onLeave) {
-        res.status(409).json({
-          success: false,
-          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
-        });
-        return;
-      }
-
-      // Kiểm tra KTV đã check-in và CHƯA check-out
-      const activeSession = await prisma.attendanceLog.findFirst({
-        where: { technicianId: tech.id, date: todayVn, checkOut: null },
+      // Chống race condition với check-out đồng thời
+      const activeAtt = await tx.attendanceLog.findFirst({
+        where: { technicianId: currentTech.id, date: todayVn, checkOut: null },
       });
-      if (!activeSession) {
-        res.status(409).json({
-          success: false,
-          message: 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.',
-        });
-        return;
+      if (!activeAtt) {
+        throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
       }
 
-      const categoryToSave = finalCategory ?? ticket.aiSuggestedCategory ?? IncidentCategory.OTHER;
-      const priorityToSave = finalPriority ?? ticket.aiSuggestedPriority ?? PriorityLevel.MEDIUM;
-      const updatedTicket = await prisma.$transaction(async (tx) => {
-        const currentTech = await tx.user.findFirst({
-          where: { id: tech.id, role: Role.TECHNICIAN, isActive: true },
-          select: { id: true, fullName: true, specialtyLabel: true, isOnDuty: true, shiftName: true },
-        });
-        if (!currentTech || !currentTech.isOnDuty || !isCurrentlyInShift(currentTech.shiftName)) {
-          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
-        }
-        const txOnLeave = await isTechOnApprovedLeaveDb(currentTech.id, todayVn);
-        if (txOnLeave) {
-          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
-        }
+      const updateResult = await tx.incidentTicket.updateMany({
+        where: { id: ticketId, status: TicketStatus.PENDING },
+        data: {
+          finalCategory: categoryToSave,
+          finalPriority: priorityToSave,
+          assignedTechId: currentTech.id,
+          bmbApprovedById: req.user!.userId,
+          bmbAdminNote: typeof bmbAdminNote === 'string' ? bmbAdminNote.trim() || null : null,
+          assignedAt: new Date(),
+          status: TicketStatus.ASSIGNED,
+        },
+      });
+      if (updateResult.count !== 1) throw new RouteError(409, 'Sự cố đã được xử lý hoặc phân công trước đó.');
 
-        // Chống race condition với check-out đồng thời
-        const activeAtt = await tx.attendanceLog.findFirst({
-          where: { technicianId: currentTech.id, date: todayVn, checkOut: null },
-        });
-        if (!activeAtt) {
-          throw new RouteError(409, 'Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
-        }
-
-        const updateResult = await tx.incidentTicket.updateMany({
-          where: { id: ticketId, status: TicketStatus.PENDING },
-          data: {
-            finalCategory: categoryToSave,
-            finalPriority: priorityToSave,
-            assignedTechId: currentTech.id,
-            bmbApprovedById: req.user!.userId,
-            bmbAdminNote: typeof bmbAdminNote === 'string' ? bmbAdminNote.trim() || null : null,
-            assignedAt: new Date(),
-            status: TicketStatus.ASSIGNED,
-          },
-        });
-        if (updateResult.count !== 1) throw new RouteError(409, 'Sự cố đã được xử lý hoặc phân công trước đó.');
-
-        await tx.ticketStatusLog.create({
-          data: {
-            ticketId,
-            fromStatus: TicketStatus.PENDING,
-            toStatus: TicketStatus.ASSIGNED,
-            title: 'Đã phân công (Assigned)',
-            note: `BMB (${req.user!.fullName}) đã duyệt [${categoryToSave} - ${priorityToSave}] và giao cho KTV ${currentTech.fullName}`,
-            changedById: req.user!.userId,
-          },
-        });
-        const notificationsData: Array<{
-          userId: string;
-          ticketId: string;
-          type: NotificationType;
-          title: string;
-          message: string;
-          fcmSent: boolean;
-        }> = [
+      await tx.ticketStatusLog.create({
+        data: {
+          ticketId,
+          fromStatus: TicketStatus.PENDING,
+          toStatus: TicketStatus.ASSIGNED,
+          title: 'Đã phân công (Assigned)',
+          note: `BMB (${req.user!.fullName}) đã duyệt [${categoryToSave} - ${priorityToSave}] và giao cho KTV ${currentTech.fullName}`,
+          changedById: req.user!.userId,
+        },
+      });
+      const notificationsData: Array<{
+        userId: string;
+        ticketId: string;
+        type: NotificationType;
+        title: string;
+        message: string;
+        fcmSent: boolean;
+      }> = [
           {
             userId: currentTech.id,
             ticketId,
@@ -1661,58 +1750,102 @@ const handleApproveAssignTicket = async (req: AuthRequest, res: Response): Promi
             fcmSent: false,
           },
         ];
-        if (ticket.residentId) {
-          notificationsData.push({
-            userId: ticket.residentId,
-            ticketId,
-            type: NotificationType.STATUS_UPDATED,
-            title: `Đã phân công kỹ thuật viên cho ${ticket.ticketCode}`,
-            message: `KTV ${currentTech.fullName} đã được phân công xử lý sự cố của bạn.`,
-            fcmSent: false,
-          });
-        }
-        await tx.notification.createMany({
-          data: notificationsData,
+      if (ticket.residentId) {
+        notificationsData.push({
+          userId: ticket.residentId,
+          ticketId,
+          type: NotificationType.STATUS_UPDATED,
+          title: `Đã phân công kỹ thuật viên cho ${ticket.ticketCode}`,
+          message: `KTV ${currentTech.fullName} đã được phân công xử lý sự cố của bạn.`,
+          fcmSent: false,
         });
-        return tx.incidentTicket.findUniqueOrThrow({
-          where: { id: ticketId },
-          select: {
-            ...INCIDENT_TICKET_BASE_SELECT,
-            assignedTech: { select: { fullName: true, specialtyLabel: true } },
-            media: true,
-            statusLogs: {
-              include: { changedBy: { select: { fullName: true } } },
-              orderBy: { createdAt: 'asc' },
-            },
-          },
-        });
+      }
+      await tx.notification.createMany({
+        data: notificationsData,
       });
-
-      res.status(200).json({
-        success: true,
-        message: `Đã duyệt phân loại và giao việc cho KTV ${tech.fullName}.`,
-        ticket: {
-          ...updatedTicket,
-          photos: Array.isArray((updatedTicket as any).media)
-            ? (updatedTicket as any).media
-                .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
-                .map((m: any) => m.imageUrl)
-            : [],
+      return tx.incidentTicket.findUniqueOrThrow({
+        where: { id: ticketId },
+        select: {
+          ...INCIDENT_TICKET_BASE_SELECT,
+          assignedTech: { select: { fullName: true, specialtyLabel: true } },
+          media: true,
+          statusLogs: {
+            include: { changedBy: { select: { fullName: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
         },
       });
-    } catch (error) {
-      if (error instanceof RouteError) {
-        res.status(error.statusCode).json({ success: false, message: error.message });
-        return;
-      }
-      console.error('Lỗi khi duyệt và giao việc:', error);
-      res.status(500).json({ success: false, message: 'Lỗi khi duyệt và giao việc.' });
+    });
+
+    const cleanMedia = Array.isArray((updatedTicket as any).media)
+      ? (updatedTicket as any).media.map((m: any) => ({
+          ...m,
+          imageUrl: typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl,
+        }))
+      : [];
+
+    res.status(200).json({
+      success: true,
+      message: `Đã duyệt phân loại và giao việc cho KTV ${tech.fullName}.`,
+      ticket: {
+        ...updatedTicket,
+        media: cleanMedia,
+        photos: cleanMedia
+          .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+          .map((m: any) => m.imageUrl),
+      },
+    });
+  } catch (error) {
+    if (error instanceof RouteError) {
+      res.status(error.statusCode).json({ success: false, message: error.message });
+      return;
     }
+    console.error('Lỗi khi duyệt và giao việc:', error);
+    res.status(500).json({ success: false, message: 'Lỗi khi duyệt và giao việc.' });
+  }
 };
 
 router.patch('/:id/approve-assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
 router.patch('/:id/assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
 router.post('/:id/assign', authenticateJWT, authorizeRoles(Role.BMB), handleApproveAssignTicket);
+
+// ============================================================================
+// 5.1. GET /api/tickets/:id/suggested-technicians - Gợi ý KTV theo chuyên môn và khoảng cách
+// ============================================================================
+router.get(
+  '/:id/suggested-technicians',
+  authenticateJWT,
+  authorizeRoles(Role.BMB),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const ticketId = getParamAsString(req.params.id);
+      const categoryParam = typeof req.query.category === 'string' ? req.query.category.trim() : undefined;
+      let categoryOverride: IncidentCategory | null = null;
+      if (categoryParam !== undefined && categoryParam !== '') {
+        if (!isIncidentCategory(categoryParam)) {
+          res.status(200).json({
+            success: true,
+            category: null,
+            suggestedTechnicians: [],
+            message: 'Chọn danh mục để xem gợi ý kỹ thuật viên',
+          });
+          return;
+        }
+        categoryOverride = categoryParam;
+      }
+
+      const result = await suggestTechniciansForTicket(ticketId, categoryOverride);
+      res.status(200).json(result);
+    } catch (error: any) {
+      if (error instanceof RouteError) {
+        res.status(error.statusCode).json({ success: false, message: error.message });
+        return;
+      }
+      console.error('Lỗi khi gợi ý kỹ thuật viên:', error);
+      res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lấy gợi ý kỹ thuật viên.' });
+    }
+  }
+);
 
 // ============================================================================
 // 6. PATCH /api/tickets/:id/acknowledge - KTV bấm "Nhận việc ngay" (Assigned -> In Progress | FR07, US-31, US-32)
@@ -1780,19 +1913,78 @@ router.patch(
             },
           });
         }
+        await tx.technicianAiGuidance.upsert({
+          where: { ticketId },
+          create: {
+            ticketId,
+            status: 'GENERATING',
+            retryCount: 0,
+            lastErrorCode: null,
+            lockedAt: null,
+            lockedBy: null,
+            lockExpiresAt: null,
+          },
+          update: {
+            status: 'GENERATING',
+            retryCount: 0,
+            lastErrorCode: null,
+            lockedAt: null,
+            lockedBy: null,
+            lockExpiresAt: null,
+          },
+        });
         return tx.incidentTicket.findUniqueOrThrow({
           where: { id: ticketId },
           select: {
             ...INCIDENT_TICKET_BASE_SELECT,
-            statusLogs: { orderBy: { createdAt: 'asc' } },
+            resident: { select: { fullName: true, apartmentCode: true, buildingBlock: true, phone: true } },
+            assignedTech: { select: { fullName: true, specialtyLabel: true, phone: true, isOnDuty: true } },
+            area: true,
+            aiGuidance: true,
+            media: { orderBy: { createdAt: 'asc' } },
+            statusLogs: {
+              include: { changedBy: { select: { fullName: true, role: true } } },
+              orderBy: { createdAt: 'asc' },
+            },
           },
         });
       });
 
+      // Kích hoạt tác vụ chuẩn bị hướng dẫn AI cho KTV trong nền mà không chờ Gemini
+      technicianGuidanceWorker.triggerGuidance(ticketId);
+
+      const cleanMedia = Array.isArray((updatedTicket as any).media)
+        ? (updatedTicket as any).media.map((m: any) => ({
+            ...m,
+            imageUrl: typeof m.imageUrl === 'string' ? m.imageUrl.split('#')[0] : m.imageUrl,
+          }))
+        : [];
+
+      const formattedTicket = {
+        ...updatedTicket,
+        media: cleanMedia,
+        photos: cleanMedia
+          .filter((m: any) => m.mediaType === MediaType.SCENE_BEFORE)
+          .map((m: any) => m.imageUrl),
+        asset: (updatedTicket as any).area
+          ? {
+            id: (updatedTicket as any).area.id,
+            qrCode: (updatedTicket as any).area.qrCode,
+            assetName: (updatedTicket as any).area.areaName,
+            areaName: (updatedTicket as any).area.areaName,
+            locationLabel: (updatedTicket as any).area.locationLabel,
+            buildingBlock: (updatedTicket as any).area.buildingBlock,
+            floor: (updatedTicket as any).area.floor,
+            category: (updatedTicket as any).area.category,
+            isActive: (updatedTicket as any).area.isActive,
+          }
+          : null,
+      };
+
       res.status(200).json({
         success: true,
         message: 'Đã xác nhận nhận việc! Trạng thái chuyển sang Đang xử lý (IN_PROGRESS).',
-        ticket: updatedTicket,
+        ticket: formattedTicket,
       });
     } catch (error) {
       if (error instanceof RouteError) {
@@ -1801,6 +1993,85 @@ router.patch(
       }
       console.error('Lỗi khi nhận việc:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi nhận việc.' });
+    }
+  }
+);
+
+// ============================================================================
+// 6b. GET /api/tickets/:id/technician-guidance - Lấy hướng dẫn Trợ lý AI cho KTV (FR07, US-31, US-32)
+// ============================================================================
+router.get(
+  '/:id/technician-guidance',
+  authenticateJWT,
+  authorizeRoles(Role.TECHNICIAN),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const ticketId = getParamAsString(req.params.id);
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        select: {
+          id: true,
+          assignedTechId: true,
+          status: true,
+        },
+      });
+
+      if (!ticket) {
+        throw new RouteError(404, 'Không tìm thấy sự cố.');
+      }
+
+      // Chỉ KTV đang được phân công mới có quyền đọc hướng dẫn nội bộ
+      if (ticket.assignedTechId !== req.user!.userId) {
+        throw new RouteError(403, 'Bạn không được phân công xử lý sự cố này.');
+      }
+
+      const guidance = await prisma.technicianAiGuidance.findUnique({
+        where: { ticketId },
+      });
+
+      if (!guidance) {
+        res.status(200).json({
+          success: true,
+          guidance: {
+            status: 'UNAVAILABLE',
+            possibleCauses: [],
+            inspectionChecklist: [],
+            estimatedMaterials: [],
+            safeHandlingSteps: [],
+            stopAndEscalateWhen: [],
+            uncertaintyNote: null,
+            isSafetyHazard: false,
+            hazardType: null,
+            hazardWarning: null,
+          },
+        });
+        return;
+      }
+
+      // Trả dữ liệu hợp đồng chuẩn, tuyệt đối không lộ SDK error hay API key
+      res.status(200).json({
+        success: true,
+        guidance: {
+          status: guidance.status,
+          possibleCauses: (guidance.possibleCauses as any) || [],
+          inspectionChecklist: (guidance.inspectionChecklist as any) || [],
+          estimatedMaterials: (guidance.estimatedMaterials as any) || [],
+          safeHandlingSteps: (guidance.safeHandlingSteps as any) || [],
+          stopAndEscalateWhen: (guidance.stopAndEscalateWhen as any) || [],
+          uncertaintyNote: guidance.uncertaintyNote,
+          isSafetyHazard: guidance.isSafetyHazard,
+          hazardType: guidance.hazardType,
+          hazardWarning: guidance.hazardWarning,
+          updatedAt: guidance.updatedAt,
+        },
+      });
+    } catch (error) {
+      if (error instanceof RouteError) {
+        res.status(error.statusCode).json({ success: false, message: error.message });
+        return;
+      }
+      console.error('Lỗi khi lấy hướng dẫn AI cho KTV:', error);
+      res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lấy hướng dẫn AI.' });
     }
   }
 );

@@ -902,15 +902,7 @@
   "overtimeRequests": [],
   "reconcileRequests": [],
   "lockedMonths": [],
-  "activeNonces": [
-    {
-      "nonce": "6d91b2dd3818c7e97ea6412d5397b37d",
-      "techId": "622b32f6-09ef-4123-b25f-c302fbd7a881",
-      "createdAt": 1795008446791,
-      "expiresAt": 1795008626791,
-      "used": false
-    }
-  ],
+  "activeNonces": [],
   "scheduleRequests": [],
   "repairCosts": [],
   "costConfig": {

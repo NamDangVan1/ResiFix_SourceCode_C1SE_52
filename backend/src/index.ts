@@ -4,6 +4,8 @@ import cors from 'cors';
 import { prisma } from './config/database';
 import apiRouter from './routes';
 import { slaWorker } from './services/sla_worker';
+import { aiWorker } from './services/ai_worker';
+import { technicianGuidanceWorker } from './services/technician_guidance_worker';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -42,6 +44,8 @@ app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`✅ Đã nạp DATABASE_URL: ${process.env.DATABASE_URL ? 'THÀNH CÔNG' : 'THẤT BẠI (Kiểm tra lại tên file .env)'}`);
   console.log(`🚀 ResiFix Backend Server đang chạy tại: http://localhost:${PORT}/api/health`);
   slaWorker.start();
+  aiWorker.start();
+  technicianGuidanceWorker.start();
 
   // Kiểm tra kết nối cơ sở dữ liệu khi khởi động
   prisma.$queryRaw`SELECT 1`

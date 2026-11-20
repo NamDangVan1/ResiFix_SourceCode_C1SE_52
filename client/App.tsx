@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Platform,
@@ -35,7 +35,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // CẤU HÌNH ĐỊA CHỈ BACKEND CHUẨN CHO CẢ WEB & ĐIỆN THOẠI
 // ============================================================================
 
-const COMPUTER_LAN_IP = '172.26.42.138'; // IP Wi-Fi hiện tại của máy tính
+const COMPUTER_LAN_IP = '192.168.100.241'; // IP Wi-Fi hiện tại của máy tính
 
 const getApiBaseUrl = () => {
   if (Platform.OS === 'web') {
@@ -672,14 +672,51 @@ function AppContent() {
   const [bmbViewingWorkloadTech, setBmbViewingWorkloadTech] = useState<any | null>(null);
   const [bmbRadioTicketId, setBmbRadioTicketId] = useState<string>('');
 
+  // Gợi ý kỹ thuật viên theo chuyên môn và khoảng cách cho BMB
+  const [suggestedTechnicians, setSuggestedTechnicians] = useState<any[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState<boolean>(false);
+  const [suggestionsMessage, setSuggestionsMessage] = useState<string>('');
+  const suggestionRequestIdRef = useRef<number>(0);
+
+  // Trợ lý AI kỹ thuật viên cho KTV
+  const [technicianGuidance, setTechnicianGuidance] = useState<any | null>(null);
+  const [technicianGuidanceLoading, setTechnicianGuidanceLoading] = useState<boolean>(false);
+  const [checkedChecklistItems, setCheckedChecklistItems] = useState<Record<string, boolean>>({});
+
+  const fetchTechnicianGuidance = useCallback(async (ticketId: string) => {
+    if (!token || !ticketId) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/tickets/${ticketId}/technician-guidance`, {
+        headers: { Authorization: `Bearer ${token}`, 'bypass-tunnel-reminder': 'true' },
+      });
+      const data = await res.json();
+      if (data.success && data.guidance) {
+        setTechnicianGuidance(data.guidance);
+        return data.guidance;
+      }
+    } catch (err) {
+      console.warn('[Fetch Guidance Error]', err);
+    }
+    return null;
+  }, [token]);
+
   // State xem ảnh phóng to của cư dân cho BMB
   const [bmbPhotoViewerVisible, setBmbPhotoViewerVisible] = useState<boolean>(false);
   const [bmbPhotoViewerIndex, setBmbPhotoViewerIndex] = useState<number>(0);
   const [bmbPhotoViewerList, setBmbPhotoViewerList] = useState<{ id: string; url: string; caption?: string }[]>([]);
   const [bmbPhotoModalLoading, setBmbPhotoModalLoading] = useState<boolean>(false);
   const [bmbPhotoModalError, setBmbPhotoModalError] = useState<boolean>(false);
+  const [failedPhotoUrls, setFailedPhotoUrls] = useState<Record<string, boolean>>({});
 
-  // Trích xuất danh sách ảnh ban đầu do Cư dân báo cáo (chỉ lấy SCENE_BEFORE, tuyệt đối loại trừ REPAIR_PROOF của KTV)
+  const openReportedPhoto = (photos: typeof bmbPhotoViewerList, index: number) => {
+    setBmbPhotoViewerList(photos);
+    setBmbPhotoViewerIndex(index);
+    setBmbPhotoModalLoading(true);
+    setBmbPhotoModalError(false);
+    setBmbPhotoViewerVisible(true);
+  };
+
+  // Trích xuất danh sách ảnh ban đầu do Cư dân hoặc Khách ẩn danh báo cáo (chỉ lấy SCENE_BEFORE, tuyệt đối loại trừ REPAIR_PROOF của KTV)
   const getResidentReportedMedia = (ticket: any): { id: string; url: string; caption?: string }[] => {
     if (!ticket) return [];
     const items: { id: string; url: string; caption?: string }[] = [];
@@ -688,49 +725,57 @@ function AppContent() {
     // 1. Lấy từ ticket.media (quan hệ Prisma chuẩn của IncidentTicket)
     if (Array.isArray(ticket.media) && ticket.media.length > 0) {
       for (const m of ticket.media) {
-        if (!m || !m.imageUrl) continue;
+        if (!m || !m.imageUrl || typeof m.imageUrl !== 'string' || !m.imageUrl.trim()) continue;
         if (m.ticketId && ticket.id && m.ticketId !== ticket.id) continue;
         // Tuyệt đối không lấy ảnh nghiệm thu sau sửa của KTV
         if (m.mediaType === 'REPAIR_PROOF') continue;
+        if (ticket.assignedTechId && m.uploadedById === ticket.assignedTechId) continue;
+
+        const cleanUrl = m.imageUrl.split('#')[0].trim();
+        if (!cleanUrl) continue;
 
         if (m.mediaType === 'SCENE_BEFORE') {
-          if (!seenUrls.has(m.imageUrl)) {
-            seenUrls.add(m.imageUrl);
+          if (!seenUrls.has(cleanUrl)) {
+            seenUrls.add(cleanUrl);
             items.push({
-              id: m.id || m.imageUrl,
-              url: m.imageUrl,
-              caption: m.caption || translate('Ảnh hiện trường cư dân cung cấp'),
+              id: m.id || cleanUrl,
+              url: cleanUrl,
+              caption: m.caption || translate('Ảnh hiện trường'),
             });
           }
           continue;
         }
 
-        // Tương thích ngược an toàn nếu dữ liệu cũ chưa có mediaType
+        // Tương thích ngược an toàn nếu dữ liệu cũ chưa có mediaType hoặc báo cáo ẩn danh
         const isUploadedByResident = ticket.residentId && m.uploadedById === ticket.residentId;
-        const isSceneCaption = m.caption && /hiện trường|báo cáo|cư dân/i.test(m.caption);
-        if (isUploadedByResident || isSceneCaption) {
-          if (!seenUrls.has(m.imageUrl)) {
-            seenUrls.add(m.imageUrl);
+        const isAnonymousReport = ticket.isAnonymous || !ticket.residentId;
+        const isSceneCaption = m.caption && /hiện trường|báo cáo|cư dân|ẩn danh/i.test(m.caption);
+        if (isUploadedByResident || isAnonymousReport || isSceneCaption || !m.mediaType) {
+          if (!seenUrls.has(cleanUrl)) {
+            seenUrls.add(cleanUrl);
             items.push({
-              id: m.id || m.imageUrl,
-              url: m.imageUrl,
-              caption: m.caption || translate('Ảnh hiện trường cư dân cung cấp'),
+              id: m.id || cleanUrl,
+              url: cleanUrl,
+              caption: m.caption || translate('Ảnh hiện trường'),
             });
           }
         }
       }
     }
 
-    // 2. Dự phòng an toàn nếu ticket có mảng photos (chuỗi URL) từ API
-    if (items.length === 0 && Array.isArray(ticket.photos) && ticket.photos.length > 0) {
+    // 2. Bổ sung / dự phòng nếu ticket có mảng photos (chuỗi URL) từ API
+    if (Array.isArray(ticket.photos) && ticket.photos.length > 0) {
       ticket.photos.forEach((photoUrl: any, idx: number) => {
-        if (typeof photoUrl === 'string' && photoUrl.startsWith('http') && !seenUrls.has(photoUrl)) {
-          seenUrls.add(photoUrl);
-          items.push({
-            id: `photo-${idx}-${photoUrl}`,
-            url: photoUrl,
-            caption: `${translate('Ảnh hiện trường')} ${idx + 1}`,
-          });
+        if (typeof photoUrl === 'string' && photoUrl.trim().startsWith('http')) {
+          const cleanPhotoUrl = photoUrl.split('#')[0].trim();
+          if (cleanPhotoUrl && !seenUrls.has(cleanPhotoUrl)) {
+            seenUrls.add(cleanPhotoUrl);
+            items.push({
+              id: `photo-${idx}-${cleanPhotoUrl}`,
+              url: cleanPhotoUrl,
+              caption: `${translate('Ảnh hiện trường')} ${idx + 1}`,
+            });
+          }
         }
       });
     }
@@ -1227,14 +1272,60 @@ function AppContent() {
       setTickets(list);
       if (activeTicket) {
         const updated = list.find((item: any) => item.id === activeTicket.id);
-        if (updated) setActiveTicket(updated);
+        if (updated) {
+          const mergedMedia =
+            Array.isArray(updated.media) && updated.media.length > 0
+              ? updated.media
+              : Array.isArray(activeTicket.media) && activeTicket.media.length > 0
+                ? activeTicket.media
+                : [];
+          const mergedPhotos =
+            Array.isArray(updated.photos) && updated.photos.length > 0
+              ? updated.photos
+              : Array.isArray(activeTicket.photos) && activeTicket.photos.length > 0
+                ? activeTicket.photos
+                : [];
+          setActiveTicket({
+            ...activeTicket,
+            ...updated,
+            media: mergedMedia,
+            photos: mergedPhotos,
+            asset: updated.asset || activeTicket.asset || null,
+            area: updated.area || activeTicket.area || null,
+          });
+        }
       }
       if (currentUser.role === 'BMB') {
         if (list.length > 0) {
-          const currentSel = bmbSelectedTicket
-            ? list.find((x: any) => x.id === bmbSelectedTicket.id) || list[0]
-            : list[0];
-          handleSelectBmbTicket(currentSel);
+          if (!bmbSelectedTicket) {
+            handleSelectBmbTicket(list[0]);
+          } else {
+            const currentSel = list.find((x: any) => x.id === bmbSelectedTicket.id);
+            if (currentSel) {
+              const mergedMedia =
+                Array.isArray(currentSel.media) && currentSel.media.length > 0
+                  ? currentSel.media
+                  : Array.isArray(bmbSelectedTicket.media) && bmbSelectedTicket.media.length > 0
+                    ? bmbSelectedTicket.media
+                    : [];
+              const mergedPhotos =
+                Array.isArray(currentSel.photos) && currentSel.photos.length > 0
+                  ? currentSel.photos
+                  : Array.isArray(bmbSelectedTicket.photos) && bmbSelectedTicket.photos.length > 0
+                    ? bmbSelectedTicket.photos
+                    : [];
+              setBmbSelectedTicket({
+                ...bmbSelectedTicket,
+                ...currentSel,
+                media: mergedMedia,
+                photos: mergedPhotos,
+                asset: currentSel.asset || bmbSelectedTicket.asset || null,
+                area: currentSel.area || bmbSelectedTicket.area || null,
+              });
+            } else {
+              handleSelectBmbTicket(list[0]);
+            }
+          }
           const firstPending = list.find((x: any) => x.status === 'PENDING') || list[0];
           setBmbRadioTicketId(firstPending.id);
         } else {
@@ -2399,8 +2490,8 @@ function AppContent() {
         <AnimatedModalContent visible={showAttendanceReviewModal} style={[styles.technicianModalCard, { width: 560 }]}>
           <Text style={styles.technicianModalTitle}>
             {bmbReviewAction === 'APPROVE' ? translate('Phê duyệt Chấm công') :
-             bmbReviewAction === 'REQUEST_EXPLANATION' ? translate('Yêu cầu KTV Giải trình') :
-             translate('Từ chối tính công')}
+              bmbReviewAction === 'REQUEST_EXPLANATION' ? translate('Yêu cầu KTV Giải trình') :
+                translate('Từ chối tính công')}
           </Text>
           <Text style={styles.technicianModalDescription}>
             {translate('Kỹ thuật viên:')} <Text style={{ fontWeight: '700' }}>{selectedAttendanceForReview?.techName}</Text> • {translate('Ngày:')} {selectedAttendanceForReview?.date} • {translate('Ca:')} {selectedAttendanceForReview?.shiftScheduled || '07:00 - 15:00'}
@@ -2469,8 +2560,8 @@ function AppContent() {
               multiline
               placeholder={
                 bmbReviewAction === 'APPROVE' ? 'VD: Đã đối chiếu camera và xác nhận KTV có mặt làm việc.' :
-                bmbReviewAction === 'REQUEST_EXPLANATION' ? 'VD: Yêu cầu giải trình lý do GPS nằm ngoài khuôn viên tòa nhà.' :
-                'VD: Chấm công không hợp lệ, không liên lạc được với KTV.'
+                  bmbReviewAction === 'REQUEST_EXPLANATION' ? 'VD: Yêu cầu giải trình lý do GPS nằm ngoài khuôn viên tòa nhà.' :
+                    'VD: Chấm công không hợp lệ, không liên lạc được với KTV.'
               }
               placeholderTextColor="#94A3B8"
             />
@@ -2685,7 +2776,7 @@ function AppContent() {
           }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Text style={{ color: '#F8FAFC', fontWeight: '700', fontSize: 14 }}>
-                📷 {translate("Hình ảnh cư dân báo cáo")}
+                📷 {translate("Ảnh hiện trường")}
               </Text>
               {bmbPhotoViewerList.length > 0 && (
                 <View style={{
@@ -2852,7 +2943,7 @@ function AppContent() {
             gap: 8,
           }}>
             <Text style={{ color: '#CBD5E1', fontSize: 13, flex: 1 }}>
-              {bmbPhotoViewerList[bmbPhotoViewerIndex]?.caption || translate("Ảnh hiện trường do cư dân gửi")}
+              {bmbPhotoViewerList[bmbPhotoViewerIndex]?.caption || translate("Ảnh hiện trường")}
             </Text>
 
             {bmbPhotoViewerList.length > 1 && (
@@ -3294,6 +3385,9 @@ function AppContent() {
 
 
   const handleSelectBmbTicket = (t: any) => {
+    setBmbPhotoViewerVisible(false);
+    setBmbPhotoViewerList([]);
+    setBmbPhotoViewerIndex(0);
     setBmbSelectedTicket(t);
     setBmbCategory(t.finalCategory || t.aiSuggestedCategory || 'OTHER');
     setBmbPriority(t.finalPriority || t.aiSuggestedPriority || 'MEDIUM');
@@ -3301,7 +3395,115 @@ function AppContent() {
     if (t.assignedTechId) setBmbTechId(t.assignedTechId);
   };
 
+  const loadSuggestedTechnicians = useCallback(
+    async (ticketId?: string, category?: string) => {
+      if (!ticketId) {
+        setSuggestedTechnicians([]);
+        setSuggestionsMessage('');
+        return;
+      }
+      if (!category) {
+        setSuggestedTechnicians([]);
+        setSuggestionsMessage(translate('Chọn danh mục để xem gợi ý kỹ thuật viên'));
+        return;
+      }
+      if (!token) return;
+
+      const reqId = ++suggestionRequestIdRef.current;
+      setLoadingSuggestions(true);
+      try {
+        const headers = {
+          Authorization: `Bearer ${token}`,
+          'bypass-tunnel-reminder': 'true',
+        };
+        const res = await fetch(
+          `${API_BASE_URL}/tickets/${ticketId}/suggested-technicians?category=${encodeURIComponent(category)}`,
+          { headers }
+        );
+        const data = await res.json();
+        if (reqId === suggestionRequestIdRef.current) {
+          if (data.success && Array.isArray(data.suggestedTechnicians)) {
+            setSuggestedTechnicians(data.suggestedTechnicians);
+            setSuggestionsMessage(
+              data.message ||
+                (data.suggestedTechnicians.length === 0
+                  ? translate('Không có kỹ thuật viên phù hợp với chuyên môn này đang trong ca trực.')
+                  : '')
+            );
+          } else {
+            setSuggestedTechnicians([]);
+            setSuggestionsMessage(data.message || '');
+          }
+        }
+      } catch (_err) {
+        if (reqId === suggestionRequestIdRef.current) {
+          setSuggestedTechnicians([]);
+          setSuggestionsMessage('');
+        }
+      } finally {
+        if (reqId === suggestionRequestIdRef.current) {
+          setLoadingSuggestions(false);
+        }
+      }
+    },
+    [token]
+  );
+
+  useEffect(() => {
+    if (user?.role === 'BMB' && bmbSelectedTicket?.id) {
+      loadSuggestedTechnicians(bmbSelectedTicket.id, bmbCategory);
+    } else {
+      setSuggestedTechnicians([]);
+      setSuggestionsMessage('');
+    }
+  }, [bmbSelectedTicket?.id, bmbCategory, loadSuggestedTechnicians, user?.role]);
+
+  // Nạp hướng dẫn Trợ lý AI khi KTV mở chi tiết sự cố
+  useEffect(() => {
+    if (user?.role === 'TECHNICIAN' && techScreen === 'TASK_DETAIL' && activeTicket?.id) {
+      setCheckedChecklistItems({});
+      if (activeTicket.status === 'IN_PROGRESS' || activeTicket.status === 'COMPLETED' || activeTicket.status === 'CLOSED') {
+        setTechnicianGuidanceLoading(true);
+        void fetchTechnicianGuidance(activeTicket.id).finally(() => {
+          setTechnicianGuidanceLoading(false);
+        });
+      } else {
+        setTechnicianGuidance(null);
+        setTechnicianGuidanceLoading(false);
+      }
+    } else {
+      setTechnicianGuidance(null);
+      setTechnicianGuidanceLoading(false);
+    }
+  }, [user?.role, techScreen, activeTicket?.id, activeTicket?.status, fetchTechnicianGuidance]);
+
+  // Polling tự động làm mới khi guidance đang ở trạng thái GENERATING
+  useEffect(() => {
+    if (
+      user?.role === 'TECHNICIAN' &&
+      techScreen === 'TASK_DETAIL' &&
+      activeTicket?.id &&
+      technicianGuidance?.status === 'GENERATING'
+    ) {
+      const currentTicketId = activeTicket.id;
+      const interval = setInterval(async () => {
+        if (activeTicket?.id !== currentTicketId) {
+          clearInterval(interval);
+          return;
+        }
+        const res = await fetchTechnicianGuidance(currentTicketId);
+        if (res && res.status !== 'GENERATING') {
+          clearInterval(interval);
+        }
+      }, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [user?.role, techScreen, activeTicket?.id, technicianGuidance?.status, fetchTechnicianGuidance]);
+
   const openResidentTicket = (ticket: any) => {
+    setBmbPhotoViewerVisible(false);
+    setBmbPhotoViewerList([]);
+    setBmbPhotoViewerIndex(0);
     setActiveTicket(ticket);
     setResScreen('TICKET_DETAIL');
     if (token) {
@@ -3322,6 +3524,9 @@ function AppContent() {
   };
 
   const openTechnicianTask = (ticket: any) => {
+    setBmbPhotoViewerVisible(false);
+    setBmbPhotoViewerList([]);
+    setBmbPhotoViewerIndex(0);
     setActiveTicket(ticket);
     setTechRepairNote(ticket.techRepairNote || '');
     setTechProofPhotos([]);
@@ -3877,15 +4082,15 @@ function AppContent() {
 
       const result = fromCamera
         ? await ImagePicker.launchCameraAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            quality: 0.7,
-            base64: true,
-          })
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.7,
+          base64: true,
+        })
         : await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            quality: 0.7,
-            base64: true,
-          });
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.7,
+          base64: true,
+        });
 
       if (result.canceled || !result.assets || !result.assets[0]?.base64) return;
 
@@ -4038,7 +4243,7 @@ function AppContent() {
           translate('Mã QR không hợp lệ'),
           translate(
             data.message ||
-              'Mã QR không hợp lệ hoặc khu vực hiện không còn hoạt động. Vui lòng quét lại mã QR tại khu vực sự cố.'
+            'Mã QR không hợp lệ hoặc khu vực hiện không còn hoạt động. Vui lòng quét lại mã QR tại khu vực sự cố.'
           )
         );
       } catch {
@@ -4278,8 +4483,12 @@ function AppContent() {
         setScannedAsset(null);
         setReportPhotos([]);
         setIsVoiceUsed(false);
-        setResScreen('HOME');
-        showToast(translate(data.message || `Đã gửi ${data.ticket.ticketCode} thành công.`));
+        showToast(translate(data.message || `Đã gửi ${data.ticket?.ticketCode || 'sự cố'} thành công.`));
+        if (data.ticket) {
+          openResidentTicket(data.ticket);
+        } else {
+          setResScreen('HOME');
+        }
         await fetchAllData();
       } else {
         showToast(
@@ -4368,9 +4577,41 @@ function AppContent() {
       if (data.success) {
         showToast(`🛠️ Đã nhận việc ${ticketObj.ticketCode}!`);
         await fetchAllData();
-        setActiveTicket(data.ticket || { ...ticketObj, status: 'IN_PROGRESS' });
+        const prevTicket = activeTicket?.id === ticketObj.id ? activeTicket : ticketObj;
+        const mergedMedia =
+          Array.isArray(data.ticket?.media) && data.ticket.media.length > 0
+            ? data.ticket.media
+            : Array.isArray(prevTicket?.media) && prevTicket.media.length > 0
+              ? prevTicket.media
+              : [];
+        const mergedPhotos =
+          Array.isArray(data.ticket?.photos) && data.ticket.photos.length > 0
+            ? data.ticket.photos
+            : Array.isArray(prevTicket?.photos) && prevTicket.photos.length > 0
+              ? prevTicket.photos
+              : [];
+        const mergedAsset = data.ticket?.asset || prevTicket?.asset || null;
+        const mergedArea = data.ticket?.area || prevTicket?.area || null;
+
+        setActiveTicket({
+          ...prevTicket,
+          ...data.ticket,
+          media: mergedMedia,
+          photos: mergedPhotos,
+          asset: mergedAsset,
+          area: mergedArea,
+          status: data.ticket?.status ?? 'IN_PROGRESS',
+        });
         setTechScreen('TASK_DETAIL');
+        if (data.ticket?.id) {
+          setTechnicianGuidance({ status: 'GENERATING' });
+          void fetchTechnicianGuidance(data.ticket.id);
+        }
+      } else {
+        showToast(data.message || translate('Lỗi khi nhận việc.'));
       }
+    } catch {
+      showToast(translate('Không kết nối được Backend. Vui lòng thử lại.'));
     } finally {
       setLoading(false);
     }
@@ -4474,7 +4715,24 @@ function AppContent() {
       const data = await res.json();
       if (data.success) {
         showToast(`✅ Đã duyệt & giao việc thành công! Đã gửi thông báo đẩy FCM.`);
-        setBmbSelectedTicket(data.ticket);
+        const assignedTicket = data.ticket;
+        setBmbSelectedTicket((prev: any) => {
+          if (!prev || prev.id !== assignedTicket?.id) return assignedTicket;
+          const mergedMedia =
+            Array.isArray(assignedTicket?.media) && assignedTicket.media.length > 0
+              ? assignedTicket.media
+              : prev.media || [];
+          const mergedPhotos =
+            Array.isArray(assignedTicket?.photos) && assignedTicket.photos.length > 0
+              ? assignedTicket.photos
+              : prev.photos || [];
+          return {
+            ...prev,
+            ...assignedTicket,
+            media: mergedMedia,
+            photos: mergedPhotos,
+          };
+        });
         await fetchAllData();
       } else {
         showToast(data.message || 'Lỗi khi giao việc');
@@ -4691,10 +4949,10 @@ function AppContent() {
                   {activationRole === 'TECHNICIAN'
                     ? translate('Kích hoạt tài khoản Kỹ thuật viên')
                     : activationRole === 'RESIDENT'
-                    ? translate('Kích hoạt tài khoản Cư dân')
-                    : activationRole === 'BMB'
-                    ? translate('Kích hoạt tài khoản Ban Quản Lý')
-                    : translate('Kích hoạt tài khoản')}
+                      ? translate('Kích hoạt tài khoản Cư dân')
+                      : activationRole === 'BMB'
+                        ? translate('Kích hoạt tài khoản Ban Quản Lý')
+                        : translate('Kích hoạt tài khoản')}
                 </Text>
 
                 {activationFullName ? (
@@ -4706,16 +4964,16 @@ function AppContent() {
                       <View style={[styles.statusPill, {
                         backgroundColor:
                           activationRole === 'TECHNICIAN' ? '#E0F2FE' :
-                          activationRole === 'BMB' ? '#F3E8FF' : '#DCFCE7'
+                            activationRole === 'BMB' ? '#F3E8FF' : '#DCFCE7'
                       }]}>
                         <Text style={[styles.statusPillText, {
                           color:
                             activationRole === 'TECHNICIAN' ? '#0369A1' :
-                            activationRole === 'BMB' ? '#7E22CE' : '#15803D',
+                              activationRole === 'BMB' ? '#7E22CE' : '#15803D',
                           fontWeight: '700'
                         }]}>
                           {activationRole === 'TECHNICIAN' ? translate('Kỹ thuật viên') :
-                           activationRole === 'BMB' ? translate('Kích hoạt tài khoản Ban Quản Lý') : translate('Cư dân')}
+                            activationRole === 'BMB' ? translate('Kích hoạt tài khoản Ban Quản Lý') : translate('Cư dân')}
                         </Text>
                       </View>
                     ) : null}
@@ -4739,23 +4997,23 @@ function AppContent() {
                   <View style={[styles.statusPill, {
                     backgroundColor:
                       activationOtpStatus === 'SENT' ? '#DCFCE7' :
-                      activationOtpStatus === 'SENDING' ? '#E0F2FE' :
-                      activationOtpStatus === 'FAILED' ? '#FEE2E2' :
-                      activationOtpStatus === 'EXPIRED' ? '#FEF3C7' : '#F1F5F9'
+                        activationOtpStatus === 'SENDING' ? '#E0F2FE' :
+                          activationOtpStatus === 'FAILED' ? '#FEE2E2' :
+                            activationOtpStatus === 'EXPIRED' ? '#FEF3C7' : '#F1F5F9'
                   }]}>
                     <Text style={[styles.statusPillText, {
                       color:
                         activationOtpStatus === 'SENT' ? '#15803D' :
-                        activationOtpStatus === 'SENDING' ? '#0369A1' :
-                        activationOtpStatus === 'FAILED' ? '#DC2626' :
-                        activationOtpStatus === 'EXPIRED' ? '#B45309' : '#475569',
+                          activationOtpStatus === 'SENDING' ? '#0369A1' :
+                            activationOtpStatus === 'FAILED' ? '#DC2626' :
+                              activationOtpStatus === 'EXPIRED' ? '#B45309' : '#475569',
                       fontWeight: '700'
                     }]}>
                       {activationOtpStatus === 'SENT' ? ('🟢 ' + translate('Đã gửi OTP')) :
-                       activationOtpStatus === 'SENDING' ? ('🔄 ' + translate('Đang gửi OTP')) :
-                       activationOtpStatus === 'FAILED' ? ('🔴 ' + translate('Gửi OTP thất bại')) :
-                       activationOtpStatus === 'EXPIRED' ? ('⚠️ ' + translate('OTP hết hạn')) :
-                       ('⚪ ' + translate('Chưa gửi OTP'))}
+                        activationOtpStatus === 'SENDING' ? ('🔄 ' + translate('Đang gửi OTP')) :
+                          activationOtpStatus === 'FAILED' ? ('🔴 ' + translate('Gửi OTP thất bại')) :
+                            activationOtpStatus === 'EXPIRED' ? ('⚠️ ' + translate('OTP hết hạn')) :
+                              ('⚪ ' + translate('Chưa gửi OTP'))}
                     </Text>
                   </View>
                 </View>
@@ -5008,6 +5266,17 @@ function AppContent() {
                     </View>
                     <Text style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic', lineHeight: 17 }}>
                       {anonymousReceipt.verificationReason}
+                    </Text>
+                  </View>
+                  <View style={{ borderTopWidth: 1, borderTopColor: '#E2E8F0', paddingTop: 8, marginTop: 2 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{translate('Đánh giá AI:')}</Text>
+                      <View style={{ backgroundColor: '#EFF6FF', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: '#BFDBFE' }}>
+                        <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#2563EB' }}>⏳ {translate('Đang phân tích')}</Text>
+                      </View>
+                    </View>
+                    <Text style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic', lineHeight: 17 }}>
+                      {translate('Hệ thống đang phân tích ảnh và mô tả sự cố trong nền.')}
                     </Text>
                   </View>
                 </View>
@@ -5407,18 +5676,21 @@ function AppContent() {
                 placeholderTextColor="#94A3B8"
               />
 
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
                 <Text style={styles.fieldLabel}>{translate('Mô tả chi tiết sự cố *')}</Text>
                 <Text style={{ fontSize: 11, color: anonymousDesc.trim().length >= 10 ? '#059669' : '#DC2626' }}>
                   {anonymousDesc.trim().length}/10 {translate('ký tự tối thiểu')}
                 </Text>
               </View>
+              <Text style={{ fontSize: 11.5, color: '#64748B', marginBottom: 6, fontStyle: 'italic' }}>
+                {translate('Gợi ý: Thiết bị nào gặp sự cố? Xảy ra khi nào? Ảnh hưởng ra sao?')}
+              </Text>
 
               <TextInput
                 style={[styles.descTextArea, { minHeight: 90 }]}
                 value={anonymousDesc}
                 onChangeText={setAnonymousDesc}
-                placeholder={translate('Nhập chi tiết hiện trạng sự cố, tiếng kêu, rò rỉ hoặc bấm "Nhấn để nói" bên dưới...')}
+                placeholder={translate('Thiết bị nào gặp sự cố? Xảy ra khi nào? Ảnh hưởng ra sao? (Có thể bấm "Nhấn để nói" bên dưới...)')}
                 placeholderTextColor="#94A3B8"
                 multiline
                 numberOfLines={4}
@@ -5588,129 +5860,313 @@ function AppContent() {
         <ScreenTransition transitionKey="BMB_WEB" style={{ flex: 1 }}>
           <SafeAreaView style={styles.bmbLoginOuterBg}>
             <View style={styles.bmbLoginSplitCard}>
-            {/* Cột trái màu xanh dương đậm */}
-            <View style={styles.bmbLoginLeftBlue}>
-              <View>
-                <View style={styles.rowCenter}>
-                  <View style={{ marginRight: 10 }}><ResiFixLogoMark size={30} /></View>
-                  <View>
-                    <Text style={styles.bmbLoginBrandText}>ResiFix BMB</Text>
-                    <Text style={{ fontSize: 11, color: '#93C5FD', fontWeight: '600', letterSpacing: 0.5 }}>ENTERPRISE CLOUD</Text>
+              {/* Cột trái màu xanh dương đậm */}
+              <View style={styles.bmbLoginLeftBlue}>
+                <View>
+                  <View style={styles.rowCenter}>
+                    <View style={{ marginRight: 10 }}><ResiFixLogoMark size={30} /></View>
+                    <View>
+                      <Text style={styles.bmbLoginBrandText}>ResiFix BMB</Text>
+                      <Text style={{ fontSize: 11, color: '#93C5FD', fontWeight: '600', letterSpacing: 0.5 }}>ENTERPRISE CLOUD</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.bmbLoginHeroTitle}>
+                    {translate("Hệ thống Quản lý & Điều phối Sự cố Tòa nhà Thông minh")}
+                  </Text>
+                  <Text style={{ fontSize: 13, color: '#BFDBFE', marginTop: 8, lineHeight: 20 }}>
+                    {translate("Giải pháp tự động hóa vận hành, kiểm soát SLA và quản lý chi phí toàn diện.")}
+                  </Text>
+
+                  {/* 3 bullet feature badges */}
+                  <View style={{ marginTop: 24, gap: 12 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
+                      </View>
+                      <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
+                        {translate("Tối ưu phân công sự cố tự động bằng Gemini AI")}
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
+                      </View>
+                      <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
+                        {translate("Giám sát chấm công GPS & ảnh chống gian lận")}
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
+                      </View>
+                      <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
+                        {translate("Minh bạch bảng lương, tăng ca và chi phí vận hành")}
+                      </Text>
+                    </View>
                   </View>
                 </View>
-                <Text style={styles.bmbLoginHeroTitle}>
-                  {translate("Hệ thống Quản lý & Điều phối Sự cố Tòa nhà Thông minh")}
-                </Text>
-                <Text style={{ fontSize: 13, color: '#BFDBFE', marginTop: 8, lineHeight: 20 }}>
-                  {translate("Giải pháp tự động hóa vận hành, kiểm soát SLA và quản lý chi phí toàn diện.")}
-                </Text>
 
-                {/* 3 bullet feature badges */}
-                <View style={{ marginTop: 24, gap: 12 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
-                    </View>
-                    <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
-                      {translate("Tối ưu phân công sự cố tự động bằng Gemini AI")}
-                    </Text>
-                  </View>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
-                    </View>
-                    <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
-                      {translate("Giám sát chấm công GPS & ảnh chống gian lận")}
-                    </Text>
-                  </View>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800' }}>✓</Text>
-                    </View>
-                    <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '500' }}>
-                      {translate("Minh bạch bảng lương, tăng ca và chi phí vận hành")}
-                    </Text>
-                  </View>
+                <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.15)', paddingTop: 14 }}>
+                  <Text style={{ color: '#93C5FD', fontSize: 11 }}>
+                    ResiFix Enterprise Platform • v2.4.0 • 2026
+                  </Text>
                 </View>
               </View>
 
-              <View style={{ marginTop: 32, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.15)', paddingTop: 14 }}>
-                <Text style={{ color: '#93C5FD', fontSize: 11 }}>
-                  ResiFix Enterprise Platform • v2.4.0 • 2026
+              {/* Cột phải màu trắng */}
+              <View style={styles.bmbLoginRightWhite}>
+                <Text style={styles.bmbLoginFormHeading}>{translate("Đăng nhập")}</Text>
+                <Text style={[styles.loginCardSub, { marginBottom: 16 }]}>
+                  {translate("Hệ thống tự động nhận diện vai trò Ban Quản Lý (BMB), Kỹ thuật viên hoặc Cư dân.")}
                 </Text>
+
+                {toastMsg && (
+                  <View style={[styles.toastBanner, { marginHorizontal: 0, marginBottom: 12 }]}>
+                    <Text style={styles.toastText}>{toastMsg}</Text>
+                  </View>
+                )}
+
+                <Text style={styles.fieldLabel}>{translate("Email hoặc Số điện thoại công vụ *")}</Text>
+                <TextInput
+                  style={styles.bmbWebInput}
+                  value={phoneInput}
+                  onChangeText={(val) => {
+                    setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
+                    setPhoneInput(val);
+                  }}
+                  placeholder="myhanh.bmb@resifix.vn"
+                  placeholderTextColor="#94A3B8"
+                />
+                {loginFieldErrors.identifier ? (
+                  <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                    {loginFieldErrors.identifier}
+                  </Text>
+                ) : null}
+
+                <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', position: 'relative' }}>
+                  <TextInput
+                    style={[styles.bmbWebInput, { flex: 1, paddingRight: 48 }]}
+                    value={passwordInput}
+                    onChangeText={(val) => {
+                      setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
+                      setPasswordInput(val);
+                    }}
+                    secureTextEntry={!showBmbWebPassword}
+                    placeholder="••••••••••"
+                    placeholderTextColor="#94A3B8"
+                  />
+                  <TouchableOpacity
+                    onPress={() => setShowBmbWebPassword(!showBmbWebPassword)}
+                    style={{ position: 'absolute', right: 12, padding: 6 }}
+                  >
+                    <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
+                      {showBmbWebPassword ? translate('Ẩn') : translate('Hiện')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                {loginFieldErrors.password ? (
+                  <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                    {loginFieldErrors.password}
+                  </Text>
+                ) : null}
+
+                <View style={[styles.rowBetween, { marginTop: 14, marginBottom: 16 }]}>
+                  <TouchableOpacity
+                    style={styles.checkboxRow}
+                    onPress={() => setRememberMe(!rememberMe)}
+                  >
+                    <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
+                      {rememberMe && <Text style={styles.checkMark}>✓</Text>}
+                    </View>
+                    <Text style={styles.rememberText}>{translate("Duy trì đăng nhập")}</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ flexDirection: 'row', gap: 14 }}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setForgotStep(1);
+                        setForgotEmail(phoneInput.includes('@') ? phoneInput : '');
+                        setForgotOtp('');
+                        setForgotNewPassword('');
+                        setForgotConfirmPassword('');
+                        setShowForgotModal(true);
+                      }}
+                    >
+                      <Text style={styles.forgotText}>{translate("Quên mật khẩu?")}</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        setActivationRole(null);
+                        setActivationFullName('');
+                        setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
+                        setActivationOtp('');
+                        setActivationNewPassword('');
+                        setActivationConfirmPassword('');
+                        setActivationError(null);
+                        setActivationFieldErrors({});
+                        setActivationCooldown(0);
+                        setActivationBusy(false);
+                        setActivationOtpStatus('IDLE');
+                        setShowActivationModal(true);
+                      }}
+                    >
+                      <Text style={[styles.forgotText, { color: '#0284C7' }]}>
+                        {translate("Kích hoạt tài khoản")}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.bmbWebLoginBtn}
+                  onPress={() => handleLogin()}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.bmbWebLoginBtnText}>{translate("Đăng nhập Hệ thống BMB")}</Text>
+                  )}
+                </TouchableOpacity>
+
+                {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
+                <View style={{ marginTop: 14, alignItems: 'center' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 6, width: '100%' }}>
+                    <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                    <Text style={{ marginHorizontal: 8, color: '#94A3B8', fontSize: 11, fontWeight: '600' }}>
+                      {translate('HOẶC')}
+                    </Text>
+                    <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                  </View>
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: '#ECFDF5',
+                      borderWidth: 1.5,
+                      borderColor: '#10B981',
+                      paddingVertical: 10,
+                      paddingHorizontal: 14,
+                      borderRadius: 10,
+                      width: '100%',
+                    }}
+                    onPress={() => setGuestQrModalVisible(true)}
+                  >
+                    <Text style={{ fontSize: 16, marginRight: 6 }}>📷</Text>
+                    <Text style={{ color: '#047857', fontWeight: '700', fontSize: 13.5 }}>
+                      {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
+                    </Text>
+                  </TouchableOpacity>
+                  <Text style={{ fontSize: 11, color: '#64748B', marginTop: 4, textAlign: 'center' }}>
+                    {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
+                  </Text>
+                </View>
+
+                {/* Chuyển đổi linh hoạt giữa giao diện Web và Mobile khi thử nghiệm trên trình duyệt */}
+                <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 20 }]}>
+                  <TouchableOpacity
+                    style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
+                    onPress={() => {
+                      setLoginMode('MOBILE');
+                    }}
+                  >
+                    <Text style={styles.demoChipText}>📱 {translate("Chuyển sang giao diện Mobile App")}</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
+            {renderAuthModals()}
+          </SafeAreaView>
+        </ScreenTransition>
+      );
+    }
 
-            {/* Cột phải màu trắng */}
-            <View style={styles.bmbLoginRightWhite}>
-              <Text style={styles.bmbLoginFormHeading}>{translate("Đăng nhập")}</Text>
-              <Text style={[styles.loginCardSub, { marginBottom: 16 }]}>
-                {translate("Hệ thống tự động nhận diện vai trò Ban Quản Lý (BMB), Kỹ thuật viên hoặc Cư dân.")}
-              </Text>
+    // B. Giao diện Đăng nhập Mobile App (Cư dân & Kỹ thuật viên chuẩn Figma 00 Mobile)
+    return (
+      <ScreenTransition transitionKey="MOBILE" style={{ flex: 1 }}>
+        <SafeAreaView style={styles.screenBg}>
+          <ThemedStatusBar barStyle="dark-content" />
+          <ScrollView contentContainerStyle={styles.loginScroll}>
+            <View style={styles.mobileFrame}>
+              <View style={styles.brandCenter}>
+                <ResiFixLogoMark size={60} />
+                <Text style={styles.brandTitle}>ResiFix</Text>
+                <Text style={styles.brandSub}>
+                  {translate("Hệ thống Quản lý & Khắc phục Sự cố Tòa nhà")}</Text>
+                <View style={styles.geminiBadgePill}>
+                  <Text style={styles.geminiBadgeText}>{translate("Trợ lý Gemini AI hỗ trợ")}</Text>
+                </View>
+              </View>
 
               {toastMsg && (
-                <View style={[styles.toastBanner, { marginHorizontal: 0, marginBottom: 12 }]}>
+                <View style={styles.toastBanner}>
                   <Text style={styles.toastText}>{toastMsg}</Text>
                 </View>
               )}
 
-              <Text style={styles.fieldLabel}>{translate("Email hoặc Số điện thoại công vụ *")}</Text>
-              <TextInput
-                style={styles.bmbWebInput}
-                value={phoneInput}
-                onChangeText={(val) => {
-                  setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
-                  setPhoneInput(val);
-                }}
-                placeholder="myhanh.bmb@resifix.vn"
-                placeholderTextColor="#94A3B8"
-              />
-              {loginFieldErrors.identifier ? (
-                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
-                  {loginFieldErrors.identifier}
-                </Text>
-              ) : null}
+              <View style={styles.loginCard}>
+                <Text style={styles.loginCardTitle}>{translate("Đăng nhập tài khoản")}</Text>
 
-              <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', position: 'relative' }}>
-                <TextInput
-                  style={[styles.bmbWebInput, { flex: 1, paddingRight: 48 }]}
-                  value={passwordInput}
-                  onChangeText={(val) => {
-                    setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
-                    setPasswordInput(val);
-                  }}
-                  secureTextEntry={!showBmbWebPassword}
-                  placeholder="••••••••••"
-                  placeholderTextColor="#94A3B8"
-                />
-                <TouchableOpacity
-                  onPress={() => setShowBmbWebPassword(!showBmbWebPassword)}
-                  style={{ position: 'absolute', right: 12, padding: 6 }}
-                >
-                  <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
-                    {showBmbWebPassword ? translate('Ẩn') : translate('Hiện')}
+                <Text style={styles.loginCardSub}>
+                  {translate("Nhập Số điện thoại hoặc Email. Hệ thống tự động nhận diện vai trò Cư dân, Kỹ thuật viên hoặc Ban Quản Lý.")}
+                </Text>
+
+                <Text style={styles.fieldLabel}>{translate("Số điện thoại hoặc Email *")}</Text>
+                <View style={styles.inputWrapper}>
+                  <TextInput
+                    style={styles.textInputField}
+                    value={phoneInput}
+                    onChangeText={(val) => {
+                      setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
+                      setPhoneInput(val);
+                    }}
+                    placeholder="0905 xxx xxx hoặc email@domain.com"
+                    placeholderTextColor="#94A3B8"
+                    autoCapitalize="none"
+                  />
+                </View>
+                {loginFieldErrors.identifier ? (
+                  <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                    {loginFieldErrors.identifier}
                   </Text>
-                </TouchableOpacity>
-              </View>
-              {loginFieldErrors.password ? (
-                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
-                  {loginFieldErrors.password}
-                </Text>
-              ) : null}
+                ) : null}
 
-              <View style={[styles.rowBetween, { marginTop: 14, marginBottom: 16 }]}>
-                <TouchableOpacity
-                  style={styles.checkboxRow}
-                  onPress={() => setRememberMe(!rememberMe)}
-                >
-                  <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
-                    {rememberMe && <Text style={styles.checkMark}>✓</Text>}
-                  </View>
-                  <Text style={styles.rememberText}>{translate("Duy trì đăng nhập")}</Text>
-                </TouchableOpacity>
+                <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
+                <View style={styles.inputWrapper}>
+                  <TextInput
+                    style={styles.textInputField}
+                    value={passwordInput}
+                    onChangeText={(val) => {
+                      setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
+                      setPasswordInput(val);
+                    }}
+                    secureTextEntry={!showPassword}
+                    placeholder="••••••••"
+                    placeholderTextColor="#94A3B8"
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={{ paddingHorizontal: 6 }}>
+                    <Text style={styles.eyeIconText}>{showPassword ? translate('Ẩn') : translate('Hiện')}</Text>
+                  </TouchableOpacity>
+                </View>
+                {loginFieldErrors.password ? (
+                  <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
+                    {loginFieldErrors.password}
+                  </Text>
+                ) : null}
 
-                <View style={{ flexDirection: 'row', gap: 14 }}>
+                <View style={styles.rememberRow}>
+                  <TouchableOpacity
+                    style={styles.checkboxRow}
+                    onPress={() => setRememberMe(!rememberMe)}
+                  >
+                    <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
+                      {rememberMe && <Text style={styles.checkMark}>✓</Text>}
+                    </View>
+                    <Text style={styles.rememberText}>{translate("Ghi nhớ đăng nhập")}</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => {
                       setForgotStep(1);
@@ -5723,285 +6179,101 @@ function AppContent() {
                   >
                     <Text style={styles.forgotText}>{translate("Quên mật khẩu?")}</Text>
                   </TouchableOpacity>
+                </View>
 
+                <TouchableOpacity
+                  onPress={() => {
+                    setActivationRole(null);
+                    setActivationFullName('');
+                    setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
+                    setActivationOtp('');
+                    setActivationNewPassword('');
+                    setActivationConfirmPassword('');
+                    setActivationError(null);
+                    setActivationFieldErrors({});
+                    setActivationCooldown(0);
+                    setActivationBusy(false);
+                    setActivationOtpStatus('IDLE');
+                    setShowActivationModal(true);
+                  }}
+                  style={{ marginTop: 2, marginBottom: 16, alignItems: 'center' }}
+                >
+                  <Text style={[styles.forgotText, { color: '#0284C7', fontWeight: '600' }]}>
+                    {translate("Chưa kích hoạt tài khoản? Kích hoạt bằng mã OTP")}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.loginSubmitBtn}
+                  onPress={() => handleLogin()}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.loginSubmitText}>{translate("Đăng nhập")}</Text>
+                  )}
+                </TouchableOpacity>
+
+                {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
+                <View style={{ marginTop: 16, alignItems: 'center' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 8, width: '100%' }}>
+                    <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                    <Text style={{ marginHorizontal: 10, color: '#94A3B8', fontSize: 12, fontWeight: '600' }}>
+                      {translate('HOẶC')}
+                    </Text>
+                    <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+                  </View>
                   <TouchableOpacity
-                    onPress={() => {
-                      setActivationRole(null);
-                      setActivationFullName('');
-                      setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
-                      setActivationOtp('');
-                      setActivationNewPassword('');
-                      setActivationConfirmPassword('');
-                      setActivationError(null);
-                      setActivationFieldErrors({});
-                      setActivationCooldown(0);
-                      setActivationBusy(false);
-                      setActivationOtpStatus('IDLE');
-                      setShowActivationModal(true);
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: '#ECFDF5',
+                      borderWidth: 1.5,
+                      borderColor: '#10B981',
+                      paddingVertical: 12,
+                      paddingHorizontal: 16,
+                      borderRadius: 10,
+                      width: '100%',
+                      shadowColor: '#10B981',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.1,
+                      shadowRadius: 4,
+                      elevation: 2,
                     }}
+                    onPress={() => setGuestQrModalVisible(true)}
                   >
-                    <Text style={[styles.forgotText, { color: '#0284C7' }]}>
-                      {translate("Kích hoạt tài khoản")}
+                    <Text style={{ fontSize: 18, marginRight: 8 }}>📷</Text>
+                    <Text style={{ color: '#047857', fontWeight: '700', fontSize: 14 }}>
+                      {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
                     </Text>
                   </TouchableOpacity>
+                  <Text style={{ fontSize: 11.5, color: '#64748B', marginTop: 6, textAlign: 'center' }}>
+                    {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
+                  </Text>
                 </View>
               </View>
 
-              <TouchableOpacity
-                style={styles.bmbWebLoginBtn}
-                onPress={() => handleLogin()}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.bmbWebLoginBtnText}>{translate("Đăng nhập Hệ thống BMB")}</Text>
-                )}
-              </TouchableOpacity>
-
-              {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
-              <View style={{ marginTop: 14, alignItems: 'center' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 6, width: '100%' }}>
-                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
-                  <Text style={{ marginHorizontal: 8, color: '#94A3B8', fontSize: 11, fontWeight: '600' }}>
-                    {translate('HOẶC')}
-                  </Text>
-                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
+              {Platform.OS === 'web' && (
+                <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 16 }]}>
+                  <TouchableOpacity
+                    style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
+                    onPress={() => setLoginMode('BMB_WEB')}
+                  >
+                    <Text style={styles.demoChipText}>🖥️ {translate("Chuyển sang giao diện BMB Web")}</Text>
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backgroundColor: '#ECFDF5',
-                    borderWidth: 1.5,
-                    borderColor: '#10B981',
-                    paddingVertical: 10,
-                    paddingHorizontal: 14,
-                    borderRadius: 10,
-                    width: '100%',
-                  }}
-                  onPress={() => setGuestQrModalVisible(true)}
-                >
-                  <Text style={{ fontSize: 16, marginRight: 6 }}>📷</Text>
-                  <Text style={{ color: '#047857', fontWeight: '700', fontSize: 13.5 }}>
-                    {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
-                  </Text>
-                </TouchableOpacity>
-                <Text style={{ fontSize: 11, color: '#64748B', marginTop: 4, textAlign: 'center' }}>
-                  {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
-                </Text>
-              </View>
-
-              {/* Chuyển đổi linh hoạt giữa giao diện Web và Mobile khi thử nghiệm trên trình duyệt */}
-              <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 20 }]}>
-                <TouchableOpacity
-                  style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
-                  onPress={() => {
-                    setLoginMode('MOBILE');
-                  }}
-                >
-                  <Text style={styles.demoChipText}>📱 {translate("Chuyển sang giao diện Mobile App")}</Text>
-                </TouchableOpacity>
-              </View>
+              )}
             </View>
-          </View>
+          </ScrollView>
           {renderAuthModals()}
         </SafeAreaView>
       </ScreenTransition>
     );
   }
 
-  // B. Giao diện Đăng nhập Mobile App (Cư dân & Kỹ thuật viên chuẩn Figma 00 Mobile)
-  return (
-    <ScreenTransition transitionKey="MOBILE" style={{ flex: 1 }}>
-      <SafeAreaView style={styles.screenBg}>
-        <ThemedStatusBar barStyle="dark-content" />
-        <ScrollView contentContainerStyle={styles.loginScroll}>
-          <View style={styles.mobileFrame}>
-            <View style={styles.brandCenter}>
-              <ResiFixLogoMark size={60} />
-              <Text style={styles.brandTitle}>ResiFix</Text>
-              <Text style={styles.brandSub}>
-                {translate("Hệ thống Quản lý & Khắc phục Sự cố Tòa nhà")}</Text>
-              <View style={styles.geminiBadgePill}>
-                <Text style={styles.geminiBadgeText}>{translate("Trợ lý Gemini AI hỗ trợ")}</Text>
-              </View>
-            </View>
-
-            {toastMsg && (
-              <View style={styles.toastBanner}>
-                <Text style={styles.toastText}>{toastMsg}</Text>
-              </View>
-            )}
-
-            <View style={styles.loginCard}>
-              <Text style={styles.loginCardTitle}>{translate("Đăng nhập tài khoản")}</Text>
-
-              <Text style={styles.loginCardSub}>
-                {translate("Nhập Số điện thoại hoặc Email. Hệ thống tự động nhận diện vai trò Cư dân, Kỹ thuật viên hoặc Ban Quản Lý.")}
-              </Text>
-
-              <Text style={styles.fieldLabel}>{translate("Số điện thoại hoặc Email *")}</Text>
-              <View style={styles.inputWrapper}>
-                <TextInput
-                  style={styles.textInputField}
-                  value={phoneInput}
-                  onChangeText={(val) => {
-                    setLoginFieldErrors((prev) => ({ ...prev, identifier: undefined }));
-                    setPhoneInput(val);
-                  }}
-                  placeholder="0905 xxx xxx hoặc email@domain.com"
-                  placeholderTextColor="#94A3B8"
-                  autoCapitalize="none"
-                />
-              </View>
-              {loginFieldErrors.identifier ? (
-                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
-                  {loginFieldErrors.identifier}
-                </Text>
-              ) : null}
-
-              <Text style={styles.fieldLabel}>{translate("Mật khẩu *")}</Text>
-              <View style={styles.inputWrapper}>
-                <TextInput
-                  style={styles.textInputField}
-                  value={passwordInput}
-                  onChangeText={(val) => {
-                    setLoginFieldErrors((prev) => ({ ...prev, password: undefined }));
-                    setPasswordInput(val);
-                  }}
-                  secureTextEntry={!showPassword}
-                  placeholder="••••••••"
-                  placeholderTextColor="#94A3B8"
-                />
-                <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={{ paddingHorizontal: 6 }}>
-                  <Text style={styles.eyeIconText}>{showPassword ? translate('Ẩn') : translate('Hiện')}</Text>
-                </TouchableOpacity>
-              </View>
-              {loginFieldErrors.password ? (
-                <Text style={[styles.technicianFormError, { marginTop: 4, marginBottom: 8 }]}>
-                  {loginFieldErrors.password}
-                </Text>
-              ) : null}
-
-              <View style={styles.rememberRow}>
-                <TouchableOpacity
-                  style={styles.checkboxRow}
-                  onPress={() => setRememberMe(!rememberMe)}
-                >
-                  <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
-                    {rememberMe && <Text style={styles.checkMark}>✓</Text>}
-                  </View>
-                  <Text style={styles.rememberText}>{translate("Ghi nhớ đăng nhập")}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => {
-                    setForgotStep(1);
-                    setForgotEmail(phoneInput.includes('@') ? phoneInput : '');
-                    setForgotOtp('');
-                    setForgotNewPassword('');
-                    setForgotConfirmPassword('');
-                    setShowForgotModal(true);
-                  }}
-                >
-                  <Text style={styles.forgotText}>{translate("Quên mật khẩu?")}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <TouchableOpacity
-                onPress={() => {
-                  setActivationRole(null);
-                  setActivationFullName('');
-                  setActivationEmail(phoneInput.includes('@') ? phoneInput.trim().toLowerCase() : '');
-                  setActivationOtp('');
-                  setActivationNewPassword('');
-                  setActivationConfirmPassword('');
-                  setActivationError(null);
-                  setActivationFieldErrors({});
-                  setActivationCooldown(0);
-                  setActivationBusy(false);
-                  setActivationOtpStatus('IDLE');
-                  setShowActivationModal(true);
-                }}
-                style={{ marginTop: 2, marginBottom: 16, alignItems: 'center' }}
-              >
-                <Text style={[styles.forgotText, { color: '#0284C7', fontWeight: '600' }]}>
-                  {translate("Chưa kích hoạt tài khoản? Kích hoạt bằng mã OTP")}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.loginSubmitBtn}
-                onPress={() => handleLogin()}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.loginSubmitText}>{translate("Đăng nhập")}</Text>
-                )}
-              </TouchableOpacity>
-
-              {/* Lựa chọn Quét QR báo sự cố cho Khách vãng lai (Không cần tài khoản) */}
-              <View style={{ marginTop: 16, alignItems: 'center' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 8, width: '100%' }}>
-                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
-                  <Text style={{ marginHorizontal: 10, color: '#94A3B8', fontSize: 12, fontWeight: '600' }}>
-                    {translate('HOẶC')}
-                  </Text>
-                  <View style={{ flex: 1, height: 1, backgroundColor: '#E2E8F0' }} />
-                </View>
-                <TouchableOpacity
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backgroundColor: '#ECFDF5',
-                    borderWidth: 1.5,
-                    borderColor: '#10B981',
-                    paddingVertical: 12,
-                    paddingHorizontal: 16,
-                    borderRadius: 10,
-                    width: '100%',
-                    shadowColor: '#10B981',
-                    shadowOffset: { width: 0, height: 2 },
-                    shadowOpacity: 0.1,
-                    shadowRadius: 4,
-                    elevation: 2,
-                  }}
-                  onPress={() => setGuestQrModalVisible(true)}
-                >
-                  <Text style={{ fontSize: 18, marginRight: 8 }}>📷</Text>
-                  <Text style={{ color: '#047857', fontWeight: '700', fontSize: 14 }}>
-                    {translate('Quét mã QR khu vực báo sự cố (Khách vãng lai)')}
-                  </Text>
-                </TouchableOpacity>
-                <Text style={{ fontSize: 11.5, color: '#64748B', marginTop: 6, textAlign: 'center' }}>
-                  {translate('Không cần đăng nhập • Tự động nhận diện khu vực tòa nhà')}
-                </Text>
-              </View>
-            </View>
-
-            {Platform.OS === 'web' && (
-              <View style={[styles.demoSwitchRow, { justifyContent: 'center', marginTop: 16 }]}>
-                <TouchableOpacity
-                  style={[styles.demoChip, { paddingHorizontal: 16, paddingVertical: 8 }]}
-                  onPress={() => setLoginMode('BMB_WEB')}
-                >
-                  <Text style={styles.demoChipText}>🖥️ {translate("Chuyển sang giao diện BMB Web")}</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        </ScrollView>
-        {renderAuthModals()}
-      </SafeAreaView>
-    </ScreenTransition>
-  );
-}
-
-// ============================================================================
+  // ============================================================================
   // PHÂN HỆ 1: CƯ DÂN (RESIDENT) — BÁM BỐ CỤC 6 MÀN HÌNH FIGMA CƯ DÂN
   // ============================================================================
   if (user.role === 'RESIDENT') {
@@ -6046,260 +6318,717 @@ function AppContent() {
           )}
 
           <ScreenTransition transitionKey={resScreen} style={{ flex: 1 }}>
-          {resScreen === 'HOME' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.resHomeHeader}>
-                <View style={{ flex: 1, paddingRight: 8 }}>
-                  <Text style={styles.aptSmallLabel}>{translate("Thông tin căn hộ")}</Text>
-                  <Text style={styles.aptBigTitle}>
-                    Căn hộ {user.apartmentCode || '---'} • {user.buildingBlock || '---'}
-                  </Text>
-                </View>
-                <View style={styles.rowCenter}>
-                  <RealTimeClock style={{ marginRight: 8 }} />
-                  <TouchableOpacity
-                    style={styles.bellCircleBtn}
-                    onPress={() => setResScreen('NOTI_PROFILE')}
-                  >
-                    <OutlineIcon name="bell" size={21} color="#0F172A" />
-                    {unreadCount > 0 && <View style={styles.bellRedDot} />}
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Thẻ Liên hệ Quản lý Khẩn cấp */}
-              <View style={styles.emergencyCard}>
-                <View style={styles.rowCenter}>
-                  <View style={styles.emergencyIconCircle}>
-                    <OutlineIcon name="bell" size={16} color="#DC2626" />
-                  </View>
-                  <View style={{ flex: 1, marginLeft: 10 }}>
-                    <Text style={styles.emergencyTitle}>{translate('Liên hệ quản lý khẩn cấp')}</Text>
-                    <Text style={styles.emergencyContactName}>
-                      {emergencyContact.managerName} – {emergencyContact.managerPhone}
+            {resScreen === 'HOME' && (
+              <ScrollView
+                style={styles.scrollArea}
+                contentContainerStyle={{ paddingBottom: 28 }}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.resHomeHeader}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <Text style={styles.aptSmallLabel}>{translate("Thông tin căn hộ")}</Text>
+                    <Text style={styles.aptBigTitle}>
+                      Căn hộ {user.apartmentCode || '---'} • {user.buildingBlock || '---'}
                     </Text>
                   </View>
+                  <View style={styles.rowCenter}>
+                    <RealTimeClock style={{ marginRight: 8 }} />
+                    <TouchableOpacity
+                      style={styles.bellCircleBtn}
+                      onPress={() => setResScreen('NOTI_PROFILE')}
+                    >
+                      <OutlineIcon name="bell" size={21} color="#0F172A" />
+                      {unreadCount > 0 && <View style={styles.bellRedDot} />}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Thẻ Liên hệ Quản lý Khẩn cấp */}
+                <View style={styles.emergencyCard}>
+                  <View style={styles.rowCenter}>
+                    <View style={styles.emergencyIconCircle}>
+                      <OutlineIcon name="bell" size={16} color="#DC2626" />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 10 }}>
+                      <Text style={styles.emergencyTitle}>{translate('Liên hệ quản lý khẩn cấp')}</Text>
+                      <Text style={styles.emergencyContactName}>
+                        {emergencyContact.managerName} – {emergencyContact.managerPhone}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.emergencyCallBtn}
+                      onPress={() => Linking.openURL(`tel:${emergencyContact.managerPhone}`)}
+                    >
+                      <Text style={styles.emergencyCallBtnText}>{translate('Gọi ngay')}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <View style={styles.ctaHeroCard}>
+                  <View style={styles.ctaTitleRow}>
+                    <Text style={styles.ctaHeroTitle}>{translate("Cần sửa chữa thiết bị trong căn hộ?")}</Text>
+                  </View>
+                  <Text style={styles.ctaHeroDesc}>
+                    {translate("Chụp ảnh hoặc quét mã QR để Ban Quản Lý tiếp nhận và cử thợ đến hỗ trợ nhanh chóng.")}
+                  </Text>
                   <TouchableOpacity
-                    style={styles.emergencyCallBtn}
-                    onPress={() => Linking.openURL(`tel:${emergencyContact.managerPhone}`)}
+                    style={styles.ctaPrimaryBtn}
+                    onPress={() => setResScreen('CREATE_REPORT')}
                   >
-                    <Text style={styles.emergencyCallBtnText}>{translate('Gọi ngay')}</Text>
+                    <Text style={styles.ctaPrimaryBtnText}>📸 {translate("+ Gửi yêu cầu sửa chữa mới")}</Text>
+                  </TouchableOpacity>
+
+                  {/* Thanh tiến trình 4 bước đơn giản, thân thiện với người không biết IT */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(37, 99, 235, 0.15)' }}>
+                    <View style={{ alignItems: 'center', flex: 1 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>1. {translate("Gửi ảnh")}</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                    <View style={{ alignItems: 'center', flex: 1 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>2. {translate("Tiếp nhận")}</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                    <View style={{ alignItems: 'center', flex: 1 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>3. {translate("Sửa chữa")}</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
+                    <View style={{ alignItems: 'center', flex: 1 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>4. {translate("Nghiệm thu")}</Text>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionTitleText}>{translate("Yêu cầu sửa chữa của tôi")}</Text>
+                  <TouchableOpacity onPress={() => setResScreen('HISTORY')}>
+                    <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.pillsScroll}
+                >
+                  <TouchableOpacity
+                    style={[styles.filterPill, homeFilter === 'ALL' && styles.filterPillActive]}
+                    onPress={() => setHomeFilter('ALL')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        homeFilter === 'ALL' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Tất cả (")}{tickets.length})
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.filterPill,
+                      homeFilter === 'PENDING' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setHomeFilter('PENDING')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        homeFilter === 'PENDING' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Chờ duyệt (")}{pendingCount})
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.filterPill,
+                      homeFilter === 'IN_PROGRESS' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setHomeFilter('IN_PROGRESS')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        homeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Đang sửa (")}{inProgressCount})
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.filterPill,
+                      homeFilter === 'COMPLETED' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setHomeFilter('COMPLETED')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        homeFilter === 'COMPLETED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Hoàn thành (")}{completedCount})
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+
+                {filteredHomeTickets.map((t) => {
+                  const isCompleted = t.status === 'COMPLETED';
+                  const isPending = t.status === 'PENDING';
+                  const isClosed = t.status === 'CLOSED';
+                  return (
+                    <TouchableOpacity
+                      key={t.id}
+                      activeOpacity={0.9}
+                      style={[
+                        styles.resTicketCard,
+                        isCompleted && styles.resTicketCardCompleted,
+                      ]}
+                      onPress={() => openResidentTicket(t)}
+                    >
+                      <View style={styles.cardTopRow}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                          <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                          {t.isAnonymous && (
+                            <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                            </View>
+                          )}
+                          {t.locationVerificationStatus === 'VERIFIED' ? (
+                            <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                            </View>
+                          ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                            <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <View
+                          style={[
+                            styles.statusPill,
+                            isCompleted
+                              ? { backgroundColor: '#D1FAE5' }
+                              : isPending
+                                ? { backgroundColor: '#FEF3C7' }
+                                : isClosed
+                                  ? { backgroundColor: '#F1F5F9' }
+                                  : { backgroundColor: '#E0E7FF' },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.statusPillText,
+                              isCompleted
+                                ? { color: '#059669' }
+                                : isPending
+                                  ? { color: '#D97706' }
+                                  : isClosed
+                                    ? { color: '#64748B' }
+                                    : { color: '#4F46E5' },
+                            ]}
+                          >
+                            {isCompleted
+                              ? translate('Hoàn thành')
+                              : isPending
+                                ? translate('Chờ duyệt')
+                                : isClosed
+                                  ? translate('Đã đóng')
+                                  : translate('Đang xử lý')}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text style={styles.cardMainTitle}>{t.title}</Text>
+                      <Text style={styles.cardLocationText}>{t.locationNote}</Text>
+
+                      {isCompleted ? (
+                        <View style={styles.completedActionBar}>
+                          <Text style={styles.completedActionLabel}>
+                            {translate("KTV đã gửi ảnh nghiệm thu")}</Text>
+                          <TouchableOpacity
+                            style={styles.resolvedGreenBtn}
+                            onPress={() => {
+                              setActiveTicket(t);
+                              setResScreen('TICKET_DETAIL');
+                            }}
+                          >
+                            <Text style={styles.resolvedGreenBtnText}>{translate("Đã giải quyết")}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={styles.cardFooterGrayBar}>
+                          <Text style={styles.cardFooterGrayText}>
+                            KTV: {t.assignedTech?.fullName || translate('Chưa phân công')} • {translate('15 phút trước')}
+                          </Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            {resScreen === 'CREATE_REPORT' && (
+              <View style={{ flex: 1 }}>
+                <ScrollView
+                  style={styles.scrollArea}
+                  contentContainerStyle={{ paddingBottom: 28 }}
+                  showsVerticalScrollIndicator={false}
+                >
+                  <View style={styles.subScreenHeader}>
+                    <TouchableOpacity onPress={() => setResScreen('HOME')}>
+                      <Text style={styles.backArrowText}>←</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.subScreenTitle}>{translate("Gửi yêu cầu sửa chữa")}</Text>
+                  </View>
+
+                  <Text style={styles.stepTitle}>{translate("1. Vị trí & Khu vực gặp sự cố *")}</Text>
+                  <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                    {translate("Quét mã QR dán tại thiết bị hoặc khu vực để xác nhận vị trí chính xác.")}
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.qrDashedBtn}
+                    onPress={() => setQrModalVisible(true)}
+                  >
+                    <Text style={styles.qrDashedBtnText}>
+                      {translate("📷 Quét mã QR khu vực để tự động điền vị trí")}</Text>
+                  </TouchableOpacity>
+
+                  {qrModalVisible && (
+                    <QrScannerModal
+                      visible
+                      onClose={() => setQrModalVisible(false)}
+                      onScannedCode={handleQrCodeDetected}
+                    />
+                  )}
+
+                  {!scannedAsset && (
+                    <TextInput style={styles.technicianFormInput} value={manualLocation} onChangeText={setManualLocation}
+                      placeholder={translate("Nhập vị trí sự cố")} />
+                  )}
+                  {scannedAsset && (
+                    <View style={styles.qrRecognizedBox}>
+                      <Text style={styles.qrRecognizedTitle}>
+                        {translate("✅ Đã xác định khu vực: ")}{scannedAsset.areaName || scannedAsset.assetName}
+                      </Text>
+                      <Text style={styles.qrRecognizedSub}>
+                        {translate("📍 Vị trí: ")}{scannedAsset.locationLabel}
+                      </Text>
+                      <TouchableOpacity onPress={() => setScannedAsset(null)} style={{ marginTop: 4 }}>
+                        <Text style={styles.seeHistoryLink}>{translate('Bỏ thiết bị đã chọn')}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  <Text style={styles.stepTitle}>{translate("2. Hình ảnh hiện trường (Tối đa 3 ảnh)")}</Text>
+                  <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                    {translate("Chụp rõ vị trí hư hỏng để kỹ thuật viên chuẩn bị sẵn linh kiện và đồ nghề.")}
+                  </Text>
+                  <View style={styles.photoGridRow}>
+                    {reportPhotos.map((item, idx) => (
+                      <View key={idx} style={styles.photoSlotCard}>
+                        <TouchableOpacity
+                          style={styles.removePhotoCircle}
+                          onPress={() =>
+                            setReportPhotos(reportPhotos.filter((_, i) => i !== idx))
+                          }
+                        >
+                          <Text style={styles.removePhotoX}>✕</Text>
+                        </TouchableOpacity>
+                        <Image source={{ uri: item.url }} style={styles.slotPreviewImg} />
+                        <Text style={styles.photoSlotCaption} numberOfLines={2}>
+                          {item.label}
+                        </Text>
+                      </View>
+                    ))}
+
+                    {reportPhotos.length < 3 && (
+                      <TouchableOpacity
+                        style={styles.addPhotoDashedSlot}
+                        onPress={() =>
+                          handlePickOrCapturePhoto('incident_scene', (uploadedUrl) => {
+                            setReportPhotos((prev) => [
+                              ...prev,
+                              {
+                                label: scannedAsset
+                                  ? `${scannedAsset.areaName || scannedAsset.assetName} (${prev.length + 1})`
+                                  : `Ảnh hiện trường ${prev.length + 1}`,
+                                url: uploadedUrl,
+                              },
+                            ]);
+                            showToast(translate('Đã đính kèm ảnh hiện trường thành công!'));
+                          })
+                        }
+                      >
+                        <Text style={styles.addPhotoPlus}>＋</Text>
+                        <Text style={styles.addPhotoLabel}>
+                          {translate("+ Thêm ảnh (")}{reportPhotos.length}/3)
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <Text style={styles.stepTitle}>{translate("3. Mô tả chi tiết sự cố *")}</Text>
+                  <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
+                    {translate("Gợi ý: Thiết bị nào gặp sự cố? Xảy ra khi nào? Ảnh hưởng ra sao? (Ảnh và mô tả chi tiết là tùy chọn)")}
+                  </Text>
+                  <View style={styles.descBoxContainer}>
+                    <TextInput
+                      style={styles.descTextArea}
+                      multiline
+                      value={reportDesc}
+                      onChangeText={setReportDesc}
+                      placeholder={translate("Thiết bị nào gặp sự cố? Xảy ra khi nào? Ảnh hưởng ra sao?")}
+                    />
+                    <Text
+                      style={[
+                        styles.charCountText,
+                        reportDesc.trim().length < 10 && { color: '#DC2626' },
+                      ]}
+                    >
+                      {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
+                    <VoiceRecorderButton
+                      apiBaseUrl={API_BASE_URL}
+                      token={token}
+                      disabled={loading}
+                      onBusyChange={setReportVoiceBusy}
+                      onTranscribed={(text) => {
+                        setReportDesc(previous => previous.trimEnd() ? `${previous.trimEnd()} ${text}` : text);
+                        setIsVoiceUsed(true);
+                      }}
+                    />
+                  </View>
+                  {reportDesc.length > 0 && reportDesc.trim().length < 10 && (
+                    <Text style={[styles.inlineFieldError, { marginTop: -8, marginBottom: 12 }]}>
+                      {translate('Mô tả sự cố cần tối thiểu 10 ký tự!')}
+                    </Text>
+                  )}
+
+                  <View style={styles.geminiInfoBox}>
+                    <Text style={styles.geminiInfoText}>
+                      {translate("Trợ lý AI sẽ tự động phân loại danh mục & đánh giá độ khẩn cấp sự cố.")}</Text>
+                  </View>
+                </ScrollView>
+
+                <View style={styles.stickyBottomBar}>
+                  <TouchableOpacity
+                    style={[styles.loginSubmitBtn, (loading || reportVoiceBusy || reportDesc.trim().length < 10) && { opacity: 0.6 }]}
+                    onPress={handleSubmitReport}
+                    disabled={loading || reportVoiceBusy || reportDesc.trim().length < 10}
+                  >
+                    {loading ? (
+                      <ActivityIndicator color="#FFF" />
+                    ) : (
+                      <Text style={styles.loginSubmitText}>🚀 {translate("Gửi yêu cầu sửa chữa ngay")}</Text>
+                    )}
                   </TouchableOpacity>
                 </View>
               </View>
+            )}
 
-              <View style={styles.ctaHeroCard}>
-                <View style={styles.ctaTitleRow}>
-                  <Text style={styles.ctaHeroTitle}>{translate("Cần sửa chữa thiết bị trong căn hộ?")}</Text>
-                </View>
-                <Text style={styles.ctaHeroDesc}>
-                  {translate("Chụp ảnh hoặc quét mã QR để Ban Quản Lý tiếp nhận và cử thợ đến hỗ trợ nhanh chóng.")}
-                </Text>
-                <TouchableOpacity
-                  style={styles.ctaPrimaryBtn}
-                  onPress={() => setResScreen('CREATE_REPORT')}
+            {resScreen === 'TICKET_DETAIL' && activeTicket && (
+              <View style={{ flex: 1 }}>
+                <ScrollView
+                  style={styles.scrollArea}
+                  contentContainerStyle={{ paddingBottom: 32 }}
+                  showsVerticalScrollIndicator={false}
                 >
-                  <Text style={styles.ctaPrimaryBtnText}>📸 {translate("+ Gửi yêu cầu sửa chữa mới")}</Text>
-                </TouchableOpacity>
-
-                {/* Thanh tiến trình 4 bước đơn giản, thân thiện với người không biết IT */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(37, 99, 235, 0.15)' }}>
-                  <View style={{ alignItems: 'center', flex: 1 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>1. {translate("Gửi ảnh")}</Text>
+                  <View style={styles.subScreenHeaderBetween}>
+                    <View style={styles.rowCenterFlex}>
+                      <TouchableOpacity onPress={() => setResScreen('HOME')}>
+                        <Text style={styles.backArrowText}>←</Text>
+                      </TouchableOpacity>
+                      <Text style={styles.subScreenTitle} numberOfLines={1}>
+                        {translate("Chi tiết ")}{activeTicket.ticketCode}
+                      </Text>
+                    </View>
+                    <View style={[styles.statusPill, { backgroundColor: '#D1FAE5' }]}>
+                      <Text style={[styles.statusPillText, { color: '#059669' }]}>
+                        {activeTicket.status === 'COMPLETED'
+                          ? translate('Hoàn thành')
+                          : activeTicket.status === 'CLOSED'
+                            ? translate('Đã đóng')
+                            : translate('Đang xử lý')}
+                      </Text>
+                    </View>
                   </View>
-                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
-                  <View style={{ alignItems: 'center', flex: 1 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>2. {translate("Tiếp nhận")}</Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
-                  <View style={{ alignItems: 'center', flex: 1 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>3. {translate("Sửa chữa")}</Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: '#93C5FD' }}>→</Text>
-                  <View style={{ alignItems: 'center', flex: 1 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>4. {translate("Nghiệm thu")}</Text>
-                  </View>
-                </View>
-              </View>
 
-              <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitleText}>{translate("Yêu cầu sửa chữa của tôi")}</Text>
-                <TouchableOpacity onPress={() => setResScreen('HISTORY')}>
-                  <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
-                </TouchableOpacity>
-              </View>
+                  <View style={styles.whiteSectionCard}>
+                    <Text style={styles.cardBlockTitle}>Tiến độ xử lý sự cố</Text>
+                    <View style={styles.timelineRow}>
+                      <View style={[styles.timelineDot, { backgroundColor: '#16A34A' }]} />
+                      <Text style={[styles.timelineText, { color: '#15803D', fontWeight: '700' }]}>
+                        10:30 - Hoàn thành sửa chữa (KTV{' '}
+                        {activeTicket.assignedTech?.fullName || translate('Kỹ thuật viên')} đã gửi ảnh)
+                      </Text>
+                    </View>
+                    <View style={styles.timelineLine} />
+                    <View style={styles.timelineRow}>
+                      <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
+                      <Text style={styles.timelineText}>
+                        09:45 - Đang xử lý (KTV đã nhận việc)
+                      </Text>
+                    </View>
+                    <View style={styles.timelineLine} />
+                    <View style={styles.timelineRow}>
+                      <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
+                      <Text style={styles.timelineText}>
+                        09:32 - Đã phân công (BMB đã duyệt gợi ý AI)
+                      </Text>
+                    </View>
+                    <View style={styles.timelineLine} />
+                    <View style={styles.timelineRow}>
+                      <View style={[styles.timelineDot, { backgroundColor: '#CBD5E1' }]} />
+                      <Text style={styles.timelineText}>
+                        {activeTicket.aiStatus === 'ANALYZING'
+                          ? translate('Đã tiếp nhận (Chờ duyệt - AI đang phân tích...)')
+                          : activeTicket.aiStatus === 'MANUAL_REVIEW'
+                            ? translate('Đã tiếp nhận (Chờ BMB phân loại thủ công)')
+                            : `${translate('Đã tiếp nhận (Chờ duyệt - AI gợi ý:')} ${translate(CATEGORY_SHORT_VN[activeTicket.aiSuggestedCategory] || 'Điện - Nước')})`}
+                      </Text>
+                    </View>
+                  </View>
 
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.pillsScroll}
-              >
-                <TouchableOpacity
-                  style={[styles.filterPill, homeFilter === 'ALL' && styles.filterPillActive]}
-                  onPress={() => setHomeFilter('ALL')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      homeFilter === 'ALL' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Tất cả (")}{tickets.length})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    homeFilter === 'PENDING' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setHomeFilter('PENDING')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      homeFilter === 'PENDING' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Chờ duyệt (")}{pendingCount})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    homeFilter === 'IN_PROGRESS' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setHomeFilter('IN_PROGRESS')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      homeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Đang sửa (")}{inProgressCount})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    homeFilter === 'COMPLETED' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setHomeFilter('COMPLETED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      homeFilter === 'COMPLETED' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Hoàn thành (")}{completedCount})
-                  </Text>
-                </TouchableOpacity>
-              </ScrollView>
-
-              {filteredHomeTickets.map((t) => {
-                const isCompleted = t.status === 'COMPLETED';
-                const isPending = t.status === 'PENDING';
-                const isClosed = t.status === 'CLOSED';
-                return (
-                  <TouchableOpacity
-                    key={t.id}
-                    activeOpacity={0.9}
-                    style={[
-                      styles.resTicketCard,
-                      isCompleted && styles.resTicketCardCompleted,
-                    ]}
-                    onPress={() => openResidentTicket(t)}
-                  >
-                    <View style={styles.cardTopRow}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
-                        {t.isAnonymous && (
-                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                  {/* Mục Ảnh hiện trường do Cư dân gửi */}
+                  {(() => {
+                    const reportedPhotos = getResidentReportedMedia(activeTicket);
+                    return (
+                      <View style={styles.whiteSectionCard}>
+                        <View style={[styles.cardTopRow, { marginBottom: 8 }]}>
+                          <Text style={styles.cardBlockTitle}>{translate("Ảnh hiện trường")}</Text>
+                          {reportedPhotos.length > 0 && (
+                            <View style={[styles.statusPill, { backgroundColor: '#EFF6FF', paddingHorizontal: 8, paddingVertical: 2 }]}>
+                              <Text style={[styles.statusPillText, { color: '#2563EB', fontWeight: '700', fontSize: 11.5 }]}>
+                                {reportedPhotos.length} {translate("ảnh")}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        {reportedPhotos.length === 0 ? (
+                          <View style={{
+                            backgroundColor: '#F8FAFC',
+                            borderWidth: 1,
+                            borderColor: '#E2E8F0',
+                            borderRadius: 8,
+                            paddingVertical: 12,
+                            paddingHorizontal: 14,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 10,
+                          }}>
+                            <Text style={{ fontSize: 18 }}>📷</Text>
+                            <Text style={{ fontSize: 13, color: '#64748B', fontStyle: 'italic' }}>
+                              {translate("Chưa có ảnh hiện trường.")}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                            {reportedPhotos.map((item, idx) => (
+                              <TouchableOpacity
+                                key={item.id || idx}
+                                style={{
+                                  width: 80,
+                                  height: 80,
+                                  borderRadius: 8,
+                                  borderWidth: 1.5,
+                                  borderColor: '#CBD5E1',
+                                  overflow: 'hidden',
+                                  backgroundColor: '#F1F5F9',
+                                  position: 'relative',
+                                }}
+                                activeOpacity={0.8}
+                                onPress={() => openReportedPhoto(reportedPhotos, idx)}
+                              >
+                                {failedPhotoUrls[item.url] ? (
+                                  <View style={{ flex: 1, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center', padding: 4 }}>
+                                    <Text style={{ fontSize: 16 }}>⚠️</Text>
+                                    <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center', fontWeight: '600' }}>
+                                      {translate("Lỗi tải ảnh")}
+                                    </Text>
+                                  </View>
+                                ) : (
+                                  <Image
+                                    source={{ uri: item.url }}
+                                    style={{ width: '100%', height: '100%' }}
+                                    resizeMode="cover"
+                                    onError={() => setFailedPhotoUrls((prev) => ({ ...prev, [item.url]: true }))}
+                                  />
+                                )}
+                                <View style={{
+                                  position: 'absolute',
+                                  bottom: 3,
+                                  right: 3,
+                                  backgroundColor: 'rgba(15, 23, 42, 0.72)',
+                                  borderRadius: 4,
+                                  paddingHorizontal: 4,
+                                  paddingVertical: 1,
+                                }}>
+                                  <Text style={{ color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' }}>
+                                    🔍 {idx + 1}
+                                  </Text>
+                                </View>
+                              </TouchableOpacity>
+                            ))}
                           </View>
                         )}
-                        {t.locationVerificationStatus === 'VERIFIED' ? (
-                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                          </View>
-                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
-                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
-                          </View>
-                        ) : null}
                       </View>
-                      <View
-                        style={[
-                          styles.statusPill,
-                          isCompleted
-                            ? { backgroundColor: '#D1FAE5' }
-                            : isPending
-                              ? { backgroundColor: '#FEF3C7' }
-                              : isClosed
-                                ? { backgroundColor: '#F1F5F9' }
-                                : { backgroundColor: '#E0E7FF' },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.statusPillText,
-                            isCompleted
-                              ? { color: '#059669' }
-                              : isPending
-                                ? { color: '#D97706' }
-                                : isClosed
-                                  ? { color: '#64748B' }
-                                  : { color: '#4F46E5' },
-                          ]}
-                        >
-                          {isCompleted
-                            ? translate('Hoàn thành')
-                            : isPending
-                              ? translate('Chờ duyệt')
-                              : isClosed
-                                ? translate('Đã đóng')
-                                : translate('Đang xử lý')}
+                    );
+                  })()}
+
+                  <View style={styles.proofGreenBorderCard}>
+                    <Text style={styles.cardBlockTitle}>
+                      {translate("Bằng chứng khắc phục từ Kỹ thuật viên")}</Text>
+                    <View style={styles.proofCompareRow}>
+                      <View style={styles.proofHalfCol}>
+                        <View style={styles.proofBoxBefore}>
+                          {(() => {
+                            const scenePhotos = getResidentReportedMedia(activeTicket);
+                            return scenePhotos[0]?.url ? (
+                              <TouchableOpacity
+                                style={{ width: '100%', height: '100%' }}
+                                activeOpacity={0.8}
+                                onPress={() => openReportedPhoto(scenePhotos, 0)}
+                              >
+                                <Image
+                                  source={{ uri: scenePhotos[0].url }}
+                                  style={{ width: '100%', height: '100%', borderRadius: 10 }}
+                                  resizeMode="cover"
+                                />
+                              </TouchableOpacity>
+                            ) : (
+                              <Text style={styles.proofPlaceholderText}>{translate('Chưa có ảnh hiện trường.')}</Text>
+                            );
+                          })()}
+                        </View>
+                        <Text style={styles.proofLabelBefore}>{translate("Ảnh trước khi sửa")}</Text>
+                      </View>
+                      <View style={styles.proofHalfCol}>
+                        <View style={styles.proofBoxAfter}>
+                          {(() => {
+                            const proofMedia = Array.isArray(activeTicket.media)
+                              ? activeTicket.media.find((m: any) => m.mediaType === 'REPAIR_PROOF')
+                              : null;
+                            const proofUrl = proofMedia?.imageUrl
+                              ? (typeof proofMedia.imageUrl === 'string' ? proofMedia.imageUrl.split('#')[0] : proofMedia.imageUrl)
+                              : null;
+                            return proofUrl ? (
+                              <TouchableOpacity
+                                style={{ width: '100%', height: '100%' }}
+                                activeOpacity={0.8}
+                                onPress={() => {
+                                  setViewingPhotoModal({
+                                    url: proofUrl,
+                                    title: translate('Ảnh sau khi sửa (KTV)'),
+                                    meta: {
+                                      techName: activeTicket.assignedTech?.fullName || 'KTV',
+                                      time: activeTicket.completedAt || proofMedia?.createdAt,
+                                    },
+                                  });
+                                }}
+                              >
+                                <Image
+                                  source={{ uri: proofUrl }}
+                                  style={{ width: '100%', height: '100%', borderRadius: 10 }}
+                                  resizeMode="cover"
+                                />
+                              </TouchableOpacity>
+                            ) : (
+                              <>
+                                <View style={styles.greenCheckCircle}>
+                                  <Text style={{ color: '#059669', fontWeight: '800', fontSize: 18 }}>
+                                    ✓
+                                  </Text>
+                                </View>
+                                <Text style={styles.proofAfterSmallText}>Đường ống đã thay mới</Text>
+                              </>
+                            );
+                          })()}
+                        </View>
+                        <Text style={styles.proofLabelAfter}>{translate("Ảnh sau khi sửa")}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.techNoteGrayBox}>
+                      <Text style={styles.techNoteGrayText}>
+                        Ghi chú KTV:{' '}
+                        {activeTicket.techRepairNote ||
+                          'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Thẻ Chi phí sửa chữa công khai nếu BMB đã phê duyệt */}
+                  {ticketCosts[activeTicket.id]?.status === 'APPROVED' && (
+                    <View style={styles.whiteSectionCard}>
+                      <View style={styles.cardTopRow}>
+                        <Text style={styles.cardBlockTitle}>{translate("Chi phí sửa chữa")}</Text>
+                        <View style={[styles.statusPill, { backgroundColor: '#DCFCE7' }]}>
+                          <Text style={[styles.statusPillText, { color: '#15803D' }]}>{translate("Đã phê duyệt")}</Text>
+                        </View>
+                      </View>
+                      {(ticketCosts[activeTicket.id].items || []).map((it: any, i: number) => (
+                        <View key={i} style={styles.bmbStatRow}>
+                          <Text style={styles.bmbStatLabel}>• {it.materialName} ({it.quantity} {it.unit})</Text>
+                          <Text style={styles.bmbStatValue}>{Number(it.totalPrice || 0).toLocaleString('vi-VN')} đ</Text>
+                        </View>
+                      ))}
+                      {Number(ticketCosts[activeTicket.id].otherCost || 0) > 0 && (
+                        <View style={styles.bmbStatRow}>
+                          <Text style={styles.bmbStatLabel}>{translate("Chi phí khác:")}</Text>
+                          <Text style={styles.bmbStatValue}>{Number(ticketCosts[activeTicket.id].otherCost).toLocaleString('vi-VN')} đ</Text>
+                        </View>
+                      )}
+                      <View style={styles.techDivider} />
+                      <View style={styles.bmbStatRow}>
+                        <Text style={[styles.bmbStatLabel, { fontWeight: '700', color: '#0F172A' }]}>{translate("Tổng chi phí:")}</Text>
+                        <Text style={[styles.bmbStatValue, { fontWeight: '800', color: '#2563EB', fontSize: 15 }]}>
+                          {Number(ticketCosts[activeTicket.id].totalCost || 0).toLocaleString('vi-VN')} đ
                         </Text>
                       </View>
                     </View>
+                  )}
 
-                    <Text style={styles.cardMainTitle}>{t.title}</Text>
-                    <Text style={styles.cardLocationText}>{t.locationNote}</Text>
-
-                    {isCompleted ? (
-                      <View style={styles.completedActionBar}>
-                        <Text style={styles.completedActionLabel}>
-                          {translate("KTV đã gửi ảnh nghiệm thu")}</Text>
-                        <TouchableOpacity
-                          style={styles.resolvedGreenBtn}
-                          onPress={() => {
-                            setActiveTicket(t);
-                            setResScreen('TICKET_DETAIL');
-                          }}
-                        >
-                          <Text style={styles.resolvedGreenBtnText}>{translate("Đã giải quyết")}</Text>
-                        </TouchableOpacity>
+                  {activeTicket.status === 'COMPLETED' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>
+                        {translate("Đánh giá chất lượng xử lý (Tùy chọn)")}</Text>
+                      <View style={styles.starsRow}>
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <TouchableOpacity key={star} onPress={() => setRatingStars(star)}>
+                            <Text style={styles.starIcon}>
+                              {star <= ratingStars ? '★' : '☆'}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
                       </View>
-                    ) : (
-                      <View style={styles.cardFooterGrayBar}>
-                        <Text style={styles.cardFooterGrayText}>
-                          KTV: {t.assignedTech?.fullName || translate('Chưa phân công')} • {translate('15 phút trước')}
-                        </Text>
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          )}
+                      <TextInput
+                        style={styles.ratingInputBox}
+                        placeholder={translate("Nhập nhận xét của bạn về kỹ thuật viên...")}
+                        placeholderTextColor="#94A3B8"
+                        value={ratingComment}
+                        onChangeText={setRatingComment}
+                      />
+                    </View>
+                  )}
+                </ScrollView>
 
-          {resScreen === 'CREATE_REPORT' && (
-            <View style={{ flex: 1 }}>
+                {activeTicket.status === 'COMPLETED' && (
+                  <View style={styles.stickyBottomBar}>
+                    <TouchableOpacity
+                      style={styles.confirmCloseGreenBtn}
+                      onPress={() => handleConfirmResolved(activeTicket)}
+                      disabled={loading}
+                    >
+                      <Text style={styles.confirmCloseGreenText}>
+                        {translate("Xác nhận Đã giải quyết (Đóng sự cố)")}</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {resScreen === 'NOTI_PROFILE' && (
               <ScrollView
                 style={styles.scrollArea}
                 contentContainerStyle={{ paddingBottom: 28 }}
@@ -6309,158 +7038,96 @@ function AppContent() {
                   <TouchableOpacity onPress={() => setResScreen('HOME')}>
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle}>{translate("Gửi yêu cầu sửa chữa")}</Text>
+                  <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ")}</Text>
                 </View>
 
-                <Text style={styles.stepTitle}>{translate("1. Vị trí & Khu vực gặp sự cố *")}</Text>
-                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
-                  {translate("Quét mã QR dán tại thiết bị hoặc khu vực để xác nhận vị trí chính xác.")}
-                </Text>
-                <TouchableOpacity
-                  style={styles.qrDashedBtn}
-                  onPress={() => setQrModalVisible(true)}
-                >
-                  <Text style={styles.qrDashedBtnText}>
-                    {translate("📷 Quét mã QR khu vực để tự động điền vị trí")}</Text>
-                </TouchableOpacity>
-
-                {qrModalVisible && (
-                  <QrScannerModal
-                    visible
-                    onClose={() => setQrModalVisible(false)}
-                    onScannedCode={handleQrCodeDetected}
-                  />
-                )}
-
-                {!scannedAsset && (
-                  <TextInput style={styles.technicianFormInput} value={manualLocation} onChangeText={setManualLocation}
-                    placeholder={translate("Nhập vị trí sự cố")} />
-                )}
-                {scannedAsset && (
-                  <View style={styles.qrRecognizedBox}>
-                    <Text style={styles.qrRecognizedTitle}>
-                      {translate("✅ Đã xác định khu vực: ")}{scannedAsset.areaName || scannedAsset.assetName}
-                    </Text>
-                    <Text style={styles.qrRecognizedSub}>
-                      {translate("📍 Vị trí: ")}{scannedAsset.locationLabel}
-                    </Text>
-                    <TouchableOpacity onPress={() => setScannedAsset(null)} style={{ marginTop: 4 }}>
-                      <Text style={styles.seeHistoryLink}>{translate('Bỏ thiết bị đã chọn')}</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                <Text style={styles.stepTitle}>{translate("2. Hình ảnh hiện trường (Tối đa 3 ảnh)")}</Text>
-                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
-                  {translate("Chụp rõ vị trí hư hỏng để kỹ thuật viên chuẩn bị sẵn linh kiện và đồ nghề.")}
-                </Text>
-                <View style={styles.photoGridRow}>
-                  {reportPhotos.map((item, idx) => (
-                    <View key={idx} style={styles.photoSlotCard}>
-                      <TouchableOpacity
-                        style={styles.removePhotoCircle}
-                        onPress={() =>
-                          setReportPhotos(reportPhotos.filter((_, i) => i !== idx))
-                        }
-                      >
-                        <Text style={styles.removePhotoX}>✕</Text>
+                <View style={styles.whiteSectionCard}>
+                  <View style={styles.cardTopRow}>
+                    <Text style={styles.sectionTitleText}>{translate("Thông báo")}</Text>
+                    <View style={styles.unreadPillBadge}>
+                      <Text style={styles.unreadPillText}>{unreadCount} {translate('chưa đọc')}</Text>
+                    </View>
+                    {unreadCount > 0 && (
+                      <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
+                        <Text style={styles.seeHistoryLink}>{translate('Đánh dấu đã đọc')}</Text>
                       </TouchableOpacity>
-                      <Image source={{ uri: item.url }} style={styles.slotPreviewImg} />
-                      <Text style={styles.photoSlotCaption} numberOfLines={2}>
-                        {item.label}
+                    )}
+                  </View>
+                  {(() => {
+                    const sortedNotis = [...notifications].sort(
+                      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                    );
+                    const displayed = showAllNotifications ? sortedNotis : sortedNotis.slice(0, 5);
+                    if (sortedNotis.length === 0) {
+                      return <Text style={styles.techInfoLine}>{translate('Chưa có thông báo.')}</Text>;
+                    }
+                    return (
+                      <>
+                        {displayed.map((n: any) => (
+                          <TouchableOpacity key={n.id} style={styles.notiBlueItem} onPress={() => handleOpenNotification(n)}>
+                            <View style={{ flex: 1, paddingRight: 8 }}>
+                              <Text style={styles.notiItemTitle}>{n.title}</Text>
+                              <Text style={styles.notiItemTime}>{formatDateTime(n.createdAt)}</Text>
+                            </View>
+                            {!n.isRead && <View style={styles.blueUnreadDot} />}
+                          </TouchableOpacity>
+                        ))}
+                        {sortedNotis.length > 5 && (
+                          <TouchableOpacity
+                            style={{ paddingVertical: 10, alignItems: 'center' }}
+                            onPress={() => setShowAllNotifications(!showAllNotifications)}
+                          >
+                            <Text style={{ fontSize: 13, fontWeight: '600', color: '#2563EB' }}>
+                              {showAllNotifications
+                                ? translate('Thu gọn')
+                                : `${translate('Xem thêm')} (${sortedNotis.length - 5})`}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </>
+                    );
+                  })()}
+                </View>
+
+                <View style={styles.whiteSectionCard}>
+                  <Text style={styles.cardBlockTitle}>{translate("Hồ sơ cư dân")}</Text>
+                  <View style={styles.profileAvatarWrapper}>
+                    <View style={styles.profileAvatarCircle}>
+                      <Text style={{ fontSize: 24, fontWeight: '700', color: '#2563EB' }}>
+                        {user.fullName ? user.fullName.charAt(0).toUpperCase() : 'U'}
                       </Text>
                     </View>
-                  ))}
-
-                  {reportPhotos.length < 3 && (
-                    <TouchableOpacity
-                      style={styles.addPhotoDashedSlot}
-                      onPress={() =>
-                        handlePickOrCapturePhoto('incident_scene', (uploadedUrl) => {
-                          setReportPhotos((prev) => [
-                            ...prev,
-                            {
-                              label: scannedAsset
-                                ? `${scannedAsset.areaName || scannedAsset.assetName} (${prev.length + 1})`
-                                : `Ảnh hiện trường ${prev.length + 1}`,
-                              url: uploadedUrl,
-                            },
-                          ]);
-                          showToast(translate('Đã đính kèm ảnh hiện trường thành công!'));
-                        })
-                      }
-                    >
-                      <Text style={styles.addPhotoPlus}>＋</Text>
-                      <Text style={styles.addPhotoLabel}>
-                        {translate("+ Thêm ảnh (")}{reportPhotos.length}/3)
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-                <Text style={styles.stepTitle}>{translate("3. Mô tả chi tiết sự cố *")}</Text>
-                <Text style={[styles.cardLocationText, { marginTop: -4, marginBottom: 8 }]}>
-                  {translate("Mô tả hiện tượng sự cố (ví dụ: bồn rửa rỉ nước, quạt thông gió kêu to, đèn không sáng...)")}
-                </Text>
-                <View style={styles.descBoxContainer}>
-                  <TextInput
-                    style={styles.descTextArea}
-                    multiline
-                    value={reportDesc}
-                    onChangeText={setReportDesc}
-                    placeholder={translate("Nhập mô tả sự cố bằng tiếng Việt...")}
-                  />
-                  <Text
-                    style={[
-                      styles.charCountText,
-                      reportDesc.trim().length < 10 && { color: '#DC2626' },
-                    ]}
+                    <Text style={styles.profileNameText}>{user.fullName}</Text>
+                  </View>
+                  <View style={styles.profileInfoRow}>
+                    <View style={styles.profileInfoIconBox}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: '#64748B' }}>CH</Text>
+                    </View>
+                    <Text style={styles.profileInfoValue}>
+                      {user.apartmentCode || translate('Chưa cập nhật')} • {user.buildingBlock || translate('Chưa cập nhật')}
+                    </Text>
+                  </View>
+                  <View style={styles.profileInfoRow}>
+                    <View style={styles.profileInfoIconBox}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: '#64748B' }}>SĐT</Text>
+                    </View>
+                    <Text style={styles.profileInfoValue}>{user.phone}</Text>
+                  </View>
+                  <PreferenceControls />
+                  <TouchableOpacity
+                    style={styles.logoutRedOutlineBtn}
+                    onPress={handleLogout}
                   >
-                    {reportDesc.length} {translate("ký tự (Đạt chuẩn tối thiểu 10 ký tự)")}</Text>
-                  <VoiceRecorderButton
-                    apiBaseUrl={API_BASE_URL}
-                    token={token}
-                    disabled={loading}
-                    onBusyChange={setReportVoiceBusy}
-                    onTranscribed={(text) => {
-                      setReportDesc(previous => previous.trimEnd() ? `${previous.trimEnd()} ${text}` : text);
-                      setIsVoiceUsed(true);
-                    }}
-                  />
-                </View>
-                {reportDesc.length > 0 && reportDesc.trim().length < 10 && (
-                  <Text style={[styles.inlineFieldError, { marginTop: -8, marginBottom: 12 }]}>
-                    {translate('Mô tả sự cố cần tối thiểu 10 ký tự!')}
-                  </Text>
-                )}
-
-                <View style={styles.geminiInfoBox}>
-                  <Text style={styles.geminiInfoText}>
-                    {translate("Trợ lý AI sẽ tự động phân loại danh mục & đánh giá độ khẩn cấp sự cố.")}</Text>
+                    <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
+                  </TouchableOpacity>
                 </View>
               </ScrollView>
+            )}
 
-              <View style={styles.stickyBottomBar}>
-                <TouchableOpacity
-                  style={[styles.loginSubmitBtn, (loading || reportVoiceBusy || reportDesc.trim().length < 10) && { opacity: 0.6 }]}
-                  onPress={handleSubmitReport}
-                  disabled={loading || reportVoiceBusy || reportDesc.trim().length < 10}
-                >
-                  {loading ? (
-                    <ActivityIndicator color="#FFF" />
-                  ) : (
-                    <Text style={styles.loginSubmitText}>🚀 {translate("Gửi yêu cầu sửa chữa ngay")}</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {resScreen === 'TICKET_DETAIL' && activeTicket && (
-            <View style={{ flex: 1 }}>
+            {resScreen === 'HISTORY' && (
               <ScrollView
                 style={styles.scrollArea}
-                contentContainerStyle={{ paddingBottom: 32 }}
+                contentContainerStyle={{ paddingBottom: 28 }}
                 showsVerticalScrollIndicator={false}
               >
                 <View style={styles.subScreenHeaderBetween}>
@@ -6468,361 +7135,100 @@ function AppContent() {
                     <TouchableOpacity onPress={() => setResScreen('HOME')}>
                       <Text style={styles.backArrowText}>←</Text>
                     </TouchableOpacity>
-                    <Text style={styles.subScreenTitle} numberOfLines={1}>
-                      {translate("Chi tiết ")}{activeTicket.ticketCode}
-                    </Text>
+                    <Text style={styles.subScreenTitle}>{translate("Lịch sử sự cố")}</Text>
                   </View>
-                  <View style={[styles.statusPill, { backgroundColor: '#D1FAE5' }]}>
-                    <Text style={[styles.statusPillText, { color: '#059669' }]}>
-                      {activeTicket.status === 'COMPLETED'
-                        ? translate('Hoàn thành')
-                        : activeTicket.status === 'CLOSED'
-                          ? translate('Đã đóng')
-                          : translate('Đang xử lý')}
-                    </Text>
+                  <View style={styles.totalCountBadge}>
+                    <Text style={styles.totalCountText}>{translate("Tổng: ")}{tickets.length} {translate("sự cố")}</Text>
                   </View>
                 </View>
 
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>Tiến độ xử lý sự cố</Text>
-                  <View style={styles.timelineRow}>
-                    <View style={[styles.timelineDot, { backgroundColor: '#16A34A' }]} />
-                    <Text style={[styles.timelineText, { color: '#15803D', fontWeight: '700' }]}>
-                      10:30 - Hoàn thành sửa chữa (KTV{' '}
-                      {activeTicket.assignedTech?.fullName || translate('Kỹ thuật viên')} đã gửi ảnh)
-                    </Text>
-                  </View>
-                  <View style={styles.timelineLine} />
-                  <View style={styles.timelineRow}>
-                    <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
-                    <Text style={styles.timelineText}>
-                      09:45 - Đang xử lý (KTV đã nhận việc)
-                    </Text>
-                  </View>
-                  <View style={styles.timelineLine} />
-                  <View style={styles.timelineRow}>
-                    <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
-                    <Text style={styles.timelineText}>
-                      09:32 - Đã phân công (BMB đã duyệt gợi ý AI)
-                    </Text>
-                  </View>
-                  <View style={styles.timelineLine} />
-                  <View style={styles.timelineRow}>
-                    <View style={[styles.timelineDot, { backgroundColor: '#CBD5E1' }]} />
-                    <Text style={styles.timelineText}>
-                      09:30 - Đã tiếp nhận (Chờ duyệt - AI gợi ý:{' '}
-                      {CATEGORY_SHORT_VN[activeTicket.aiSuggestedCategory] || 'Điện - Nước'})
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={styles.proofGreenBorderCard}>
-                  <Text style={styles.cardBlockTitle}>
-                    {translate("Bằng chứng khắc phục từ Kỹ thuật viên")}</Text>
-                  <View style={styles.proofCompareRow}>
-                    <View style={styles.proofHalfCol}>
-                      <View style={styles.proofBoxBefore}>
-                        {activeTicket.media?.find((media: any) => media.mediaType === 'SCENE_BEFORE')?.imageUrl ? (
-                          <Image
-                            source={{ uri: activeTicket.media.find((media: any) => media.mediaType === 'SCENE_BEFORE').imageUrl }}
-                            style={{ width: '100%', height: '100%', borderRadius: 10 }}
-                          />
-                        ) : <Text style={styles.proofPlaceholderText}>{translate('Chưa có ảnh hiện trường.')}</Text>}
-                      </View>
-                      <Text style={styles.proofLabelBefore}>{translate("Ảnh trước khi sửa")}</Text>
-                    </View>
-                    <View style={styles.proofHalfCol}>
-                      <View style={styles.proofBoxAfter}>
-                        <View style={styles.greenCheckCircle}>
-                          <Text style={{ color: '#059669', fontWeight: '800', fontSize: 18 }}>
-                            ✓
-                          </Text>
-                        </View>
-                        <Text style={styles.proofAfterSmallText}>Đường ống đã thay mới</Text>
-                      </View>
-                      <Text style={styles.proofLabelAfter}>{translate("Ảnh sau khi sửa")}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.techNoteGrayBox}>
-                    <Text style={styles.techNoteGrayText}>
-                      Ghi chú KTV:{' '}
-                      {activeTicket.techRepairNote ||
-                        'Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.'}
-                    </Text>
-                  </View>
-                </View>
-
-                {/* Thẻ Chi phí sửa chữa công khai nếu BMB đã phê duyệt */}
-                {ticketCosts[activeTicket.id]?.status === 'APPROVED' && (
-                  <View style={styles.whiteSectionCard}>
-                    <View style={styles.cardTopRow}>
-                      <Text style={styles.cardBlockTitle}>{translate("Chi phí sửa chữa")}</Text>
-                      <View style={[styles.statusPill, { backgroundColor: '#DCFCE7' }]}>
-                        <Text style={[styles.statusPillText, { color: '#15803D' }]}>{translate("Đã phê duyệt")}</Text>
-                      </View>
-                    </View>
-                    {(ticketCosts[activeTicket.id].items || []).map((it: any, i: number) => (
-                      <View key={i} style={styles.bmbStatRow}>
-                        <Text style={styles.bmbStatLabel}>• {it.materialName} ({it.quantity} {it.unit})</Text>
-                        <Text style={styles.bmbStatValue}>{Number(it.totalPrice || 0).toLocaleString('vi-VN')} đ</Text>
-                      </View>
-                    ))}
-                    {Number(ticketCosts[activeTicket.id].otherCost || 0) > 0 && (
-                      <View style={styles.bmbStatRow}>
-                        <Text style={styles.bmbStatLabel}>{translate("Chi phí khác:")}</Text>
-                        <Text style={styles.bmbStatValue}>{Number(ticketCosts[activeTicket.id].otherCost).toLocaleString('vi-VN')} đ</Text>
-                      </View>
-                    )}
-                    <View style={styles.techDivider} />
-                    <View style={styles.bmbStatRow}>
-                      <Text style={[styles.bmbStatLabel, { fontWeight: '700', color: '#0F172A' }]}>{translate("Tổng chi phí:")}</Text>
-                      <Text style={[styles.bmbStatValue, { fontWeight: '800', color: '#2563EB', fontSize: 15 }]}>
-                        {Number(ticketCosts[activeTicket.id].totalCost || 0).toLocaleString('vi-VN')} đ
-                      </Text>
-                    </View>
-                  </View>
-                )}
-
-                {activeTicket.status === 'COMPLETED' && (
-                  <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>
-                    {translate("Đánh giá chất lượng xử lý (Tùy chọn)")}</Text>
-                  <View style={styles.starsRow}>
-                    {[1, 2, 3, 4, 5].map((star) => (
-                      <TouchableOpacity key={star} onPress={() => setRatingStars(star)}>
-                        <Text style={styles.starIcon}>
-                          {star <= ratingStars ? '★' : '☆'}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+                <View style={styles.searchBarBox}>
                   <TextInput
-                    style={styles.ratingInputBox}
-                    placeholder={translate("Nhập nhận xét của bạn về kỹ thuật viên...")}
+                    style={styles.searchBarInput}
+                    placeholder={translate("Tìm mã Ticket (#RF-...) hoặc tên sự cố...")}
                     placeholderTextColor="#94A3B8"
-                    value={ratingComment}
-                    onChangeText={setRatingComment}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
                   />
-                  </View>
-                )}
-              </ScrollView>
+                </View>
 
-              {activeTicket.status === 'COMPLETED' && (
-                <View style={styles.stickyBottomBar}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.pillsScroll}
+                >
                   <TouchableOpacity
-                    style={styles.confirmCloseGreenBtn}
-                    onPress={() => handleConfirmResolved(activeTicket)}
-                    disabled={loading}
+                    style={[
+                      styles.filterPill,
+                      historyFilter === 'ALL' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setHistoryFilter('ALL')}
                   >
-                    <Text style={styles.confirmCloseGreenText}>
-                      {translate("Xác nhận Đã giải quyết (Đóng sự cố)")}</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          )}
-
-          {resScreen === 'NOTI_PROFILE' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.subScreenHeader}>
-                <TouchableOpacity onPress={() => setResScreen('HOME')}>
-                  <Text style={styles.backArrowText}>←</Text>
-                </TouchableOpacity>
-                <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ")}</Text>
-              </View>
-
-              <View style={styles.whiteSectionCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={styles.sectionTitleText}>{translate("Thông báo")}</Text>
-                  <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount} {translate('chưa đọc')}</Text>
-                  </View>
-                  {unreadCount > 0 && (
-                    <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
-                      <Text style={styles.seeHistoryLink}>{translate('Đánh dấu đã đọc')}</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-                {(() => {
-                  const sortedNotis = [...notifications].sort(
-                    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-                  );
-                  const displayed = showAllNotifications ? sortedNotis : sortedNotis.slice(0, 5);
-                  if (sortedNotis.length === 0) {
-                    return <Text style={styles.techInfoLine}>{translate('Chưa có thông báo.')}</Text>;
-                  }
-                  return (
-                    <>
-                      {displayed.map((n: any) => (
-                        <TouchableOpacity key={n.id} style={styles.notiBlueItem} onPress={() => handleOpenNotification(n)}>
-                          <View style={{ flex: 1, paddingRight: 8 }}>
-                            <Text style={styles.notiItemTitle}>{n.title}</Text>
-                            <Text style={styles.notiItemTime}>{formatDateTime(n.createdAt)}</Text>
-                          </View>
-                          {!n.isRead && <View style={styles.blueUnreadDot} />}
-                        </TouchableOpacity>
-                      ))}
-                      {sortedNotis.length > 5 && (
-                        <TouchableOpacity
-                          style={{ paddingVertical: 10, alignItems: 'center' }}
-                          onPress={() => setShowAllNotifications(!showAllNotifications)}
-                        >
-                          <Text style={{ fontSize: 13, fontWeight: '600', color: '#2563EB' }}>
-                            {showAllNotifications
-                              ? translate('Thu gọn')
-                              : `${translate('Xem thêm')} (${sortedNotis.length - 5})`}
-                          </Text>
-                        </TouchableOpacity>
-                      )}
-                    </>
-                  );
-                })()}
-              </View>
-
-              <View style={styles.whiteSectionCard}>
-                <Text style={styles.cardBlockTitle}>{translate("Hồ sơ cư dân")}</Text>
-                <View style={styles.profileAvatarWrapper}>
-                  <View style={styles.profileAvatarCircle}>
-                    <Text style={{ fontSize: 24, fontWeight: '700', color: '#2563EB' }}>
-                      {user.fullName ? user.fullName.charAt(0).toUpperCase() : 'U'}
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        historyFilter === 'ALL' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Tất cả (")}{tickets.length})
                     </Text>
-                  </View>
-                  <Text style={styles.profileNameText}>{user.fullName}</Text>
-                </View>
-                <View style={styles.profileInfoRow}>
-                  <View style={styles.profileInfoIconBox}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#64748B' }}>CH</Text>
-                  </View>
-                  <Text style={styles.profileInfoValue}>
-                    {user.apartmentCode || translate('Chưa cập nhật')} • {user.buildingBlock || translate('Chưa cập nhật')}
-                  </Text>
-                </View>
-                <View style={styles.profileInfoRow}>
-                  <View style={styles.profileInfoIconBox}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#64748B' }}>SĐT</Text>
-                  </View>
-                  <Text style={styles.profileInfoValue}>{user.phone}</Text>
-                </View>
-                <PreferenceControls />
-                <TouchableOpacity
-                  style={styles.logoutRedOutlineBtn}
-                  onPress={handleLogout}
-                >
-                  <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          )}
-
-          {resScreen === 'HISTORY' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.subScreenHeaderBetween}>
-                <View style={styles.rowCenterFlex}>
-                  <TouchableOpacity onPress={() => setResScreen('HOME')}>
-                    <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle}>{translate("Lịch sử sự cố")}</Text>
-                </View>
-                <View style={styles.totalCountBadge}>
-                  <Text style={styles.totalCountText}>{translate("Tổng: ")}{tickets.length} {translate("sự cố")}</Text>
-                </View>
-              </View>
-
-              <View style={styles.searchBarBox}>
-                <TextInput
-                  style={styles.searchBarInput}
-                  placeholder={translate("Tìm mã Ticket (#RF-...) hoặc tên sự cố...")}
-                  placeholderTextColor="#94A3B8"
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                />
-              </View>
-
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.pillsScroll}
-              >
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    historyFilter === 'ALL' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setHistoryFilter('ALL')}
-                >
-                  <Text
+                  <TouchableOpacity
                     style={[
-                      styles.filterPillText,
-                      historyFilter === 'ALL' && styles.filterPillTextActive,
+                      styles.filterPill,
+                      historyFilter === 'CLOSED' && styles.filterPillActive,
                     ]}
+                    onPress={() => setHistoryFilter('CLOSED')}
                   >
-                    {translate("Tất cả (")}{tickets.length})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    historyFilter === 'CLOSED' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setHistoryFilter('CLOSED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      historyFilter === 'CLOSED' && styles.filterPillTextActive,
-                    ]}
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        historyFilter === 'CLOSED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Đã đóng (")}{closedTickets.length})
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+
+                {filteredHistoryTickets.map((t) => (
+                  <TouchableOpacity
+                    key={t.id}
+                    style={styles.resTicketCard}
+                    onPress={() => openResidentTicket(t)}
                   >
-                    {translate("Đã đóng (")}{closedTickets.length})
-                  </Text>
-                </TouchableOpacity>
+                    <View style={styles.cardTopRow}>
+                      <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                      <View style={[styles.statusPill, { backgroundColor: '#F1F5F9' }]}>
+                        <Text style={[styles.statusPillText, { color: '#64748B' }]}>
+                          {t.status === 'CLOSED' ? translate('Đã đóng') : translate(t.status)}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.cardMainTitle}>{t.title}</Text>
+                    <Text style={styles.cardLocationText}>
+                      {t.locationNote} {translate("• Danh mục:")}{' '}
+                      {translate(CATEGORY_SHORT_VN[t.finalCategory || t.aiSuggestedCategory] || 'Điện - Nước')}
+                    </Text>
+                    <View style={styles.historyFooterBar}>
+                      <View>
+                        <Text style={styles.historyClosedDate}>Đã đóng: 28/10/2026</Text>
+                        <Text style={styles.historyTechName}>
+                          (KTV: {t.assignedTech?.fullName || translate('Chưa phân công')})
+                        </Text>
+                      </View>
+                      <View style={styles.rowCenter}>
+                        <Text style={{ fontSize: 13, color: '#F59E0B' }}>★</Text>
+                        <Text style={styles.historyRatingNum}>
+                          {' '}
+                          {(t.ratingStars || 5).toFixed(1)}
+                        </Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                ))}
               </ScrollView>
-
-              {filteredHistoryTickets.map((t) => (
-                <TouchableOpacity
-                  key={t.id}
-                  style={styles.resTicketCard}
-                  onPress={() => openResidentTicket(t)}
-                >
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
-                    <View style={[styles.statusPill, { backgroundColor: '#F1F5F9' }]}>
-                      <Text style={[styles.statusPillText, { color: '#64748B' }]}>
-                        {t.status === 'CLOSED' ? translate('Đã đóng') : translate(t.status)}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.cardMainTitle}>{t.title}</Text>
-                  <Text style={styles.cardLocationText}>
-                    {t.locationNote} {translate("• Danh mục:")}{' '}
-                    {translate(CATEGORY_SHORT_VN[t.finalCategory || t.aiSuggestedCategory] || 'Điện - Nước')}
-                  </Text>
-                  <View style={styles.historyFooterBar}>
-                    <View>
-                      <Text style={styles.historyClosedDate}>Đã đóng: 28/10/2026</Text>
-                      <Text style={styles.historyTechName}>
-                        (KTV: {t.assignedTech?.fullName || translate('Chưa phân công')})
-                      </Text>
-                    </View>
-                    <View style={styles.rowCenter}>
-                      <Text style={{ fontSize: 13, color: '#F59E0B' }}>★</Text>
-                      <Text style={styles.historyRatingNum}>
-                        {' '}
-                        {(t.ratingStars || 5).toFixed(1)}
-                      </Text>
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
+            )}
           </ScreenTransition>
 
           {(resScreen === 'HOME' ||
@@ -6871,6 +7277,8 @@ function AppContent() {
               </View>
             )}
         </View>
+        {renderPhotoViewerModal()}
+        {renderBmbIncidentPhotoModal()}
       </SafeAreaView>
     );
   }
@@ -6929,1391 +7337,1646 @@ function AppContent() {
           )}
 
           <ScreenTransition transitionKey={techScreen} style={{ flex: 1 }}>
-          {techScreen === 'HOME' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.resHomeHeader}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={styles.aptSmallLabel}>
-                    {user.specialtyLabel || 'Kỹ thuật viên Điện - Nước'}
-                  </Text>
-                  <Text style={styles.aptBigTitle}>
-                    {user.fullName} • {user.shiftName || '07:00 - 15:00'}
-                  </Text>
-                </View>
-                <View style={styles.rowCenter}>
-                  <RealTimeClock style={{ marginRight: 8 }} />
-                  <TouchableOpacity
-                    style={styles.bellCircleBtn}
-                    onPress={() => setTechScreen('NOTI_PROFILE')}
-                  >
-                    <OutlineIcon name="bell" size={21} color="#0F172A" />
-                    {unreadCount > 0 && <View style={styles.bellRedDot} />}
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Thẻ Điểm danh & Trạng thái Ca trực (Chấm công GPS + Camera) */}
-              <View style={styles.whiteSectionCard}>
-                <View style={styles.cardTopRow}>
-                  <View>
-                    <Text style={styles.sectionTitleText}>{translate("Điểm danh & Chấm công ca trực")}</Text>
-                    <Text style={[styles.cardLocationText, { marginTop: 2 }]}>
-                      ⏰ {translate("Giờ chuẩn:")} {new Date().toLocaleDateString('vi-VN')} • Ca: {user.shiftName || '07:00 - 15:00'}
+            {techScreen === 'HOME' && (
+              <ScrollView
+                style={styles.scrollArea}
+                contentContainerStyle={{ paddingBottom: 28 }}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.resHomeHeader}>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <Text style={styles.aptSmallLabel}>
+                      {user.specialtyLabel || 'Kỹ thuật viên Điện - Nước'}
+                    </Text>
+                    <Text style={styles.aptBigTitle}>
+                      {user.fullName} • {user.shiftName || '07:00 - 15:00'}
                     </Text>
                   </View>
+                  <View style={styles.rowCenter}>
+                    <RealTimeClock style={{ marginRight: 8 }} />
+                    <TouchableOpacity
+                      style={styles.bellCircleBtn}
+                      onPress={() => setTechScreen('NOTI_PROFILE')}
+                    >
+                      <OutlineIcon name="bell" size={21} color="#0F172A" />
+                      {unreadCount > 0 && <View style={styles.bellRedDot} />}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Thẻ Điểm danh & Trạng thái Ca trực (Chấm công GPS + Camera) */}
+                <View style={styles.whiteSectionCard}>
+                  <View style={styles.cardTopRow}>
+                    <View>
+                      <Text style={styles.sectionTitleText}>{translate("Điểm danh & Chấm công ca trực")}</Text>
+                      <Text style={[styles.cardLocationText, { marginTop: 2 }]}>
+                        ⏰ {translate("Giờ chuẩn:")} {new Date().toLocaleDateString('vi-VN')} • Ca: {user.shiftName || '07:00 - 15:00'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.statusPill, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#F1F5F9' }]}
+                      onPress={handleToggleOnDuty}
+                      disabled={dutyUpdating}
+                    >
+                      <Text style={[styles.statusPillText, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { color: '#15803D' } : { color: '#64748B' }]}>
+                        {dutyUpdating ? translate('Đang cập nhật...') : (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? '● ' + translate('Đang trực') : '○ ' + translate('Ngoài ca')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
+                  {renderTechGpsWidget()}
+
+                  {/* 2 Nút Điểm danh To Rõ 46px */}
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                    <TouchableOpacity
+                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', height: 46, borderRadius: 10 }]}
+                      onPress={handleTechCheckIn}
+                      disabled={loading}
+                    >
+                      <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🟢 {translate("Bắt đầu ca làm (Check-in)")}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', height: 46, borderRadius: 10 }]}
+                      onPress={handleTechCheckOut}
+                      disabled={loading}
+                    >
+                      <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🔴 {translate("Kết thúc ca làm (Check-out)")}</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={[styles.cardTopRow, { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#F1F5F9' }]}>
+                    <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
+                      {translate("Sự cố cần xử lý:")} <Text style={{ fontWeight: '700', color: '#0F172A' }}>{assignedCount + inProgressCount}</Text> • {translate("Đã xong:")} <Text style={{ fontWeight: '700', color: '#16A34A' }}>{completedCount}</Text>
+                    </Text>
+                    <TouchableOpacity onPress={() => setTechScreen('PAYROLL')}>
+                      <Text style={styles.seeHistoryLink}>{translate("Bảng lương & Lịch sử >")}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionTitleText}>{translate("Công việc được giao")}</Text>
+                  <TouchableOpacity onPress={() => setTechScreen('HISTORY')}>
+                    <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.pillsScroll}
+                >
                   <TouchableOpacity
-                    style={[styles.statusPill, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#F1F5F9' }]}
-                    onPress={handleToggleOnDuty}
-                    disabled={dutyUpdating}
+                    style={[
+                      styles.filterPill,
+                      techHomeFilter === 'ALL' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setTechHomeFilter('ALL')}
                   >
-                    <Text style={[styles.statusPillText, (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? { color: '#15803D' } : { color: '#64748B' }]}>
-                      {dutyUpdating ? translate('Đang cập nhật...') : (user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? '● ' + translate('Đang trực') : '○ ' + translate('Ngoài ca')}
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHomeFilter === 'ALL' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Tất cả (")}{tickets.length})
                     </Text>
                   </TouchableOpacity>
-                </View>
-
-                {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
-                {renderTechGpsWidget()}
-
-                {/* 2 Nút Điểm danh To Rõ 46px */}
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
                   <TouchableOpacity
-                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', height: 46, borderRadius: 10 }]}
-                    onPress={handleTechCheckIn}
-                    disabled={loading}
+                    style={[
+                      styles.filterPill,
+                      techHomeFilter === 'ASSIGNED' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setTechHomeFilter('ASSIGNED')}
                   >
-                    <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🟢 {translate("Bắt đầu ca làm (Check-in)")}</Text>
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHomeFilter === 'ASSIGNED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Chờ xử lý (")}{assignedCount})
+                    </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', height: 46, borderRadius: 10 }]}
-                    onPress={handleTechCheckOut}
-                    disabled={loading}
+                    style={[
+                      styles.filterPill,
+                      techHomeFilter === 'IN_PROGRESS' && styles.filterPillActive,
+                    ]}
+                    onPress={() => setTechHomeFilter('IN_PROGRESS')}
                   >
-                    <Text style={[styles.primaryActionBtnText, { fontSize: 13.5 }]}>🔴 {translate("Kết thúc ca làm (Check-out)")}</Text>
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHomeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Đang sửa (")}{inProgressCount})
+                    </Text>
                   </TouchableOpacity>
-                </View>
-
-                <View style={[styles.cardTopRow, { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#F1F5F9' }]}>
-                  <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
-                    {translate("Sự cố cần xử lý:")} <Text style={{ fontWeight: '700', color: '#0F172A' }}>{assignedCount + inProgressCount}</Text> • {translate("Đã xong:")} <Text style={{ fontWeight: '700', color: '#16A34A' }}>{completedCount}</Text>
-                  </Text>
-                  <TouchableOpacity onPress={() => setTechScreen('PAYROLL')}>
-                    <Text style={styles.seeHistoryLink}>{translate("Bảng lương & Lịch sử >")}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitleText}>{translate("Công việc được giao")}</Text>
-                <TouchableOpacity onPress={() => setTechScreen('HISTORY')}>
-                  <Text style={styles.seeHistoryLink}>{translate("Xem lịch sử >")}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.pillsScroll}
-              >
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHomeFilter === 'ALL' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setTechHomeFilter('ALL')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHomeFilter === 'ALL' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Tất cả (")}{tickets.length})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHomeFilter === 'ASSIGNED' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setTechHomeFilter('ASSIGNED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHomeFilter === 'ASSIGNED' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Chờ xử lý (")}{assignedCount})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHomeFilter === 'IN_PROGRESS' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setTechHomeFilter('IN_PROGRESS')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHomeFilter === 'IN_PROGRESS' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Đang sửa (")}{inProgressCount})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHomeFilter === 'COMPLETED' && styles.filterPillActive,
-                  ]}
-                  onPress={() => setTechHomeFilter('COMPLETED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHomeFilter === 'COMPLETED' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Hoàn thành (")}{completedCount})
-                  </Text>
-                </TouchableOpacity>
-              </ScrollView>
-
-              {filteredTechHome.map((t) => {
-                const isAssigned = t.status === 'ASSIGNED';
-                const isInProgress = t.status === 'IN_PROGRESS';
-                const prio = t.finalPriority || t.aiSuggestedPriority;
-                return (
                   <TouchableOpacity
-                    key={t.id}
-                    activeOpacity={0.9}
                     style={[
-                      styles.resTicketCard,
-                      isAssigned && { borderColor: '#3B82F6', borderWidth: 1.5 },
-                      isInProgress && { borderColor: '#818CF8', borderWidth: 1.5 },
+                      styles.filterPill,
+                      techHomeFilter === 'COMPLETED' && styles.filterPillActive,
                     ]}
-                    onPress={() => openTechnicianTask(t)}
+                    onPress={() => setTechHomeFilter('COMPLETED')}
                   >
-                    <View style={styles.cardTopRow}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
-                        {t.isAnonymous && (
-                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
-                          </View>
-                        )}
-                        {t.locationVerificationStatus === 'VERIFIED' ? (
-                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                          </View>
-                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
-                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
-                          </View>
-                        ) : null}
-                      </View>
-                      <View
-                        style={[
-                          styles.statusPill,
-                          isAssigned
-                            ? { backgroundColor: '#DBEAFE' }
-                            : isInProgress
-                              ? { backgroundColor: '#E0E7FF' }
-                              : { backgroundColor: '#D1FAE5' },
-                        ]}
-                      >
-                        <Text
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHomeFilter === 'COMPLETED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Hoàn thành (")}{completedCount})
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+
+                {filteredTechHome.map((t) => {
+                  const isAssigned = t.status === 'ASSIGNED';
+                  const isInProgress = t.status === 'IN_PROGRESS';
+                  const prio = t.finalPriority || t.aiSuggestedPriority;
+                  return (
+                    <TouchableOpacity
+                      key={t.id}
+                      activeOpacity={0.9}
+                      style={[
+                        styles.resTicketCard,
+                        isAssigned && { borderColor: '#3B82F6', borderWidth: 1.5 },
+                        isInProgress && { borderColor: '#818CF8', borderWidth: 1.5 },
+                      ]}
+                      onPress={() => openTechnicianTask(t)}
+                    >
+                      <View style={styles.cardTopRow}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                          <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                          {t.isAnonymous && (
+                            <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                            </View>
+                          )}
+                          {t.locationVerificationStatus === 'VERIFIED' ? (
+                            <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                            </View>
+                          ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                            <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <View
                           style={[
-                            styles.statusPillText,
+                            styles.statusPill,
                             isAssigned
-                              ? { color: '#2563EB' }
+                              ? { backgroundColor: '#DBEAFE' }
                               : isInProgress
-                                ? { color: '#4F46E5' }
-                                : { color: '#059669' },
+                                ? { backgroundColor: '#E0E7FF' }
+                                : { backgroundColor: '#D1FAE5' },
                           ]}
                         >
-                          {isAssigned
-                            ? translate('Đã phân công')
-                            : isInProgress
-                              ? translate('Đang xử lý')
+                          <Text
+                            style={[
+                              styles.statusPillText,
+                              isAssigned
+                                ? { color: '#2563EB' }
+                                : isInProgress
+                                  ? { color: '#4F46E5' }
+                                  : { color: '#059669' },
+                            ]}
+                          >
+                            {isAssigned
+                              ? translate('Đã phân công')
+                              : isInProgress
+                                ? translate('Đang xử lý')
+                                : translate('Hoàn thành')}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {prio === 'HIGH' && (
+                        <Text style={styles.urgentRedText}>
+                          {translate("Ưu tiên: Khẩn cấp")}</Text>
+                      )}
+
+                      <Text style={styles.cardMainTitle}>{t.title}</Text>
+                      <Text style={styles.cardLocationText}>{t.locationNote}</Text>
+
+                      {isAssigned ? (
+                        <View style={styles.techAssignActionBar}>
+                          <TouchableOpacity
+                            style={styles.acceptJobBlueBtn}
+                            onPress={() => handleTechAcknowledge(t)}
+                            disabled={loading}
+                          >
+                            {loading ? (
+                              <ActivityIndicator color="#FFFFFF" />
+                            ) : (
+                              <Text style={styles.acceptJobBlueBtnText}>{translate("Nhận việc ngay")}</Text>
+                            )}
+                          </TouchableOpacity>
+                          <Text style={styles.assignedTimeMeta}>
+                            {translate("Giao bởi BMB")} • 5 phút trước
+                          </Text>
+                        </View>
+                      ) : (
+                        <View style={styles.techInProgressBar}>
+                          <Text style={styles.techInProgressText}>
+                            KTV: {user.fullName} • 15 phút trước
+                          </Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            {techScreen === 'TASK_DETAIL' && activeTicket && (
+              <View style={{ flex: 1 }}>
+                <ScrollView
+                  style={styles.scrollArea}
+                  contentContainerStyle={{ paddingBottom: 32 }}
+                  showsVerticalScrollIndicator={false}
+                >
+                  <View style={styles.subScreenHeader}>
+                    <TouchableOpacity onPress={() => setTechScreen('HOME')}>
+                      <Text style={styles.backArrowText}>←</Text>
+                    </TouchableOpacity>
+                    <Text style={styles.subScreenTitle} numberOfLines={1}>
+                      {translate("Chi tiết sự cố ")}{activeTicket.ticketCode}
+                    </Text>
+                  </View>
+
+                  <View style={styles.techDetailTopCard}>
+                    <View style={styles.cardTopRow}>
+                      <Text style={styles.cardCodeText}>{activeTicket.ticketCode}</Text>
+                      <View style={[styles.statusPill, { backgroundColor: '#E0E7FF' }]}>
+                        <Text style={[styles.statusPillText, { color: '#4F46E5' }]}>
+                          {activeTicket.status === 'IN_PROGRESS'
+                            ? translate('Đang xử lý')
+                            : activeTicket.status === 'ASSIGNED'
+                              ? translate('Đã phân công')
                               : translate('Hoàn thành')}
                         </Text>
                       </View>
                     </View>
+                    <Text style={[styles.cardMainTitle, { marginBottom: 0 }]}>
+                      {activeTicket.title}
+                    </Text>
+                  </View>
 
-                    {prio === 'HIGH' && (
-                      <Text style={styles.urgentRedText}>
-                        {translate("Ưu tiên: Khẩn cấp")}</Text>
+                  <View style={styles.whiteSectionCard}>
+                    <Text style={styles.cardBlockTitle}>{translate("Thông tin kỹ thuật")}</Text>
+                    {activeTicket.isAnonymous && (
+                      <View style={{
+                        backgroundColor: '#F8FAFC',
+                        padding: 8,
+                        borderRadius: 6,
+                        borderWidth: 1,
+                        borderColor: '#E2E8F0',
+                        marginBottom: 8,
+                      }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: '#334155' }}>
+                            👤 {translate("Nguồn: Khách vãng lai (Ẩn danh)")}
+                          </Text>
+                          {activeTicket.locationVerificationStatus === 'VERIFIED' ? (
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                          ) : (
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                          )}
+                        </View>
+                        {activeTicket.locationVerificationReason ? (
+                          <Text style={{ fontSize: 11, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+                            {activeTicket.locationVerificationReason}
+                          </Text>
+                        ) : null}
+                      </View>
                     )}
+                    <Text style={styles.techInfoLine}>
+                      {translate("Vị trí:")} {activeTicket.locationNote || translate('Vị trí sự cố')}
+                    </Text>
+                    <Text style={styles.techInfoLine}>
+                      {translate("Mã thiết bị:")}{' '}
+                      {activeTicket.asset?.qrCode || '---'}
+                    </Text>
+                    <Text style={[styles.techInfoLine, { marginBottom: 0 }]}>
+                      {translate("Độ ưu tiên:")} {translate(PRIORITY_VN[activeTicket.finalPriority || activeTicket.aiSuggestedPriority] || 'Bình thường')} • {translate("Danh mục:")}{' '}
+                      {translate(CATEGORY_SHORT_VN[
+                        activeTicket.finalCategory || activeTicket.aiSuggestedCategory
+                      ] || 'Điện - Nước')}
+                    </Text>
+                  </View>
 
-                    <Text style={styles.cardMainTitle}>{t.title}</Text>
-                    <Text style={styles.cardLocationText}>{t.locationNote}</Text>
+                  <View style={styles.whiteSectionCard}>
+                    <Text style={styles.cardBlockTitle}>{translate('Ảnh hiện trường')}</Text>
+                    {(() => {
+                      const photos = getResidentReportedMedia(activeTicket);
+                      if (photos.length === 0) {
+                        return <Text style={styles.techInfoLine}>{translate('Chưa có ảnh hiện trường.')}</Text>;
+                      }
 
-                    {isAssigned ? (
-                      <View style={styles.techAssignActionBar}>
+                      return (
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                          {photos.map((photo, index) => (
+                            <TouchableOpacity
+                              key={photo.id}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${translate('Ảnh hiện trường')} ${index + 1}`}
+                              onPress={() => openReportedPhoto(photos, index)}
+                            >
+                              {failedPhotoUrls[photo.url] ? (
+                                <View style={{ width: 76, height: 76, borderRadius: 8, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center', padding: 4 }}>
+                                  <Text style={{ fontSize: 16 }}>⚠️</Text>
+                                  <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center', fontWeight: '600' }}>
+                                    {translate("Lỗi tải ảnh")}
+                                  </Text>
+                                </View>
+                              ) : (
+                                <Image
+                                  source={{ uri: photo.url }}
+                                  style={{ width: 76, height: 76, borderRadius: 8, backgroundColor: '#F1F5F9' }}
+                                  resizeMode="cover"
+                                  onError={() => setFailedPhotoUrls((prev) => ({ ...prev, [photo.url]: true }))}
+                                />
+                              )}
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      );
+                    })()}
+                  </View>
+
+                  {/* Thẻ SLA & Cam kết dịch vụ */}
+                  <View style={styles.whiteSectionCard}>
+                    <View style={styles.cardTopRow}>
+                      <Text style={styles.cardBlockTitle}>{translate("Tiến độ SLA")}</Text>
+                      {(() => {
+                        const sla = ticketSlas[activeTicket.id];
+                        const status = sla?.status || 'ON_TRACK';
+                        const bg = status === 'BREACHED' ? '#FEE2E2' : status === 'AT_RISK' ? '#FEF3C7' : status === 'PAUSED' ? '#F1F5F9' : '#DCFCE7';
+                        const fg = status === 'BREACHED' ? '#B91C1C' : status === 'AT_RISK' ? '#B45309' : status === 'PAUSED' ? '#64748B' : '#15803D';
+                        const label = status === 'BREACHED' ? 'Quá hạn SLA' : status === 'AT_RISK' ? 'Sắp quá hạn' : status === 'PAUSED' ? 'Tạm dừng' : 'Đúng hạn';
+                        return (
+                          <View style={[styles.statusPill, { backgroundColor: bg }]}>
+                            <Text style={[styles.statusPillText, { color: fg }]}>{translate(label)}</Text>
+                          </View>
+                        );
+                      })()}
+                    </View>
+                    <Text style={styles.cardLocationText}>
+                      Hạn phản hồi: {ticketSlas[activeTicket.id]?.responseDeadline ? new Date(ticketSlas[activeTicket.id].responseDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '30 phút'} •
+                      Hạn hoàn thành: {ticketSlas[activeTicket.id]?.resolutionDeadline ? new Date(ticketSlas[activeTicket.id].resolutionDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '24 giờ'}
+                    </Text>
+                    {ticketSlas[activeTicket.id]?.escalationLevel > 0 && (
+                      <Text style={{ fontSize: 11.5, color: '#DC2626', fontWeight: '700', marginTop: 4 }}>
+                        ⚠️ Leo thang cấp độ {ticketSlas[activeTicket.id].escalationLevel}: Đã thông báo cấp quản lý
+                      </Text>
+                    )}
+                  </View>
+
+                  {/* Thẻ Đề xuất chi phí & Vật tư sửa chữa */}
+                  <View style={styles.whiteSectionCard}>
+                    <View style={styles.cardTopRow}>
+                      <Text style={styles.cardBlockTitle}>{translate("Chi phí sửa chữa")}</Text>
+                      {ticketCosts[activeTicket.id] && (
+                        <View style={[styles.statusPill, {
+                          backgroundColor: ticketCosts[activeTicket.id].status === 'APPROVED' ? '#DCFCE7' : ticketCosts[activeTicket.id].status === 'REJECTED' ? '#FEE2E2' : '#FEF3C7'
+                        }]}>
+                          <Text style={[styles.statusPillText, {
+                            color: ticketCosts[activeTicket.id].status === 'APPROVED' ? '#15803D' : ticketCosts[activeTicket.id].status === 'REJECTED' ? '#B91C1C' : '#B45309'
+                          }]}>
+                            {ticketCosts[activeTicket.id].status === 'APPROVED' ? translate('Đã phê duyệt') : ticketCosts[activeTicket.id].status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    {ticketCosts[activeTicket.id] ? (
+                      <View style={{ marginTop: 6 }}>
+                        {(ticketCosts[activeTicket.id].items || []).map((it: any, idx: number) => (
+                          <View key={idx} style={styles.bmbStatRow}>
+                            <Text style={styles.bmbStatLabel}>• {it.materialName} ({it.quantity} {it.unit})</Text>
+                            <Text style={styles.bmbStatValue}>{Number(it.totalPrice || 0).toLocaleString('vi-VN')} đ</Text>
+                          </View>
+                        ))}
+                        {Number(ticketCosts[activeTicket.id].otherCost || 0) > 0 && (
+                          <View style={styles.bmbStatRow}>
+                            <Text style={styles.bmbStatLabel}>{translate("Chi phí khác:")}</Text>
+                            <Text style={styles.bmbStatValue}>{Number(ticketCosts[activeTicket.id].otherCost).toLocaleString('vi-VN')} đ</Text>
+                          </View>
+                        )}
+                        <View style={styles.techDivider} />
+                        <View style={styles.bmbStatRow}>
+                          <Text style={[styles.bmbStatLabel, { fontWeight: '700', color: '#0F172A' }]}>{translate("Tổng dự toán:")}</Text>
+                          <Text style={[styles.bmbStatValue, { fontWeight: '800', color: '#2563EB', fontSize: 15 }]}>
+                            {Number(ticketCosts[activeTicket.id].totalCost || 0).toLocaleString('vi-VN')} đ
+                          </Text>
+                        </View>
+                        {ticketCosts[activeTicket.id].reviewNote && (
+                          <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 4 }}>
+                            BMB: {ticketCosts[activeTicket.id].reviewNote}
+                          </Text>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={{ marginTop: 6 }}>
+                        <Text style={[styles.cardLocationText, { marginBottom: 6 }]}>
+                          {translate("Nếu cần thay mới linh kiện hoặc phát sinh vật tư, gửi đề xuất để BMB phê duyệt:")}
+                        </Text>
+                        <Text style={styles.fieldLabel}>{translate("Tên vật tư thay thế *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={matNameInput}
+                          onChangeText={setMatNameInput}
+                          placeholder={translate("Ví dụ: Ống nhựa PVC D21, Van khóa...")}
+                          placeholderTextColor="#94A3B8"
+                        />
+                        <View style={{ flexDirection: 'row', gap: 8, marginVertical: 6 }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabel}>{translate("Số lượng")}</Text>
+                            <TextInput
+                              style={styles.textInputField}
+                              value={matQtyInput}
+                              onChangeText={setMatQtyInput}
+                              keyboardType="numeric"
+                              placeholder="1"
+                              placeholderTextColor="#94A3B8"
+                            />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.fieldLabel}>{translate("Đơn vị")}</Text>
+                            <TextInput
+                              style={styles.textInputField}
+                              value={matUnitInput}
+                              onChangeText={setMatUnitInput}
+                              placeholder="Cái"
+                              placeholderTextColor="#94A3B8"
+                            />
+                          </View>
+                          <View style={{ flex: 1.5 }}>
+                            <Text style={styles.fieldLabel}>{translate("Đơn giá (VND)")}</Text>
+                            <TextInput
+                              style={styles.textInputField}
+                              value={matPriceInput}
+                              onChangeText={setMatPriceInput}
+                              keyboardType="numeric"
+                              placeholder="50000"
+                              placeholderTextColor="#94A3B8"
+                            />
+                          </View>
+                        </View>
                         <TouchableOpacity
-                          style={styles.acceptJobBlueBtn}
-                          onPress={() => handleTechAcknowledge(t)}
+                          style={[styles.primaryActionBtn, { marginTop: 6, backgroundColor: '#0284C7' }]}
+                          onPress={() => handleTechSubmitCost(activeTicket.id)}
                           disabled={loading}
                         >
-                          {loading ? (
-                            <ActivityIndicator color="#FFFFFF" />
-                          ) : (
-                            <Text style={styles.acceptJobBlueBtnText}>{translate("Nhận việc ngay")}</Text>
-                          )}
+                          <Text style={styles.primaryActionBtnText}>{translate("Gửi đề xuất chi phí")}</Text>
                         </TouchableOpacity>
-                        <Text style={styles.assignedTimeMeta}>
-                          {translate("Giao bởi BMB")} • 5 phút trước
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.whiteSectionCard}>
+                    <Text style={styles.cardBlockTitle}>
+                      {activeTicket.isAnonymous
+                        ? translate("Mô tả sự cố (Khách ẩn danh)")
+                        : translate("Mô tả của cư dân")}
+                    </Text>
+                    <Text style={styles.residentDescGray}>
+                      {activeTicket.description}
+                    </Text>
+                  </View>
+
+                  {/* TRỢ LÝ AI KỸ THUẬT */}
+                  <View style={[styles.whiteSectionCard, { borderColor: '#E2E8F0', borderWidth: 1 }]}>
+                    <View style={styles.cardTopRow}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={{ fontSize: 16 }}>🤖</Text>
+                        <Text style={styles.cardBlockTitle}>{translate('Trợ lý AI kỹ thuật')}</Text>
+                      </View>
+                      {technicianGuidanceLoading && (
+                        <ActivityIndicator size="small" color="#2563EB" />
+                      )}
+                    </View>
+
+                    {/* TRƯỜNG HỢP 1: ĐANG CHUẨN BỊ (GENERATING) HOẶC CHƯA NHẬN VIỆC */}
+                    {(!technicianGuidance || technicianGuidance.status === 'GENERATING') ? (
+                      activeTicket.status === 'ASSIGNED' ? (
+                        <View style={{ paddingVertical: 8, alignItems: 'center' }}>
+                          <Text style={[styles.techInfoLine, { textAlign: 'center', color: '#64748B' }]}>
+                            {translate('Bấm "Nhận việc ngay" để AI bắt đầu phân tích và chuẩn bị gợi ý kiểm tra.')}
+                          </Text>
+                        </View>
+                      ) : (
+                        <View style={{ paddingVertical: 14, alignItems: 'center', gap: 6 }}>
+                          <ActivityIndicator size="small" color="#0284C7" />
+                          <Text style={{ fontSize: 13, color: '#0284C7', fontWeight: '600' }}>
+                            {translate('Đang chuẩn bị gợi ý kiểm tra...')}
+                          </Text>
+                          <Text style={{ fontSize: 11.5, color: '#64748B', textAlign: 'center' }}>
+                            {translate('Hệ thống đang phân tích các nguy cơ, vật tư dự kiến và quy trình an toàn.')}
+                          </Text>
+                        </View>
+                      )
+                    ) : technicianGuidance.status === 'UNAVAILABLE' ? (
+                      /* TRƯỜNG HỢP 2: KHÔNG KHẢ DỤNG (UNAVAILABLE) */
+                      <View style={{ paddingVertical: 6, gap: 8 }}>
+                        {technicianGuidance.isSafetyHazard && (
+                          <View style={{
+                            backgroundColor: '#FEF2F2',
+                            borderColor: '#F87171',
+                            borderWidth: 1,
+                            borderRadius: 8,
+                            padding: 10,
+                          }}>
+                            <Text style={{ color: '#DC2626', fontWeight: '700', fontSize: 12.5, marginBottom: 4 }}>
+                              🚨 {translate('CẢNH BÁO NGUY HIỂM TẠI HIỆN TRƯỜNG')}
+                            </Text>
+                            <Text style={{ color: '#991B1B', fontSize: 12, lineHeight: 16 }}>
+                              {technicianGuidance.hazardWarning || translate('Phát hiện dấu hiệu nguy hiểm. KTV dừng thao tác và báo ngay BMB.')}
+                            </Text>
+                          </View>
+                        )}
+                        <Text style={[styles.techInfoLine, { color: '#64748B', marginBottom: 0 }]}>
+                          ℹ️ {translate('Chưa có gợi ý AI cho sự cố này')}
                         </Text>
                       </View>
                     ) : (
-                      <View style={styles.techInProgressBar}>
-                        <Text style={styles.techInProgressText}>
-                          KTV: {user.fullName} • 15 phút trước
-                        </Text>
+                      /* TRƯỜNG HỢP 3: ĐÃ SẴN SÀNG (READY) */
+                      <View style={{ marginTop: 6, gap: 12 }}>
+                        {/* 1. KHUNG CẢNH BÁO NGUY HIỂM / ĐIỀU KIỆN DỪNG HOẶC BÁO BMB (ĐẶT Ở ĐẦU) */}
+                        {(technicianGuidance.isSafetyHazard || (Array.isArray(technicianGuidance.stopAndEscalateWhen) && technicianGuidance.stopAndEscalateWhen.length > 0)) && (
+                          <View style={{
+                            backgroundColor: technicianGuidance.isSafetyHazard ? '#FEF2F2' : '#FFFBEB',
+                            borderColor: technicianGuidance.isSafetyHazard ? '#F87171' : '#FCD34D',
+                            borderWidth: 1,
+                            borderRadius: 8,
+                            padding: 10,
+                          }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                              <Text style={{ fontSize: 14 }}>{technicianGuidance.isSafetyHazard ? '🚨' : '⚠️'}</Text>
+                              <Text style={{
+                                color: technicianGuidance.isSafetyHazard ? '#DC2626' : '#B45309',
+                                fontWeight: '700',
+                                fontSize: 12.5,
+                              }}>
+                                {technicianGuidance.isSafetyHazard
+                                  ? translate('CẢNH BÁO NGUY HIỂM TẠI HIỆN TRƯỜNG')
+                                  : translate('Điều kiện dừng hoặc báo BMB')}
+                              </Text>
+                            </View>
+                            {technicianGuidance.hazardWarning ? (
+                              <Text style={{ color: '#991B1B', fontSize: 11.5, fontWeight: '600', marginBottom: 4 }}>
+                                {technicianGuidance.hazardWarning}
+                              </Text>
+                            ) : null}
+                            {Array.isArray(technicianGuidance.stopAndEscalateWhen) && technicianGuidance.stopAndEscalateWhen.map((cond: string, idx: number) => (
+                              <Text key={idx} style={{ color: technicianGuidance.isSafetyHazard ? '#991B1B' : '#92400E', fontSize: 11.5, lineHeight: 16 }}>
+                                • {cond}
+                              </Text>
+                            ))}
+                          </View>
+                        )}
+
+                        {/* Điểm lưu ý / xác minh nếu có */}
+                        {technicianGuidance.uncertaintyNote ? (
+                          <View style={{ backgroundColor: '#F0F9FF', borderColor: '#BAE6FD', borderWidth: 1, borderRadius: 6, padding: 8 }}>
+                            <Text style={{ color: '#0369A1', fontSize: 11.5, lineHeight: 16 }}>
+                              🔍 {technicianGuidance.uncertaintyNote}
+                            </Text>
+                          </View>
+                        ) : null}
+
+                        {/* 2. NGUYÊN NHÂN CÓ THỂ XẢY RA */}
+                        {Array.isArray(technicianGuidance.possibleCauses) && technicianGuidance.possibleCauses.length > 0 && (
+                          <View style={{ gap: 6 }}>
+                            <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1E293B' }}>
+                              🔍 {translate('Nguyên nhân có thể xảy ra')}
+                            </Text>
+                            {technicianGuidance.possibleCauses.map((c: any, idx: number) => (
+                              <View key={idx} style={{ backgroundColor: '#F8FAFC', padding: 8, borderRadius: 6, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <Text style={{ fontSize: 12, fontWeight: '600', color: '#0F172A' }}>
+                                  {idx + 1}. {c.cause}
+                                </Text>
+                                {c.signsToVerify ? (
+                                  <Text style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                                    {translate('Dấu hiệu cần xác minh:')} {c.signsToVerify}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            ))}
+                          </View>
+                        )}
+
+                        {/* 3. CHECKLIST KIỂM TRA TẠI HIỆN TRƯỜNG */}
+                        {Array.isArray(technicianGuidance.inspectionChecklist) && technicianGuidance.inspectionChecklist.length > 0 && (
+                          <View style={{ gap: 6 }}>
+                            <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1E293B' }}>
+                              📋 {translate('Checklist kiểm tra tại hiện trường')}
+                            </Text>
+                            {technicianGuidance.inspectionChecklist.map((item: string, idx: number) => {
+                              const isChecked = !!checkedChecklistItems[`${activeTicket.id}_${idx}`];
+                              return (
+                                <TouchableOpacity
+                                  key={idx}
+                                  style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingVertical: 4 }}
+                                  onPress={() => {
+                                    setCheckedChecklistItems((prev) => ({
+                                      ...prev,
+                                      [`${activeTicket.id}_${idx}`]: !isChecked,
+                                    }));
+                                  }}
+                                >
+                                  <View style={{
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: 4,
+                                    borderWidth: 1.5,
+                                    borderColor: isChecked ? '#059669' : '#94A3B8',
+                                    backgroundColor: isChecked ? '#059669' : '#FFFFFF',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    marginTop: 1,
+                                  }}>
+                                    {isChecked && <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '700' }}>✓</Text>}
+                                  </View>
+                                  <Text style={{
+                                    fontSize: 12,
+                                    color: isChecked ? '#64748B' : '#334155',
+                                    textDecorationLine: isChecked ? 'line-through' : 'none',
+                                    flex: 1,
+                                    lineHeight: 18,
+                                  }}>
+                                    {item}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        )}
+
+                        {/* 4. VẬT TƯ & DỤNG CỤ DỰ KIẾN */}
+                        {Array.isArray(technicianGuidance.estimatedMaterials) && technicianGuidance.estimatedMaterials.length > 0 && (
+                          <View style={{ gap: 6 }}>
+                            <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1E293B' }}>
+                              🧰 {translate('Vật tư & Dụng cụ dự kiến')}
+                            </Text>
+                            {technicianGuidance.estimatedMaterials.map((m: any, idx: number) => (
+                              <View key={idx} style={{ backgroundColor: '#F8FAFC', padding: 8, borderRadius: 6, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                <Text style={{ fontSize: 12, fontWeight: '600', color: '#1E293B' }}>
+                                  • {m.name}
+                                </Text>
+                                {m.conditionToVerify ? (
+                                  <Text style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                                    {translate('Điều kiện trước khi dùng:')} {m.conditionToVerify}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            ))}
+                            <Text style={{ fontSize: 10.5, color: '#94A3B8', fontStyle: 'italic', marginTop: 2 }}>
+                              {translate('Gợi ý mang tính tham khảo chuẩn bị tại chỗ, không thay thế quy trình đề xuất chi phí.')}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* 5. CÁC BƯỚC XỬ LÝ AN TOÀN */}
+                        {Array.isArray(technicianGuidance.safeHandlingSteps) && technicianGuidance.safeHandlingSteps.length > 0 && (
+                          <View style={{ gap: 6 }}>
+                            <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#1E293B' }}>
+                              🛡️ {translate('Các bước xử lý an toàn')}
+                            </Text>
+                            {technicianGuidance.safeHandlingSteps.map((step: string, idx: number) => (
+                              <View key={idx} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, paddingVertical: 2 }}>
+                                <Text style={{ fontSize: 12, color: '#334155', flex: 1, lineHeight: 18 }}>
+                                  {step.startsWith(String(idx + 1)) ? step : `${idx + 1}. ${step}`}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                        )}
                       </View>
                     )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          )}
+                  </View>
 
-          {techScreen === 'TASK_DETAIL' && activeTicket && (
-            <View style={{ flex: 1 }}>
+                  <View style={styles.proofGreenBorderCard}>
+                    <Text style={styles.cardBlockTitle}>
+                      {translate("Ảnh nghiệm thu sau khi sửa (Bắt buộc ít nhất 1 ảnh) *")}</Text>
+                    <View style={styles.proofCompareRow}>
+                      <View style={styles.techCapturedBox}>
+                        {techProofPhotos[0] ? (
+                          <Image
+                            source={{ uri: techProofPhotos[0] }}
+                            style={{ width: '100%', height: '100%', borderRadius: 10 }}
+                          />
+                        ) : null}
+                      </View>
+                      <TouchableOpacity
+                        style={styles.techAddPhotoDashedBox}
+                        onPress={() =>
+                          handlePickOrCapturePhoto('repair_proof', (uploadedUrl) => {
+                            setTechProofPhotos((prev) => [uploadedUrl, ...prev]);
+                            showToast(translate('Đã tải lên ảnh nghiệm thu sau sửa chữa!'));
+                          })
+                        }
+                      >
+                        <Text style={styles.techPlusIcon}>＋</Text>
+                        <Text style={styles.techAddPhotoBlueText}>
+                          {translate("+ Chụp ảnh hoàn thành (")}{techProofPhotos.length})
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    {techProofPhotos.length === 0 && (
+                      <Text style={[styles.inlineFieldError, { marginTop: 6 }]}>
+                        {translate('Cần tải lên ít nhất 1 ảnh nghiệm thu')}
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={styles.whiteSectionCard}>
+                    <Text style={styles.cardBlockTitle}>{translate("Ghi chú kết quả xử lý")}</Text>
+                    <TextInput
+                      style={styles.ratingInputBox}
+                      multiline
+                      value={techRepairNote}
+                      onChangeText={setTechRepairNote}
+                      placeholder={translate("Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.")}
+                      placeholderTextColor="#94A3B8"
+                      maxLength={500}
+                    />
+                  </View>
+                </ScrollView>
+
+                {activeTicket.status === 'ASSIGNED' ? (
+                  <View style={styles.stickyBottomBar}>
+                    <TouchableOpacity
+                      style={[styles.primaryActionBtn, { backgroundColor: '#2563EB', paddingVertical: 14 }]}
+                      onPress={() => handleTechAcknowledge(activeTicket)}
+                      disabled={loading}
+                    >
+                      {loading ? (
+                        <ActivityIndicator color="#FFF" />
+                      ) : (
+                        <Text style={styles.primaryActionBtnText}>
+                          {translate("Nhận việc ngay")}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                ) : activeTicket.status !== 'COMPLETED' && activeTicket.status !== 'CLOSED' && (
+                  <View style={styles.stickyBottomBar}>
+                    <TouchableOpacity
+                      style={[styles.confirmCloseGreenBtn, (loading || techProofPhotos.length === 0) && { opacity: 0.6 }]}
+                      onPress={() => handleTechCompleteSubmit(activeTicket)}
+                      disabled={loading || techProofPhotos.length === 0}
+                    >
+                      {loading ? (
+                        <ActivityIndicator color="#FFF" />
+                      ) : (
+                        <Text style={styles.confirmCloseGreenText}>
+                          {translate("Hoàn thành & Gửi ảnh nghiệm thu")}</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {techScreen === 'NOTI_PROFILE' && (
               <ScrollView
                 style={styles.scrollArea}
-                contentContainerStyle={{ paddingBottom: 32 }}
+                contentContainerStyle={{ paddingBottom: 28 }}
                 showsVerticalScrollIndicator={false}
               >
                 <View style={styles.subScreenHeader}>
                   <TouchableOpacity onPress={() => setTechScreen('HOME')}>
                     <Text style={styles.backArrowText}>←</Text>
                   </TouchableOpacity>
-                  <Text style={styles.subScreenTitle} numberOfLines={1}>
-                    {translate("Chi tiết sự cố ")}{activeTicket.ticketCode}
-                  </Text>
-                </View>
-
-                <View style={styles.techDetailTopCard}>
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardCodeText}>{activeTicket.ticketCode}</Text>
-                    <View style={[styles.statusPill, { backgroundColor: '#E0E7FF' }]}>
-                      <Text style={[styles.statusPillText, { color: '#4F46E5' }]}>
-                        {activeTicket.status === 'IN_PROGRESS'
-                          ? translate('Đang xử lý')
-                          : activeTicket.status === 'ASSIGNED'
-                            ? translate('Đã phân công')
-                            : translate('Hoàn thành')}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={[styles.cardMainTitle, { marginBottom: 0 }]}>
-                    {activeTicket.title}
-                  </Text>
+                  <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ KTV")}</Text>
                 </View>
 
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Thông tin kỹ thuật")}</Text>
-                  {activeTicket.isAnonymous && (
-                    <View style={{
-                      backgroundColor: '#F8FAFC',
-                      padding: 8,
-                      borderRadius: 6,
-                      borderWidth: 1,
-                      borderColor: '#E2E8F0',
-                      marginBottom: 8,
-                    }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#334155' }}>
-                          👤 {translate("Nguồn: Khách vãng lai (Ẩn danh)")}
-                        </Text>
-                        {activeTicket.locationVerificationStatus === 'VERIFIED' ? (
-                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                        ) : (
-                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                  <View style={styles.cardTopRow}>
+                    <Text style={styles.sectionTitleText}>{translate("Thông báo công việc mới")}</Text>
+                    <View style={styles.unreadPillBadge}>
+                      <Text style={styles.unreadPillText}>{unreadCount} {translate('chưa đọc')}</Text>
+                    </View>
+                  </View>
+
+                  {(() => {
+                    const sortedNotis = [...notifications].sort(
+                      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                    );
+                    const displayed = showAllNotifications ? sortedNotis : sortedNotis.slice(0, 5);
+                    if (sortedNotis.length === 0) {
+                      return <Text style={styles.techInfoLine}>{translate('Chưa có thông báo công việc.')}</Text>;
+                    }
+                    return (
+                      <>
+                        {displayed.map((notification: any) => (
+                          <TouchableOpacity
+                            key={notification.id}
+                            style={[styles.notiBlueItem, !notification.isRead && { borderColor: '#60A5FA', borderWidth: 1.5 }]}
+                            onPress={() => handleOpenNotification(notification)}
+                          >
+                            <View style={{ flex: 1, paddingRight: 8 }}>
+                              <Text style={styles.notiItemTitle}>{notification.title}</Text>
+                              <Text style={styles.techNotiBodyText}>{notification.message}</Text>
+                              <Text style={styles.notiItemTime}>{formatDateTime(notification.createdAt)}</Text>
+                            </View>
+                            {!notification.isRead && <View style={styles.blueUnreadDot} />}
+                          </TouchableOpacity>
+                        ))}
+                        {sortedNotis.length > 5 && (
+                          <TouchableOpacity
+                            style={{ paddingVertical: 10, alignItems: 'center' }}
+                            onPress={() => setShowAllNotifications(!showAllNotifications)}
+                          >
+                            <Text style={{ fontSize: 13, fontWeight: '600', color: '#2563EB' }}>
+                              {showAllNotifications
+                                ? translate('Thu gọn')
+                                : `${translate('Xem thêm')} (${sortedNotis.length - 5})`}
+                            </Text>
+                          </TouchableOpacity>
                         )}
-                      </View>
-                      {activeTicket.locationVerificationReason ? (
-                        <Text style={{ fontSize: 11, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
-                          {activeTicket.locationVerificationReason}
-                        </Text>
-                      ) : null}
-                    </View>
-                  )}
-                  <Text style={styles.techInfoLine}>
-                    {translate("Vị trí:")} {activeTicket.locationNote || translate('Vị trí sự cố')}
-                  </Text>
-                  <Text style={styles.techInfoLine}>
-                    {translate("Mã thiết bị:")}{' '}
-                    {activeTicket.asset?.qrCode || '---'}
-                  </Text>
-                  <Text style={[styles.techInfoLine, { marginBottom: 0 }]}>
-                    {translate("Độ ưu tiên:")} {translate(PRIORITY_VN[activeTicket.finalPriority || activeTicket.aiSuggestedPriority] || 'Bình thường')} • {translate("Danh mục:")}{' '}
-                    {translate(CATEGORY_SHORT_VN[
-                      activeTicket.finalCategory || activeTicket.aiSuggestedCategory
-                    ] || 'Điện - Nước')}
-                  </Text>
+                      </>
+                    );
+                  })()}
                 </View>
 
-                {/* Thẻ SLA & Cam kết dịch vụ */}
                 <View style={styles.whiteSectionCard}>
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardBlockTitle}>{translate("Tiến độ SLA")}</Text>
-                    {(() => {
-                      const sla = ticketSlas[activeTicket.id];
-                      const status = sla?.status || 'ON_TRACK';
-                      const bg = status === 'BREACHED' ? '#FEE2E2' : status === 'AT_RISK' ? '#FEF3C7' : status === 'PAUSED' ? '#F1F5F9' : '#DCFCE7';
-                      const fg = status === 'BREACHED' ? '#B91C1C' : status === 'AT_RISK' ? '#B45309' : status === 'PAUSED' ? '#64748B' : '#15803D';
-                      const label = status === 'BREACHED' ? 'Quá hạn SLA' : status === 'AT_RISK' ? 'Sắp quá hạn' : status === 'PAUSED' ? 'Tạm dừng' : 'Đúng hạn';
-                      return (
-                        <View style={[styles.statusPill, { backgroundColor: bg }]}>
-                          <Text style={[styles.statusPillText, { color: fg }]}>{translate(label)}</Text>
-                        </View>
-                      );
-                    })()}
-                  </View>
-                  <Text style={styles.cardLocationText}>
-                    Hạn phản hồi: {ticketSlas[activeTicket.id]?.responseDeadline ? new Date(ticketSlas[activeTicket.id].responseDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '30 phút'} •
-                    Hạn hoàn thành: {ticketSlas[activeTicket.id]?.resolutionDeadline ? new Date(ticketSlas[activeTicket.id].resolutionDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '24 giờ'}
-                  </Text>
-                  {ticketSlas[activeTicket.id]?.escalationLevel > 0 && (
-                    <Text style={{ fontSize: 11.5, color: '#DC2626', fontWeight: '700', marginTop: 4 }}>
-                      ⚠️ Leo thang cấp độ {ticketSlas[activeTicket.id].escalationLevel}: Đã thông báo cấp quản lý
-                    </Text>
-                  )}
-                </View>
-
-                {/* Thẻ Đề xuất chi phí & Vật tư sửa chữa */}
-                <View style={styles.whiteSectionCard}>
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardBlockTitle}>{translate("Chi phí sửa chữa")}</Text>
-                    {ticketCosts[activeTicket.id] && (
-                      <View style={[styles.statusPill, {
-                        backgroundColor: ticketCosts[activeTicket.id].status === 'APPROVED' ? '#DCFCE7' : ticketCosts[activeTicket.id].status === 'REJECTED' ? '#FEE2E2' : '#FEF3C7'
-                      }]}>
-                        <Text style={[styles.statusPillText, {
-                          color: ticketCosts[activeTicket.id].status === 'APPROVED' ? '#15803D' : ticketCosts[activeTicket.id].status === 'REJECTED' ? '#B91C1C' : '#B45309'
-                        }]}>
-                          {ticketCosts[activeTicket.id].status === 'APPROVED' ? translate('Đã phê duyệt') : ticketCosts[activeTicket.id].status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-
-                  {ticketCosts[activeTicket.id] ? (
-                    <View style={{ marginTop: 6 }}>
-                      {(ticketCosts[activeTicket.id].items || []).map((it: any, idx: number) => (
-                        <View key={idx} style={styles.bmbStatRow}>
-                          <Text style={styles.bmbStatLabel}>• {it.materialName} ({it.quantity} {it.unit})</Text>
-                          <Text style={styles.bmbStatValue}>{Number(it.totalPrice || 0).toLocaleString('vi-VN')} đ</Text>
-                        </View>
-                      ))}
-                      {Number(ticketCosts[activeTicket.id].otherCost || 0) > 0 && (
-                        <View style={styles.bmbStatRow}>
-                          <Text style={styles.bmbStatLabel}>{translate("Chi phí khác:")}</Text>
-                          <Text style={styles.bmbStatValue}>{Number(ticketCosts[activeTicket.id].otherCost).toLocaleString('vi-VN')} đ</Text>
-                        </View>
-                      )}
-                      <View style={styles.techDivider} />
-                      <View style={styles.bmbStatRow}>
-                        <Text style={[styles.bmbStatLabel, { fontWeight: '700', color: '#0F172A' }]}>{translate("Tổng dự toán:")}</Text>
-                        <Text style={[styles.bmbStatValue, { fontWeight: '800', color: '#2563EB', fontSize: 15 }]}>
-                          {Number(ticketCosts[activeTicket.id].totalCost || 0).toLocaleString('vi-VN')} đ
-                        </Text>
-                      </View>
-                      {ticketCosts[activeTicket.id].reviewNote && (
-                        <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 4 }}>
-                          BMB: {ticketCosts[activeTicket.id].reviewNote}
-                        </Text>
-                      )}
-                    </View>
-                  ) : (
-                    <View style={{ marginTop: 6 }}>
-                      <Text style={[styles.cardLocationText, { marginBottom: 6 }]}>
-                        {translate("Nếu cần thay mới linh kiện hoặc phát sinh vật tư, gửi đề xuất để BMB phê duyệt:")}
+                  <Text style={styles.cardBlockTitle}>{translate("Hồ sơ Kỹ thuật viên")}</Text>
+                  <View style={styles.techProfileHeaderRow}>
+                    <View style={styles.techAvatarCircle}>
+                      <Text style={{ fontSize: 22, fontWeight: '700', color: '#2563EB' }}>
+                        {user.fullName ? user.fullName.charAt(0).toUpperCase() : 'K'}
                       </Text>
-                      <Text style={styles.fieldLabel}>{translate("Tên vật tư thay thế *")}</Text>
-                      <TextInput
-                        style={styles.textInputField}
-                        value={matNameInput}
-                        onChangeText={setMatNameInput}
-                        placeholder={translate("Ví dụ: Ống nhựa PVC D21, Van khóa...")}
-                        placeholderTextColor="#94A3B8"
-                      />
-                      <View style={{ flexDirection: 'row', gap: 8, marginVertical: 6 }}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.fieldLabel}>{translate("Số lượng")}</Text>
-                          <TextInput
-                            style={styles.textInputField}
-                            value={matQtyInput}
-                            onChangeText={setMatQtyInput}
-                            keyboardType="numeric"
-                            placeholder="1"
-                            placeholderTextColor="#94A3B8"
-                          />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.fieldLabel}>{translate("Đơn vị")}</Text>
-                          <TextInput
-                            style={styles.textInputField}
-                            value={matUnitInput}
-                            onChangeText={setMatUnitInput}
-                            placeholder="Cái"
-                            placeholderTextColor="#94A3B8"
-                          />
-                        </View>
-                        <View style={{ flex: 1.5 }}>
-                          <Text style={styles.fieldLabel}>{translate("Đơn giá (VND)")}</Text>
-                          <TextInput
-                            style={styles.textInputField}
-                            value={matPriceInput}
-                            onChangeText={setMatPriceInput}
-                            keyboardType="numeric"
-                            placeholder="50000"
-                            placeholderTextColor="#94A3B8"
-                          />
-                        </View>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.profileNameText}>{user.fullName}</Text>
+                      <View style={styles.specialtyPill}>
+                        <Text style={styles.specialtyPillText}>
+                          {user.specialtyLabel || 'Điện - Nước'}
+                        </Text>
                       </View>
-                      <TouchableOpacity
-                        style={[styles.primaryActionBtn, { marginTop: 6, backgroundColor: '#0284C7' }]}
-                        onPress={() => handleTechSubmitCost(activeTicket.id)}
-                        disabled={loading}
-                      >
-                        <Text style={styles.primaryActionBtnText}>{translate("Gửi đề xuất chi phí")}</Text>
-                      </TouchableOpacity>
                     </View>
-                  )}
-                </View>
+                  </View>
 
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Mô tả của cư dân")}</Text>
-                  <Text style={styles.residentDescGray}>
-                    {activeTicket.description}
+                  <View style={styles.techDivider} />
+
+                  <Text style={styles.techProfileLine}>
+                    {translate("Số điện thoại:")} {user.phone || '0356 166 863'}
                   </Text>
-                  <View style={styles.photoGridRow}>
-                    {[0, 1, 2].map((idx) => {
-                      const mediaItem = activeTicket.media?.[idx];
-                      return (
-                        <View key={idx} style={styles.residentGrayThumb}>
-                          {mediaItem?.imageUrl ? (
-                            <Image
-                              source={{ uri: mediaItem.imageUrl }}
-                              style={{ width: '100%', height: '100%', borderRadius: 10 }}
-                            />
-                          ) : null}
-                        </View>
-                      );
-                    })}
-                  </View>
-                </View>
+                  <Text style={styles.techProfileLine}>
+                    {translate("Ca trực:")} {user.shiftName || '07:00 - 15:00'} • {(user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? translate('Đang trực') : translate('Ngoài ca')}
+                  </Text>
+                  <Text style={styles.techProfileLine}>
+                    {translate("Đã hoàn thành:")} {completedCount} {translate("sự cố")} • {translate("Đánh giá TB:")} {averageRating} ★
+                  </Text>
 
-                <View style={styles.proofGreenBorderCard}>
-                  <Text style={styles.cardBlockTitle}>
-                    {translate("Ảnh nghiệm thu sau khi sửa (Bắt buộc ít nhất 1 ảnh) *")}</Text>
-                  <View style={styles.proofCompareRow}>
-                    <View style={styles.techCapturedBox}>
-                      {techProofPhotos[0] ? (
-                        <Image
-                          source={{ uri: techProofPhotos[0] }}
-                          style={{ width: '100%', height: '100%', borderRadius: 10 }}
-                        />
-                      ) : null}
-                    </View>
-                    <TouchableOpacity
-                      style={styles.techAddPhotoDashedBox}
-                      onPress={() =>
-                        handlePickOrCapturePhoto('repair_proof', (uploadedUrl) => {
-                          setTechProofPhotos((prev) => [uploadedUrl, ...prev]);
-                          showToast(translate('Đã tải lên ảnh nghiệm thu sau sửa chữa!'));
-                        })
-                      }
-                    >
-                      <Text style={styles.techPlusIcon}>＋</Text>
-                      <Text style={styles.techAddPhotoBlueText}>
-                        {translate("+ Chụp ảnh hoàn thành (")}{techProofPhotos.length})
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                  {techProofPhotos.length === 0 && (
-                    <Text style={[styles.inlineFieldError, { marginTop: 6 }]}>
-                      {translate('Cần tải lên ít nhất 1 ảnh nghiệm thu')}
-                    </Text>
-                  )}
-                </View>
-
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Ghi chú kết quả xử lý")}</Text>
-                  <TextInput
-                    style={styles.ratingInputBox}
-                    multiline
-                    value={techRepairNote}
-                    onChangeText={setTechRepairNote}
-                    placeholder={translate("Đã thay mới đoạn ống dẫn nước dưới bồn rửa và kiểm tra không còn rò rỉ.")}
-                    placeholderTextColor="#94A3B8"
-                    maxLength={500}
-                  />
+                  <PreferenceControls />
+                  <TouchableOpacity
+                    style={styles.logoutRedOutlineBtn}
+                    onPress={handleLogout}
+                  >
+                    <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
+                  </TouchableOpacity>
                 </View>
               </ScrollView>
+            )}
 
-              {activeTicket.status !== 'COMPLETED' && activeTicket.status !== 'CLOSED' && (
-                <View style={styles.stickyBottomBar}>
-                  <TouchableOpacity
-                    style={[styles.confirmCloseGreenBtn, (loading || techProofPhotos.length === 0) && { opacity: 0.6 }]}
-                    onPress={() => handleTechCompleteSubmit(activeTicket)}
-                    disabled={loading || techProofPhotos.length === 0}
-                  >
-                    {loading ? (
-                      <ActivityIndicator color="#FFF" />
-                    ) : (
-                      <Text style={styles.confirmCloseGreenText}>
-                        {translate("Hoàn thành & Gửi ảnh nghiệm thu")}</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          )}
-
-          {techScreen === 'NOTI_PROFILE' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.subScreenHeader}>
-                <TouchableOpacity onPress={() => setTechScreen('HOME')}>
-                  <Text style={styles.backArrowText}>←</Text>
-                </TouchableOpacity>
-                <Text style={styles.subScreenTitle}>{translate("Thông báo & Hồ sơ KTV")}</Text>
-              </View>
-
-              <View style={styles.whiteSectionCard}>
-                <View style={styles.cardTopRow}>
-                  <Text style={styles.sectionTitleText}>{translate("Thông báo công việc mới")}</Text>
-                  <View style={styles.unreadPillBadge}>
-                    <Text style={styles.unreadPillText}>{unreadCount} {translate('chưa đọc')}</Text>
-                  </View>
-                </View>
-
-                {(() => {
-                  const sortedNotis = [...notifications].sort(
-                    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-                  );
-                  const displayed = showAllNotifications ? sortedNotis : sortedNotis.slice(0, 5);
-                  if (sortedNotis.length === 0) {
-                    return <Text style={styles.techInfoLine}>{translate('Chưa có thông báo công việc.')}</Text>;
-                  }
-                  return (
-                    <>
-                      {displayed.map((notification: any) => (
-                        <TouchableOpacity
-                          key={notification.id}
-                          style={[styles.notiBlueItem, !notification.isRead && { borderColor: '#60A5FA', borderWidth: 1.5 }]}
-                          onPress={() => handleOpenNotification(notification)}
-                        >
-                          <View style={{ flex: 1, paddingRight: 8 }}>
-                            <Text style={styles.notiItemTitle}>{notification.title}</Text>
-                            <Text style={styles.techNotiBodyText}>{notification.message}</Text>
-                            <Text style={styles.notiItemTime}>{formatDateTime(notification.createdAt)}</Text>
-                          </View>
-                          {!notification.isRead && <View style={styles.blueUnreadDot} />}
-                        </TouchableOpacity>
-                      ))}
-                      {sortedNotis.length > 5 && (
-                        <TouchableOpacity
-                          style={{ paddingVertical: 10, alignItems: 'center' }}
-                          onPress={() => setShowAllNotifications(!showAllNotifications)}
-                        >
-                          <Text style={{ fontSize: 13, fontWeight: '600', color: '#2563EB' }}>
-                            {showAllNotifications
-                              ? translate('Thu gọn')
-                              : `${translate('Xem thêm')} (${sortedNotis.length - 5})`}
-                          </Text>
-                        </TouchableOpacity>
-                      )}
-                    </>
-                  );
-                })()}
-              </View>
-
-              <View style={styles.whiteSectionCard}>
-                <Text style={styles.cardBlockTitle}>{translate("Hồ sơ Kỹ thuật viên")}</Text>
-                <View style={styles.techProfileHeaderRow}>
-                  <View style={styles.techAvatarCircle}>
-                    <Text style={{ fontSize: 22, fontWeight: '700', color: '#2563EB' }}>
-                      {user.fullName ? user.fullName.charAt(0).toUpperCase() : 'K'}
-                    </Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.profileNameText}>{user.fullName}</Text>
-                    <View style={styles.specialtyPill}>
-                      <Text style={styles.specialtyPillText}>
-                        {user.specialtyLabel || 'Điện - Nước'}
-                      </Text>
-                    </View>
-                  </View>
-                </View>
-
-                <View style={styles.techDivider} />
-
-                <Text style={styles.techProfileLine}>
-                  {translate("Số điện thoại:")} {user.phone || '0356 166 863'}
-                </Text>
-                <Text style={styles.techProfileLine}>
-                  {translate("Ca trực:")} {user.shiftName || '07:00 - 15:00'} • {(user.isOnDuty || isCurrentlyInShift(user.shiftName)) ? translate('Đang trực') : translate('Ngoài ca')}
-                </Text>
-                <Text style={styles.techProfileLine}>
-                  {translate("Đã hoàn thành:")} {completedCount} {translate("sự cố")} • {translate("Đánh giá TB:")} {averageRating} ★
-                </Text>
-
-                <PreferenceControls />
-                <TouchableOpacity
-                  style={styles.logoutRedOutlineBtn}
-                  onPress={handleLogout}
-                >
-                  <Text style={styles.logoutRedOutlineText}>{translate("Đăng xuất tài khoản")}</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          )}
-
-          {techScreen === 'HISTORY' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <Text style={[styles.aptBigTitle, { marginTop: 4 }]}>
-                {translate("Lịch sử công việc đã hoàn thành")}</Text>
-              <View
-                style={[styles.unreadPillBadge, { alignSelf: 'flex-start', marginVertical: 10 }]}
+            {techScreen === 'HISTORY' && (
+              <ScrollView
+                style={styles.scrollArea}
+                contentContainerStyle={{ paddingBottom: 28 }}
+                showsVerticalScrollIndicator={false}
               >
-                <Text style={styles.unreadPillText}>
-                  {completedHistory.length} {translate("công việc")}
-                </Text>
-              </View>
-
-              <View style={styles.searchBarBox}>
-                <TextInput
-                  style={styles.searchBarInput}
-                  placeholder={translate("Tìm mã sự cố hoặc địa điểm...")}
-                  placeholderTextColor="#94A3B8"
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                />
-              </View>
-
-              <View style={styles.chipWrapRow}>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHistoryFilter === 'ALL' && styles.filterPillActive,
-                    { marginBottom: 8 },
-                  ]}
-                  onPress={() => setTechHistoryFilter('ALL')}
+                <Text style={[styles.aptBigTitle, { marginTop: 4 }]}>
+                  {translate("Lịch sử công việc đã hoàn thành")}</Text>
+                <View
+                  style={[styles.unreadPillBadge, { alignSelf: 'flex-start', marginVertical: 10 }]}
                 >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHistoryFilter === 'ALL' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Tất cả (")}{tickets.length})
+                  <Text style={styles.unreadPillText}>
+                    {completedHistory.length} {translate("công việc")}
                   </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHistoryFilter === 'CLOSED' && styles.filterPillActive,
-                    { marginBottom: 8 },
-                  ]}
-                  onPress={() => setTechHistoryFilter('CLOSED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHistoryFilter === 'CLOSED' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Đã đóng (")}{closedCount})
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    techHistoryFilter === 'COMPLETED' && styles.filterPillActive,
-                    { marginBottom: 8 },
-                  ]}
-                  onPress={() => setTechHistoryFilter('COMPLETED')}
-                >
-                  <Text
-                    style={[
-                      styles.filterPillText,
-                      techHistoryFilter === 'COMPLETED' && styles.filterPillTextActive,
-                    ]}
-                  >
-                    {translate("Chờ cư dân nghiệm thu (")}{waitingResidentCount})
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {filteredTechHistory.map((t) => {
-                const isWaitingAccept = t.status === 'COMPLETED';
-                return (
-                  <TouchableOpacity
-                    key={t.id}
-                    style={styles.resTicketCard}
-                    onPress={() => openTechnicianTask(t)}
-                  >
-                    <View style={styles.cardTopRow}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
-                        <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
-                        {t.isAnonymous && (
-                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
-                          </View>
-                        )}
-                        {t.locationVerificationStatus === 'VERIFIED' ? (
-                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                          </View>
-                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
-                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
-                          </View>
-                        ) : null}
-                      </View>
-                      {!isWaitingAccept && (
-                        <View style={[styles.statusPill, { backgroundColor: '#E2E8F0' }]}>
-                          <Text style={[styles.statusPillText, { color: '#475569' }]}>
-                            {translate("Đã đóng")}</Text>
-                        </View>
-                      )}
-                    </View>
-
-                    {isWaitingAccept && (
-                      <View style={styles.waitingResidentBanner}>
-                        <Text style={styles.waitingResidentBannerText}>
-                          {translate("Hoàn thành (Chờ cư dân xác nhận)")}</Text>
-                      </View>
-                    )}
-
-                    <Text style={styles.cardMainTitle}>{t.title}</Text>
-                    <Text style={styles.cardLocationText}>{t.locationNote}</Text>
-
-                    {isWaitingAccept ? (
-                      <View style={styles.sentPhotoBlueBar}>
-                        <Text style={styles.sentPhotoBlueText}>
-                          {translate("Đã gửi ảnh nghiệm thu • Đang chờ xác nhận")}</Text>
-                      </View>
-                    ) : (
-                      <View style={styles.closedResidentGreenBar}>
-                        <Text style={styles.closedResidentGreenText}>
-                          {translate("Cư dân đã nghiệm thu")} • ★ {(t.ratingStars || 5).toFixed(1)}
-                        </Text>
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          )}
-
-          {techScreen === 'PAYROLL' && (
-            <ScrollView
-              style={styles.scrollArea}
-              contentContainerStyle={{ paddingBottom: 28 }}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.subScreenHeader}>
-                <TouchableOpacity onPress={() => setTechScreen('HOME')}>
-                  <Text style={styles.backArrowText}>←</Text>
-                </TouchableOpacity>
-                <Text style={styles.subScreenTitle}>{translate("Chấm công & Lương")}</Text>
-              </View>
-
-              {/* Thẻ Chấm công Check-in / Check-out */}
-              <View style={styles.whiteSectionCard}>
-                <Text style={styles.sectionTitleText}>{translate("Chấm công ca trực")}</Text>
-                <Text style={styles.techDutySub}>
-                  {translate("Thời gian chuẩn máy chủ:")} {new Date().toLocaleDateString('vi-VN')}
-                </Text>
-
-                {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
-                {renderTechGpsWidget()}
-
-                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-                  <TouchableOpacity
-                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A' }]}
-                    onPress={handleTechCheckIn}
-                    disabled={loading}
-                  >
-                    <Text style={styles.primaryActionBtnText}>🟢 Check-in (Vào ca)</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626' }]}
-                    onPress={handleTechCheckOut}
-                    disabled={loading}
-                  >
-                    <Text style={styles.primaryActionBtnText}>🔴 Check-out (Tan ca)</Text>
-                  </TouchableOpacity>
                 </View>
-                <Text style={[styles.cardLocationText, { marginTop: 8, fontSize: 11.5 }]}>
-                  * {translate("Giờ chấm công lấy trực tiếp từ máy chủ server, đảm bảo tính minh bạch.")}
-                </Text>
-              </View>
 
-              {/* 4 Sub-tabs */}
-              <View style={{ flexDirection: 'row', gap: 6, marginVertical: 12 }}>
-                {[
-                  { key: 'ATTENDANCE', label: 'Chấm công' },
-                  { key: 'OVERTIME', label: 'Tăng ca' },
-                  { key: 'SALARY', label: 'Lương của tôi' },
-                  { key: 'SCHEDULE', label: 'Lịch & Nghỉ' },
-                ].map((st) => (
+                <View style={styles.searchBarBox}>
+                  <TextInput
+                    style={styles.searchBarInput}
+                    placeholder={translate("Tìm mã sự cố hoặc địa điểm...")}
+                    placeholderTextColor="#94A3B8"
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                  />
+                </View>
+
+                <View style={styles.chipWrapRow}>
                   <TouchableOpacity
-                    key={st.key}
                     style={[
                       styles.filterPill,
-                      techPayrollSubTab === st.key && styles.filterPillActive,
-                      { flex: 1, alignItems: 'center' }
+                      techHistoryFilter === 'ALL' && styles.filterPillActive,
+                      { marginBottom: 8 },
                     ]}
-                    onPress={() => setTechPayrollSubTab(st.key as any)}
+                    onPress={() => setTechHistoryFilter('ALL')}
                   >
                     <Text
                       style={[
                         styles.filterPillText,
-                        techPayrollSubTab === st.key && styles.filterPillTextActive,
+                        techHistoryFilter === 'ALL' && styles.filterPillTextActive,
                       ]}
                     >
-                      {translate(st.label)}
+                      {translate("Tất cả (")}{tickets.length})
                     </Text>
                   </TouchableOpacity>
-                ))}
-              </View>
+                  <TouchableOpacity
+                    style={[
+                      styles.filterPill,
+                      techHistoryFilter === 'CLOSED' && styles.filterPillActive,
+                      { marginBottom: 8 },
+                    ]}
+                    onPress={() => setTechHistoryFilter('CLOSED')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHistoryFilter === 'CLOSED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Đã đóng (")}{closedCount})
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.filterPill,
+                      techHistoryFilter === 'COMPLETED' && styles.filterPillActive,
+                      { marginBottom: 8 },
+                    ]}
+                    onPress={() => setTechHistoryFilter('COMPLETED')}
+                  >
+                    <Text
+                      style={[
+                        styles.filterPillText,
+                        techHistoryFilter === 'COMPLETED' && styles.filterPillTextActive,
+                      ]}
+                    >
+                      {translate("Chờ cư dân nghiệm thu (")}{waitingResidentCount})
+                    </Text>
+                  </TouchableOpacity>
+                </View>
 
-              <ScreenTransition transitionKey={techPayrollSubTab} style={{ flex: 1 }}>
-              {/* Sub-tab 1: Lịch sử chấm công */}
-              {techPayrollSubTab === 'ATTENDANCE' && (
+                {filteredTechHistory.map((t) => {
+                  const isWaitingAccept = t.status === 'COMPLETED';
+                  return (
+                    <TouchableOpacity
+                      key={t.id}
+                      style={styles.resTicketCard}
+                      onPress={() => openTechnicianTask(t)}
+                    >
+                      <View style={styles.cardTopRow}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                          <Text style={styles.cardCodeText}>{t.ticketCode}</Text>
+                          {t.isAnonymous && (
+                            <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                            </View>
+                          )}
+                          {t.locationVerificationStatus === 'VERIFIED' ? (
+                            <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                            </View>
+                          ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                            <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        {!isWaitingAccept && (
+                          <View style={[styles.statusPill, { backgroundColor: '#E2E8F0' }]}>
+                            <Text style={[styles.statusPillText, { color: '#475569' }]}>
+                              {translate("Đã đóng")}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {isWaitingAccept && (
+                        <View style={styles.waitingResidentBanner}>
+                          <Text style={styles.waitingResidentBannerText}>
+                            {translate("Hoàn thành (Chờ cư dân xác nhận)")}</Text>
+                        </View>
+                      )}
+
+                      <Text style={styles.cardMainTitle}>{t.title}</Text>
+                      <Text style={styles.cardLocationText}>{t.locationNote}</Text>
+
+                      {isWaitingAccept ? (
+                        <View style={styles.sentPhotoBlueBar}>
+                          <Text style={styles.sentPhotoBlueText}>
+                            {translate("Đã gửi ảnh nghiệm thu • Đang chờ xác nhận")}</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.closedResidentGreenBar}>
+                          <Text style={styles.closedResidentGreenText}>
+                            {translate("Cư dân đã nghiệm thu")} • ★ {(t.ratingStars || 5).toFixed(1)}
+                          </Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            {techScreen === 'PAYROLL' && (
+              <ScrollView
+                style={styles.scrollArea}
+                contentContainerStyle={{ paddingBottom: 28 }}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.subScreenHeader}>
+                  <TouchableOpacity onPress={() => setTechScreen('HOME')}>
+                    <Text style={styles.backArrowText}>←</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.subScreenTitle}>{translate("Chấm công & Lương")}</Text>
+                </View>
+
+                {/* Thẻ Chấm công Check-in / Check-out */}
                 <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Nhật ký chấm công gần đây")}</Text>
-                  {myAttendanceLogs.length === 0 ? (
-                    <Text style={styles.techInfoLine}>{translate("Chưa có dữ liệu chấm công.")}</Text>
-                  ) : (
-                    myAttendanceLogs.map((log) => {
-                      const punctuality = log.punctualityStatus || 'ON_TIME';
-                      const verification = log.verificationStatus || 'VERIFIED';
-                      return (
-                        <View key={log.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
+                  <Text style={styles.sectionTitleText}>{translate("Chấm công ca trực")}</Text>
+                  <Text style={styles.techDutySub}>
+                    {translate("Thời gian chuẩn máy chủ:")} {new Date().toLocaleDateString('vi-VN')}
+                  </Text>
+
+                  {/* THÔNG TIN TỌA ĐỘ VỊ TRÍ GPS & BÁN KÍNH CHẤM CÔNG (RESPONSIVE) */}
+                  {renderTechGpsWidget()}
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                    <TouchableOpacity
+                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A' }]}
+                      onPress={handleTechCheckIn}
+                      disabled={loading}
+                    >
+                      <Text style={styles.primaryActionBtnText}>🟢 Check-in (Vào ca)</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626' }]}
+                      onPress={handleTechCheckOut}
+                      disabled={loading}
+                    >
+                      <Text style={styles.primaryActionBtnText}>🔴 Check-out (Tan ca)</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={[styles.cardLocationText, { marginTop: 8, fontSize: 11.5 }]}>
+                    * {translate("Giờ chấm công lấy trực tiếp từ máy chủ server, đảm bảo tính minh bạch.")}
+                  </Text>
+                </View>
+
+                {/* 4 Sub-tabs */}
+                <View style={{ flexDirection: 'row', gap: 6, marginVertical: 12 }}>
+                  {[
+                    { key: 'ATTENDANCE', label: 'Chấm công' },
+                    { key: 'OVERTIME', label: 'Tăng ca' },
+                    { key: 'SALARY', label: 'Lương của tôi' },
+                    { key: 'SCHEDULE', label: 'Lịch & Nghỉ' },
+                  ].map((st) => (
+                    <TouchableOpacity
+                      key={st.key}
+                      style={[
+                        styles.filterPill,
+                        techPayrollSubTab === st.key && styles.filterPillActive,
+                        { flex: 1, alignItems: 'center' }
+                      ]}
+                      onPress={() => setTechPayrollSubTab(st.key as any)}
+                    >
+                      <Text
+                        style={[
+                          styles.filterPillText,
+                          techPayrollSubTab === st.key && styles.filterPillTextActive,
+                        ]}
+                      >
+                        {translate(st.label)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <ScreenTransition transitionKey={techPayrollSubTab} style={{ flex: 1 }}>
+                  {/* Sub-tab 1: Lịch sử chấm công */}
+                  {techPayrollSubTab === 'ATTENDANCE' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>{translate("Nhật ký chấm công gần đây")}</Text>
+                      {myAttendanceLogs.length === 0 ? (
+                        <Text style={styles.techInfoLine}>{translate("Chưa có dữ liệu chấm công.")}</Text>
+                      ) : (
+                        myAttendanceLogs.map((log) => {
+                          const punctuality = log.punctualityStatus || 'ON_TIME';
+                          const verification = log.verificationStatus || 'VERIFIED';
+                          return (
+                            <View key={log.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
+                              <View style={{ flex: 1 }}>
+                                <View style={styles.cardTopRow}>
+                                  <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 14 }}>
+                                    {log.date} {log.shiftScheduled ? `• ${log.shiftScheduled}` : ''}
+                                  </Text>
+                                  <View style={{ flexDirection: 'row', gap: 4 }}>
+                                    <View style={[
+                                      styles.statusPill,
+                                      verification === 'VERIFIED' || verification === 'APPROVED' ? { backgroundColor: '#DCFCE7' } :
+                                        verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } :
+                                          verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } : { backgroundColor: '#FEF3C7' }
+                                    ]}>
+                                      <Text style={[
+                                        styles.statusPillText,
+                                        verification === 'VERIFIED' || verification === 'APPROVED' ? { color: '#15803D' } :
+                                          verification === 'REJECTED' ? { color: '#B91C1C' } :
+                                            verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } : { color: '#B45309' }
+                                      ]}>
+                                        {verification === 'VERIFIED' ? '✓ Hợp lệ' :
+                                          verification === 'APPROVED' ? '✓ Đã duyệt' :
+                                            verification === 'NEEDS_EXPLANATION' ? '💬 Cần giải trình' :
+                                              verification === 'REJECTED' ? '✕ Từ chối' : '⏳ Chờ xem xét'}
+                                      </Text>
+                                    </View>
+                                    {punctuality !== 'ON_TIME' && (
+                                      <View style={[styles.statusPill, { backgroundColor: '#FFEDD5' }]}>
+                                        <Text style={[styles.statusPillText, { color: '#C2410C' }]}>
+                                          {punctuality === 'LATE' ? `Muộn ${log.lateMinutes || 0}p` :
+                                            punctuality === 'EARLY_LEAVE' ? `Về sớm ${log.earlyMinutes || 0}p` : punctuality}
+                                        </Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                </View>
+
+                                <Text style={styles.techNotiBodyText}>
+                                  Vào: {new Date(log.checkIn).toLocaleTimeString('vi-VN')} • Ra: {log.checkOut ? new Date(log.checkOut).toLocaleTimeString('vi-VN') : 'Đang trong ca trực'}
+                                </Text>
+
+                                {log.checkInGps && (
+                                  <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, marginTop: 6, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                    <Text style={{ fontSize: 11.5, color: '#0F172A', fontWeight: '600' }}>
+                                      📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
+                                    </Text>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                                      <Text style={{ fontSize: 11.5, color: '#334155' }}>
+                                        Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                      </Text>
+                                      <View style={[
+                                        styles.statusPill,
+                                        (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                      ]}>
+                                        <Text style={[
+                                          styles.statusPillText,
+                                          (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                        ]}>
+                                          {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
+                                        </Text>
+                                      </View>
+                                      <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                        (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
+                                      </Text>
+                                    </View>
+                                    {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
+                                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 2 }}>
+                                        ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
+                                      </Text>
+                                    )}
+                                  </View>
+                                )}
+
+                                {log.anomalyNotes && (
+                                  <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 6, padding: 6, marginTop: 4 }}>
+                                    <Text style={{ fontSize: 11.5, color: '#B45309', fontWeight: '600' }}>
+                                      ⚠️ Ngoại lệ: {log.anomalyNotes}
+                                    </Text>
+                                  </View>
+                                )}
+
+                                {log.explanationText && (
+                                  <Text style={{ fontSize: 11.5, color: '#2563EB', marginTop: 4, fontStyle: 'italic' }}>
+                                    💬 Đã giải trình: &quot;{log.explanationText}&quot;
+                                  </Text>
+                                )}
+
+                                {log.reviewNote && (
+                                  <Text style={{ fontSize: 11.5, color: '#475569', marginTop: 2, fontWeight: '600' }}>
+                                    📝 Phản hồi BMB: &quot;{log.reviewNote}&quot;
+                                  </Text>
+                                )}
+
+                                {/* Nút gửi giải trình nếu có ngoại lệ hoặc BMB yêu cầu */}
+                                {(verification === 'NEEDS_EXPLANATION' || verification === 'PENDING_REVIEW' || Boolean(log.anomalyNotes)) && (
+                                  <View style={{ marginTop: 8 }}>
+                                    <TouchableOpacity
+                                      style={[styles.primaryActionBtn, { paddingVertical: 5, paddingHorizontal: 12, alignSelf: 'flex-start', backgroundColor: '#6366F1' }]}
+                                      onPress={() => {
+                                        setTechExplanationInput(log.explanationText || '');
+                                        setTechExplanationModal({ visible: true, log });
+                                      }}
+                                    >
+                                      <Text style={[styles.primaryActionBtnText, { fontSize: 11.5 }]}>
+                                        💬 {log.explanationText ? 'Cập nhật giải trình' : 'Gửi giải trình cho BMB'}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                              </View>
+
+                              <View style={{ alignItems: 'flex-end', marginLeft: 8 }}>
+                                <View style={[styles.unreadPillBadge, { backgroundColor: '#F1F5F9' }]}>
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
+                                    {log.billableHours !== undefined && log.billableHours !== null
+                                      ? `${log.billableHours}h tính lương`
+                                      : log.workHours ? `${log.workHours}h` : 'Đang trực'}
+                                  </Text>
+                                </View>
+                                {log.checkInPhotoUrl && (
+                                  <TouchableOpacity
+                                    style={{ marginTop: 6 }}
+                                    onPress={() => setViewingPhotoModal({
+                                      url: log.checkInPhotoUrl,
+                                      title: `Ảnh Check-in (${log.date})`,
+                                      meta: { techName: log.techName, time: log.checkIn, gps: log.checkInGps }
+                                    })}
+                                  >
+                                    <Text style={{ fontSize: 11, color: '#2563EB', fontWeight: '600' }}>📷 Xem ảnh</Text>
+                                  </TouchableOpacity>
+                                )}
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  )}
+
+                  {/* Sub-tab 2: Yêu cầu tăng ca */}
+                  {techPayrollSubTab === 'OVERTIME' && (
+                    <>
+                      <View style={styles.whiteSectionCard}>
+                        <Text style={styles.cardBlockTitle}>{translate("Gửi yêu cầu tăng ca (OT)")}</Text>
+
+                        <Text style={styles.fieldLabel}>{translate("Khung giờ tăng ca thực tế (Từ giờ - Đến giờ) *")}</Text>
+                        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
                           <View style={{ flex: 1 }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 14 }}>
-                                {log.date} {log.shiftScheduled ? `• ${log.shiftScheduled}` : ''}
+                            <Text style={[styles.fieldLabel, { fontSize: 11, marginBottom: 2 }]}>{translate("Bắt đầu (HH:mm)")}</Text>
+                            <TextInput
+                              style={styles.textInputField}
+                              value={otFromTimeInput}
+                              onChangeText={(val) => {
+                                setOtFromTimeInput(val);
+                                const p1 = val.split(':').map(Number);
+                                const p2 = otToTimeInput.split(':').map(Number);
+                                if (p1.length === 2 && p2.length === 2 && !isNaN(p1[0]) && !isNaN(p2[0])) {
+                                  let diff = (p2[0] * 60 + (p2[1] || 0)) - (p1[0] * 60 + (p1[1] || 0));
+                                  if (diff <= 0) diff += 24 * 60;
+                                  setOtHoursInput(String(Math.round((diff / 60) * 100) / 100));
+                                }
+                              }}
+                              placeholder="17:30"
+                              placeholderTextColor="#94A3B8"
+                            />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.fieldLabel, { fontSize: 11, marginBottom: 2 }]}>{translate("Kết thúc (HH:mm)")}</Text>
+                            <TextInput
+                              style={styles.textInputField}
+                              value={otToTimeInput}
+                              onChangeText={(val) => {
+                                setOtToTimeInput(val);
+                                const p1 = otFromTimeInput.split(':').map(Number);
+                                const p2 = val.split(':').map(Number);
+                                if (p1.length === 2 && p2.length === 2 && !isNaN(p1[0]) && !isNaN(p2[0])) {
+                                  let diff = (p2[0] * 60 + (p2[1] || 0)) - (p1[0] * 60 + (p1[1] || 0));
+                                  if (diff <= 0) diff += 24 * 60;
+                                  setOtHoursInput(String(Math.round((diff / 60) * 100) / 100));
+                                }
+                              }}
+                              placeholder="19:30"
+                              placeholderTextColor="#94A3B8"
+                            />
+                          </View>
+                        </View>
+
+                        <Text style={styles.fieldLabel}>{translate("Tổng giờ tăng ca (0.5 - 8h) *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={otHoursInput}
+                          onChangeText={(val) => setOtHoursInput(val.replace(/[^\d.]/g, ''))}
+                          keyboardType="numeric"
+                          placeholder="2"
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Lý do tăng ca *")}</Text>
+                        <TextInput
+                          style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
+                          value={otReasonInput}
+                          onChangeText={setOtReasonInput}
+                          multiline
+                          placeholder={translate("Khắc phục sự cố khẩn cấp sau giờ làm...")}
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Mã sự cố liên quan (Tùy chọn)")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={otTicketIdInput}
+                          onChangeText={setOtTicketIdInput}
+                          placeholder="#RF-2026-..."
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <TouchableOpacity
+                          style={[styles.primaryActionBtn, { marginTop: 12 }]}
+                          onPress={handleTechSubmitOvertime}
+                          disabled={loading}
+                        >
+                          <Text style={styles.primaryActionBtnText}>{translate("Gửi yêu cầu tăng ca")}</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
+                        <Text style={styles.cardBlockTitle}>{translate("Yêu cầu đã gửi")}</Text>
+                        {myOvertimeRequests.length === 0 ? (
+                          <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu tăng ca nào.")}</Text>
+                        ) : (
+                          myOvertimeRequests.map((ot) => (
+                            <View key={ot.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
+                                  {ot.date} • {ot.hours} giờ {ot.ticketId ? `(${ot.ticketId})` : ''}
+                                </Text>
+                                <Text style={styles.techNotiBodyText}>{ot.reason}</Text>
+                                {ot.reviewNote && (
+                                  <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+                                    BMB: {ot.reviewNote}
+                                  </Text>
+                                )}
+                              </View>
+                              <View style={[
+                                styles.statusPill,
+                                ot.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : ot.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                              ]}>
+                                <Text style={[
+                                  styles.statusPillText,
+                                  ot.status === 'APPROVED' ? { color: '#15803D' } : ot.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                ]}>
+                                  {ot.status === 'APPROVED' ? 'Đã duyệt' : ot.status === 'REJECTED' ? 'Từ chối' : 'Chờ duyệt'}
+                                </Text>
+                              </View>
+                            </View>
+                          ))
+                        )}
+                      </View>
+                    </>
+                  )}
+
+                  {/* Sub-tab 3: Lương của tôi */}
+                  {techPayrollSubTab === 'SALARY' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>
+                        {translate("Phiếu lương tháng")} {myPayrollData?.month || new Date().toISOString().slice(0, 7)}
+                      </Text>
+                      <View style={[styles.unreadPillBadge, { alignSelf: 'flex-start', marginVertical: 6, backgroundColor: myPayrollData?.isLocked ? '#DCFCE7' : '#FEF3C7' }]}>
+                        <Text style={{ fontSize: 11.5, fontWeight: '700', color: myPayrollData?.isLocked ? '#15803D' : '#B45309' }}>
+                          {myPayrollData?.isLocked ? '🔒 ' + translate('Đã khóa bảng lương') : '⏳ Đang tổng hợp (Chưa khóa)'}
+                        </Text>
+                      </View>
+
+                      <View style={styles.techDivider} />
+                      <View style={styles.bmbStatRow}>
+                        <Text style={styles.bmbStatLabel}>{translate("Lương cơ bản:")}</Text>
+                        <Text style={styles.bmbStatValue}>
+                          {Number(myPayrollData?.baseSalary || 10000000).toLocaleString('vi-VN')} đ
+                        </Text>
+                      </View>
+                      <View style={styles.bmbStatRow}>
+                        <Text style={styles.bmbStatLabel}>
+                          {translate("Tiền tăng ca:")} ({myPayrollData?.approvedOtHours || 0}h x 1.5)
+                        </Text>
+                        <Text style={[styles.bmbStatValue, { color: '#16A34A' }]}>
+                          +{Number(myPayrollData?.otPay || 0).toLocaleString('vi-VN')} đ
+                        </Text>
+                      </View>
+                      <View style={styles.bmbStatRow}>
+                        <Text style={styles.bmbStatLabel}>{translate("Phụ cấp:")}</Text>
+                        <Text style={styles.bmbStatValue}>
+                          +{Number(myPayrollData?.standardAllowance || 730000).toLocaleString('vi-VN')} đ
+                        </Text>
+                      </View>
+                      <View style={styles.techDivider} />
+                      <View style={styles.bmbStatRow}>
+                        <Text style={[styles.bmbStatLabel, { fontWeight: '700', fontSize: 15, color: '#0F172A' }]}>
+                          {translate("Tổng thực nhận:")}
+                        </Text>
+                        <Text style={[styles.bmbStatValue, { fontWeight: '800', fontSize: 17, color: '#2563EB' }]}>
+                          {Number(myPayrollData?.totalSalary || 10730000).toLocaleString('vi-VN')} đ
+                        </Text>
+                      </View>
+
+                      {/* Đối soát lương */}
+                      <View style={[styles.techDivider, { marginTop: 14 }]} />
+                      <Text style={[styles.fieldLabel, { marginTop: 4 }]}>{translate("Phản hồi / Đối soát lương:")}</Text>
+                      <TextInput
+                        style={styles.textInputField}
+                        value={reconcileNoteInput}
+                        onChangeText={setReconcileNoteInput}
+                        placeholder={translate("Nhập ý kiến đối soát nếu có chênh lệch giờ làm...")}
+                        placeholderTextColor="#94A3B8"
+                      />
+                      <TouchableOpacity
+                        style={[styles.primaryActionBtn, { marginTop: 8, backgroundColor: '#475569' }]}
+                        onPress={handleTechSubmitReconcile}
+                        disabled={loading}
+                      >
+                        <Text style={styles.primaryActionBtnText}>{translate("Gửi phản hồi đối soát")}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Sub-tab 4: Lịch trực & Nghỉ phép */}
+                  {techPayrollSubTab === 'SCHEDULE' && (
+                    <>
+                      <View style={styles.whiteSectionCard}>
+                        <Text style={styles.cardBlockTitle}>{translate("Ca trực & Lịch làm việc")}</Text>
+                        <View style={styles.bmbStatRow}>
+                          <Text style={styles.bmbStatLabel}>{translate("Ca làm việc quy định:")}</Text>
+                          <Text style={[styles.bmbStatValue, { color: '#2563EB', fontWeight: '700' }]}>
+                            {myScheduleData?.schedule?.shiftName || user.shiftName || '08:00 - 17:00'}
+                          </Text>
+                        </View>
+                        <View style={styles.bmbStatRow}>
+                          <Text style={styles.bmbStatLabel}>{translate("Trạng thái hiện tại:")}</Text>
+                          <View style={[styles.statusPill, { backgroundColor: myScheduleData?.schedule?.isCurrentlyInShift ? '#DCFCE7' : '#F1F5F9' }]}>
+                            <Text style={[styles.statusPillText, { color: myScheduleData?.schedule?.isCurrentlyInShift ? '#15803D' : '#64748B' }]}>
+                              {myScheduleData?.schedule?.isCurrentlyInShift ? translate('Đang trong ca trực') : translate('Ngoài ca')}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      {/* Form Xin nghỉ phép */}
+                      <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
+                        <Text style={styles.cardBlockTitle}>{translate("Xin nghỉ phép")}</Text>
+                        <Text style={styles.fieldLabel}>{translate("Ngày nghỉ (YYYY-MM-DD) *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={leaveDateInput}
+                          onChangeText={setLeaveDateInput}
+                          placeholder="2026-11-06"
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Loại nghỉ phép")}</Text>
+                        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                          {[
+                            { key: 'ANNUAL', label: 'Phép năm' },
+                            { key: 'SICK', label: 'Nghỉ ốm' },
+                            { key: 'UNPAID', label: 'Không lương' },
+                          ].map((lt) => (
+                            <TouchableOpacity
+                              key={lt.key}
+                              style={[
+                                styles.filterPill,
+                                leaveTypeInput === lt.key && styles.filterPillActive,
+                                { flex: 1, alignItems: 'center' },
+                              ]}
+                              onPress={() => setLeaveTypeInput(lt.key as any)}
+                            >
+                              <Text
+                                style={[
+                                  styles.filterPillText,
+                                  leaveTypeInput === lt.key && styles.filterPillTextActive,
+                                ]}
+                              >
+                                {translate(lt.label)}
                               </Text>
-                              <View style={{ flexDirection: 'row', gap: 4 }}>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+
+                        <Text style={styles.fieldLabel}>{translate("Lý do xin nghỉ *")}</Text>
+                        <TextInput
+                          style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
+                          value={leaveReasonInput}
+                          onChangeText={setLeaveReasonInput}
+                          multiline
+                          placeholder={translate("Ghi rõ lý do xin nghỉ phép...")}
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <TouchableOpacity
+                          style={[styles.primaryActionBtn, { marginTop: 8 }]}
+                          onPress={handleTechSubmitLeave}
+                          disabled={loading}
+                        >
+                          <Text style={styles.primaryActionBtnText}>{translate("Gửi đơn xin nghỉ phép")}</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Form Đổi ca trực */}
+                      <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
+                        <Text style={styles.cardBlockTitle}>{translate("Đổi ca trực")}</Text>
+                        <Text style={styles.fieldLabel}>{translate("Ngày đổi ca (YYYY-MM-DD) *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={swapDateInput}
+                          onChangeText={setSwapDateInput}
+                          placeholder="2026-11-06"
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Ca trực đề xuất *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={swapShiftInput}
+                          onChangeText={setSwapShiftInput}
+                          placeholder="08:00 - 17:00"
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Chọn Kỹ thuật viên đổi ca *")}</Text>
+                        <TextInput
+                          style={styles.textInputField}
+                          value={swapTargetTechId}
+                          onChangeText={setSwapTargetTechId}
+                          placeholder={translate("Nhập ID hoặc tên KTV đối ứng")}
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <Text style={styles.fieldLabel}>{translate("Lý do đổi ca *")}</Text>
+                        <TextInput
+                          style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
+                          value={swapReasonInput}
+                          onChangeText={setSwapReasonInput}
+                          multiline
+                          placeholder={translate("Lý do đổi ca với đồng nghiệp...")}
+                          placeholderTextColor="#94A3B8"
+                        />
+
+                        <TouchableOpacity
+                          style={[styles.primaryActionBtn, { marginTop: 8, backgroundColor: '#0284C7' }]}
+                          onPress={handleTechSubmitSwap}
+                          disabled={loading}
+                        >
+                          <Text style={styles.primaryActionBtnText}>{translate("Gửi đề xuất đổi ca")}</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Danh sách yêu cầu đã gửi */}
+                      <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
+                        <Text style={styles.cardBlockTitle}>{translate("Yêu cầu đã gửi")}</Text>
+                        {myScheduleRequests.length === 0 ? (
+                          <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu nào.")}</Text>
+                        ) : (
+                          myScheduleRequests.map((req) => (
+                            <View key={req.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
+                              <View style={{ flex: 1 }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
+                                    {req.type === 'LEAVE' ? `🏖️ ${translate('Xin nghỉ phép')}` : `🔄 ${translate('Đổi ca')}`} • {req.date}
+                                  </Text>
+                                </View>
+                                <Text style={styles.techNotiBodyText}>{req.reason}</Text>
+                                {req.reviewNote && (
+                                  <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+                                    BMB: {req.reviewNote}
+                                  </Text>
+                                )}
+                              </View>
+                              <View style={{ alignItems: 'flex-end', gap: 6 }}>
                                 <View style={[
                                   styles.statusPill,
-                                  verification === 'VERIFIED' || verification === 'APPROVED' ? { backgroundColor: '#DCFCE7' } :
-                                  verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } :
-                                  verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } : { backgroundColor: '#FEF3C7' }
+                                  req.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : req.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
                                 ]}>
                                   <Text style={[
                                     styles.statusPillText,
-                                    verification === 'VERIFIED' || verification === 'APPROVED' ? { color: '#15803D' } :
-                                    verification === 'REJECTED' ? { color: '#B91C1C' } :
-                                    verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } : { color: '#B45309' }
+                                    req.status === 'APPROVED' ? { color: '#15803D' } : req.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
                                   ]}>
-                                    {verification === 'VERIFIED' ? '✓ Hợp lệ' :
-                                     verification === 'APPROVED' ? '✓ Đã duyệt' :
-                                     verification === 'NEEDS_EXPLANATION' ? '💬 Cần giải trình' :
-                                     verification === 'REJECTED' ? '✕ Từ chối' : '⏳ Chờ xem xét'}
+                                    {req.status === 'APPROVED' ? translate('Đã duyệt') : req.status === 'REJECTED' ? translate('Từ chối') : req.status === 'CANCELLED' ? translate('Đã hủy') : translate('Chờ duyệt')}
                                   </Text>
                                 </View>
-                                {punctuality !== 'ON_TIME' && (
-                                  <View style={[styles.statusPill, { backgroundColor: '#FFEDD5' }]}>
-                                    <Text style={[styles.statusPillText, { color: '#C2410C' }]}>
-                                      {punctuality === 'LATE' ? `Muộn ${log.lateMinutes || 0}p` :
-                                       punctuality === 'EARLY_LEAVE' ? `Về sớm ${log.earlyMinutes || 0}p` : punctuality}
-                                    </Text>
-                                  </View>
+                                {req.status === 'PENDING' && (
+                                  <TouchableOpacity
+                                    style={{ paddingHorizontal: 8, paddingVertical: 4, backgroundColor: '#F1F5F9', borderRadius: 6 }}
+                                    onPress={() => handleTechCancelSchedule(req.id)}
+                                  >
+                                    <Text style={{ fontSize: 11, color: '#DC2626', fontWeight: '600' }}>{translate('Hủy')}</Text>
+                                  </TouchableOpacity>
                                 )}
                               </View>
                             </View>
-
-                            <Text style={styles.techNotiBodyText}>
-                              Vào: {new Date(log.checkIn).toLocaleTimeString('vi-VN')} • Ra: {log.checkOut ? new Date(log.checkOut).toLocaleTimeString('vi-VN') : 'Đang trong ca trực'}
-                            </Text>
-
-                            {log.checkInGps && (
-                              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, marginTop: 6, borderWidth: 1, borderColor: '#E2E8F0' }}>
-                                <Text style={{ fontSize: 11.5, color: '#0F172A', fontWeight: '600' }}>
-                                  📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
-                                </Text>
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
-                                  <Text style={{ fontSize: 11.5, color: '#334155' }}>
-                                    Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
-                                  </Text>
-                                  <View style={[
-                                    styles.statusPill,
-                                    (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
-                                  ]}>
-                                    <Text style={[
-                                      styles.statusPillText,
-                                      (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
-                                    ]}>
-                                      {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
-                                    </Text>
-                                  </View>
-                                  <Text style={{ fontSize: 11, color: '#64748B' }}>
-                                    (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
-                                  </Text>
-                                </View>
-                                {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
-                                  <Text style={{ fontSize: 11, color: '#D97706', marginTop: 2 }}>
-                                    ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
-                                  </Text>
-                                )}
-                              </View>
-                            )}
-
-                            {log.anomalyNotes && (
-                              <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 6, padding: 6, marginTop: 4 }}>
-                                <Text style={{ fontSize: 11.5, color: '#B45309', fontWeight: '600' }}>
-                                  ⚠️ Ngoại lệ: {log.anomalyNotes}
-                                </Text>
-                              </View>
-                            )}
-
-                            {log.explanationText && (
-                              <Text style={{ fontSize: 11.5, color: '#2563EB', marginTop: 4, fontStyle: 'italic' }}>
-                                💬 Đã giải trình: &quot;{log.explanationText}&quot;
-                              </Text>
-                            )}
-
-                            {log.reviewNote && (
-                              <Text style={{ fontSize: 11.5, color: '#475569', marginTop: 2, fontWeight: '600' }}>
-                                📝 Phản hồi BMB: &quot;{log.reviewNote}&quot;
-                              </Text>
-                            )}
-
-                            {/* Nút gửi giải trình nếu có ngoại lệ hoặc BMB yêu cầu */}
-                            {(verification === 'NEEDS_EXPLANATION' || verification === 'PENDING_REVIEW' || Boolean(log.anomalyNotes)) && (
-                              <View style={{ marginTop: 8 }}>
-                                <TouchableOpacity
-                                  style={[styles.primaryActionBtn, { paddingVertical: 5, paddingHorizontal: 12, alignSelf: 'flex-start', backgroundColor: '#6366F1' }]}
-                                  onPress={() => {
-                                    setTechExplanationInput(log.explanationText || '');
-                                    setTechExplanationModal({ visible: true, log });
-                                  }}
-                                >
-                                  <Text style={[styles.primaryActionBtnText, { fontSize: 11.5 }]}>
-                                    💬 {log.explanationText ? 'Cập nhật giải trình' : 'Gửi giải trình cho BMB'}
-                                  </Text>
-                                </TouchableOpacity>
-                              </View>
-                            )}
-                          </View>
-
-                          <View style={{ alignItems: 'flex-end', marginLeft: 8 }}>
-                            <View style={[styles.unreadPillBadge, { backgroundColor: '#F1F5F9' }]}>
-                              <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
-                                {log.billableHours !== undefined && log.billableHours !== null
-                                  ? `${log.billableHours}h tính lương`
-                                  : log.workHours ? `${log.workHours}h` : 'Đang trực'}
-                              </Text>
-                            </View>
-                            {log.checkInPhotoUrl && (
-                              <TouchableOpacity
-                                style={{ marginTop: 6 }}
-                                onPress={() => setViewingPhotoModal({
-                                  url: log.checkInPhotoUrl,
-                                  title: `Ảnh Check-in (${log.date})`,
-                                  meta: { techName: log.techName, time: log.checkIn, gps: log.checkInGps }
-                                })}
-                              >
-                                <Text style={{ fontSize: 11, color: '#2563EB', fontWeight: '600' }}>📷 Xem ảnh</Text>
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        </View>
-                      );
-                    })
+                          ))
+                        )}
+                      </View>
+                    </>
                   )}
-                </View>
-              )}
-
-              {/* Sub-tab 2: Yêu cầu tăng ca */}
-              {techPayrollSubTab === 'OVERTIME' && (
-                <>
-                  <View style={styles.whiteSectionCard}>
-                    <Text style={styles.cardBlockTitle}>{translate("Gửi yêu cầu tăng ca (OT)")}</Text>
-
-                    <Text style={styles.fieldLabel}>{translate("Khung giờ tăng ca thực tế (Từ giờ - Đến giờ) *")}</Text>
-                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.fieldLabel, { fontSize: 11, marginBottom: 2 }]}>{translate("Bắt đầu (HH:mm)")}</Text>
-                        <TextInput
-                          style={styles.textInputField}
-                          value={otFromTimeInput}
-                          onChangeText={(val) => {
-                            setOtFromTimeInput(val);
-                            const p1 = val.split(':').map(Number);
-                            const p2 = otToTimeInput.split(':').map(Number);
-                            if (p1.length === 2 && p2.length === 2 && !isNaN(p1[0]) && !isNaN(p2[0])) {
-                              let diff = (p2[0] * 60 + (p2[1] || 0)) - (p1[0] * 60 + (p1[1] || 0));
-                              if (diff <= 0) diff += 24 * 60;
-                              setOtHoursInput(String(Math.round((diff / 60) * 100) / 100));
-                            }
-                          }}
-                          placeholder="17:30"
-                          placeholderTextColor="#94A3B8"
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.fieldLabel, { fontSize: 11, marginBottom: 2 }]}>{translate("Kết thúc (HH:mm)")}</Text>
-                        <TextInput
-                          style={styles.textInputField}
-                          value={otToTimeInput}
-                          onChangeText={(val) => {
-                            setOtToTimeInput(val);
-                            const p1 = otFromTimeInput.split(':').map(Number);
-                            const p2 = val.split(':').map(Number);
-                            if (p1.length === 2 && p2.length === 2 && !isNaN(p1[0]) && !isNaN(p2[0])) {
-                              let diff = (p2[0] * 60 + (p2[1] || 0)) - (p1[0] * 60 + (p1[1] || 0));
-                              if (diff <= 0) diff += 24 * 60;
-                              setOtHoursInput(String(Math.round((diff / 60) * 100) / 100));
-                            }
-                          }}
-                          placeholder="19:30"
-                          placeholderTextColor="#94A3B8"
-                        />
-                      </View>
-                    </View>
-
-                    <Text style={styles.fieldLabel}>{translate("Tổng giờ tăng ca (0.5 - 8h) *")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={otHoursInput}
-                      onChangeText={(val) => setOtHoursInput(val.replace(/[^\d.]/g, ''))}
-                      keyboardType="numeric"
-                      placeholder="2"
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Lý do tăng ca *")}</Text>
-                    <TextInput
-                      style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
-                      value={otReasonInput}
-                      onChangeText={setOtReasonInput}
-                      multiline
-                      placeholder={translate("Khắc phục sự cố khẩn cấp sau giờ làm...")}
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Mã sự cố liên quan (Tùy chọn)")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={otTicketIdInput}
-                      onChangeText={setOtTicketIdInput}
-                      placeholder="#RF-2026-..."
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { marginTop: 12 }]}
-                      onPress={handleTechSubmitOvertime}
-                      disabled={loading}
-                    >
-                      <Text style={styles.primaryActionBtnText}>{translate("Gửi yêu cầu tăng ca")}</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
-                    <Text style={styles.cardBlockTitle}>{translate("Yêu cầu đã gửi")}</Text>
-                    {myOvertimeRequests.length === 0 ? (
-                      <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu tăng ca nào.")}</Text>
-                    ) : (
-                      myOvertimeRequests.map((ot) => (
-                        <View key={ot.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
-                              {ot.date} • {ot.hours} giờ {ot.ticketId ? `(${ot.ticketId})` : ''}
-                            </Text>
-                            <Text style={styles.techNotiBodyText}>{ot.reason}</Text>
-                            {ot.reviewNote && (
-                              <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
-                                BMB: {ot.reviewNote}
-                              </Text>
-                            )}
-                          </View>
-                          <View style={[
-                            styles.statusPill,
-                            ot.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : ot.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                          ]}>
-                            <Text style={[
-                              styles.statusPillText,
-                              ot.status === 'APPROVED' ? { color: '#15803D' } : ot.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                            ]}>
-                              {ot.status === 'APPROVED' ? 'Đã duyệt' : ot.status === 'REJECTED' ? 'Từ chối' : 'Chờ duyệt'}
-                            </Text>
-                          </View>
-                        </View>
-                      ))
-                    )}
-                  </View>
-                </>
-              )}
-
-              {/* Sub-tab 3: Lương của tôi */}
-              {techPayrollSubTab === 'SALARY' && (
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>
-                    {translate("Phiếu lương tháng")} {myPayrollData?.month || new Date().toISOString().slice(0, 7)}
-                  </Text>
-                  <View style={[styles.unreadPillBadge, { alignSelf: 'flex-start', marginVertical: 6, backgroundColor: myPayrollData?.isLocked ? '#DCFCE7' : '#FEF3C7' }]}>
-                    <Text style={{ fontSize: 11.5, fontWeight: '700', color: myPayrollData?.isLocked ? '#15803D' : '#B45309' }}>
-                      {myPayrollData?.isLocked ? '🔒 ' + translate('Đã khóa bảng lương') : '⏳ Đang tổng hợp (Chưa khóa)'}
-                    </Text>
-                  </View>
-
-                  <View style={styles.techDivider} />
-                  <View style={styles.bmbStatRow}>
-                    <Text style={styles.bmbStatLabel}>{translate("Lương cơ bản:")}</Text>
-                    <Text style={styles.bmbStatValue}>
-                      {Number(myPayrollData?.baseSalary || 10000000).toLocaleString('vi-VN')} đ
-                    </Text>
-                  </View>
-                  <View style={styles.bmbStatRow}>
-                    <Text style={styles.bmbStatLabel}>
-                      {translate("Tiền tăng ca:")} ({myPayrollData?.approvedOtHours || 0}h x 1.5)
-                    </Text>
-                    <Text style={[styles.bmbStatValue, { color: '#16A34A' }]}>
-                      +{Number(myPayrollData?.otPay || 0).toLocaleString('vi-VN')} đ
-                    </Text>
-                  </View>
-                  <View style={styles.bmbStatRow}>
-                    <Text style={styles.bmbStatLabel}>{translate("Phụ cấp:")}</Text>
-                    <Text style={styles.bmbStatValue}>
-                      +{Number(myPayrollData?.standardAllowance || 730000).toLocaleString('vi-VN')} đ
-                    </Text>
-                  </View>
-                  <View style={styles.techDivider} />
-                  <View style={styles.bmbStatRow}>
-                    <Text style={[styles.bmbStatLabel, { fontWeight: '700', fontSize: 15, color: '#0F172A' }]}>
-                      {translate("Tổng thực nhận:")}
-                    </Text>
-                    <Text style={[styles.bmbStatValue, { fontWeight: '800', fontSize: 17, color: '#2563EB' }]}>
-                      {Number(myPayrollData?.totalSalary || 10730000).toLocaleString('vi-VN')} đ
-                    </Text>
-                  </View>
-
-                  {/* Đối soát lương */}
-                  <View style={[styles.techDivider, { marginTop: 14 }]} />
-                  <Text style={[styles.fieldLabel, { marginTop: 4 }]}>{translate("Phản hồi / Đối soát lương:")}</Text>
-                  <TextInput
-                    style={styles.textInputField}
-                    value={reconcileNoteInput}
-                    onChangeText={setReconcileNoteInput}
-                    placeholder={translate("Nhập ý kiến đối soát nếu có chênh lệch giờ làm...")}
-                    placeholderTextColor="#94A3B8"
-                  />
-                  <TouchableOpacity
-                    style={[styles.primaryActionBtn, { marginTop: 8, backgroundColor: '#475569' }]}
-                    onPress={handleTechSubmitReconcile}
-                    disabled={loading}
-                  >
-                    <Text style={styles.primaryActionBtnText}>{translate("Gửi phản hồi đối soát")}</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* Sub-tab 4: Lịch trực & Nghỉ phép */}
-              {techPayrollSubTab === 'SCHEDULE' && (
-                <>
-                  <View style={styles.whiteSectionCard}>
-                    <Text style={styles.cardBlockTitle}>{translate("Ca trực & Lịch làm việc")}</Text>
-                    <View style={styles.bmbStatRow}>
-                      <Text style={styles.bmbStatLabel}>{translate("Ca làm việc quy định:")}</Text>
-                      <Text style={[styles.bmbStatValue, { color: '#2563EB', fontWeight: '700' }]}>
-                        {myScheduleData?.schedule?.shiftName || user.shiftName || '08:00 - 17:00'}
-                      </Text>
-                    </View>
-                    <View style={styles.bmbStatRow}>
-                      <Text style={styles.bmbStatLabel}>{translate("Trạng thái hiện tại:")}</Text>
-                      <View style={[styles.statusPill, { backgroundColor: myScheduleData?.schedule?.isCurrentlyInShift ? '#DCFCE7' : '#F1F5F9' }]}>
-                        <Text style={[styles.statusPillText, { color: myScheduleData?.schedule?.isCurrentlyInShift ? '#15803D' : '#64748B' }]}>
-                          {myScheduleData?.schedule?.isCurrentlyInShift ? translate('Đang trong ca trực') : translate('Ngoài ca')}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Form Xin nghỉ phép */}
-                  <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
-                    <Text style={styles.cardBlockTitle}>{translate("Xin nghỉ phép")}</Text>
-                    <Text style={styles.fieldLabel}>{translate("Ngày nghỉ (YYYY-MM-DD) *")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={leaveDateInput}
-                      onChangeText={setLeaveDateInput}
-                      placeholder="2026-11-06"
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Loại nghỉ phép")}</Text>
-                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-                      {[
-                        { key: 'ANNUAL', label: 'Phép năm' },
-                        { key: 'SICK', label: 'Nghỉ ốm' },
-                        { key: 'UNPAID', label: 'Không lương' },
-                      ].map((lt) => (
-                        <TouchableOpacity
-                          key={lt.key}
-                          style={[
-                            styles.filterPill,
-                            leaveTypeInput === lt.key && styles.filterPillActive,
-                            { flex: 1, alignItems: 'center' },
-                          ]}
-                          onPress={() => setLeaveTypeInput(lt.key as any)}
-                        >
-                          <Text
-                            style={[
-                              styles.filterPillText,
-                              leaveTypeInput === lt.key && styles.filterPillTextActive,
-                            ]}
-                          >
-                            {translate(lt.label)}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-
-                    <Text style={styles.fieldLabel}>{translate("Lý do xin nghỉ *")}</Text>
-                    <TextInput
-                      style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
-                      value={leaveReasonInput}
-                      onChangeText={setLeaveReasonInput}
-                      multiline
-                      placeholder={translate("Ghi rõ lý do xin nghỉ phép...")}
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { marginTop: 8 }]}
-                      onPress={handleTechSubmitLeave}
-                      disabled={loading}
-                    >
-                      <Text style={styles.primaryActionBtnText}>{translate("Gửi đơn xin nghỉ phép")}</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Form Đổi ca trực */}
-                  <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
-                    <Text style={styles.cardBlockTitle}>{translate("Đổi ca trực")}</Text>
-                    <Text style={styles.fieldLabel}>{translate("Ngày đổi ca (YYYY-MM-DD) *")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={swapDateInput}
-                      onChangeText={setSwapDateInput}
-                      placeholder="2026-11-06"
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Ca trực đề xuất *")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={swapShiftInput}
-                      onChangeText={setSwapShiftInput}
-                      placeholder="08:00 - 17:00"
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Chọn Kỹ thuật viên đổi ca *")}</Text>
-                    <TextInput
-                      style={styles.textInputField}
-                      value={swapTargetTechId}
-                      onChangeText={setSwapTargetTechId}
-                      placeholder={translate("Nhập ID hoặc tên KTV đối ứng")}
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <Text style={styles.fieldLabel}>{translate("Lý do đổi ca *")}</Text>
-                    <TextInput
-                      style={[styles.textInputField, { height: 60, textAlignVertical: 'top' }]}
-                      value={swapReasonInput}
-                      onChangeText={setSwapReasonInput}
-                      multiline
-                      placeholder={translate("Lý do đổi ca với đồng nghiệp...")}
-                      placeholderTextColor="#94A3B8"
-                    />
-
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { marginTop: 8, backgroundColor: '#0284C7' }]}
-                      onPress={handleTechSubmitSwap}
-                      disabled={loading}
-                    >
-                      <Text style={styles.primaryActionBtnText}>{translate("Gửi đề xuất đổi ca")}</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Danh sách yêu cầu đã gửi */}
-                  <View style={[styles.whiteSectionCard, { marginTop: 12 }]}>
-                    <Text style={styles.cardBlockTitle}>{translate("Yêu cầu đã gửi")}</Text>
-                    {myScheduleRequests.length === 0 ? (
-                      <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu nào.")}</Text>
-                    ) : (
-                      myScheduleRequests.map((req) => (
-                        <View key={req.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
-                          <View style={{ flex: 1 }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                              <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
-                                {req.type === 'LEAVE' ? `🏖️ ${translate('Xin nghỉ phép')}` : `🔄 ${translate('Đổi ca')}`} • {req.date}
-                              </Text>
-                            </View>
-                            <Text style={styles.techNotiBodyText}>{req.reason}</Text>
-                            {req.reviewNote && (
-                              <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
-                                BMB: {req.reviewNote}
-                              </Text>
-                            )}
-                          </View>
-                          <View style={{ alignItems: 'flex-end', gap: 6 }}>
-                            <View style={[
-                              styles.statusPill,
-                              req.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : req.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                            ]}>
-                              <Text style={[
-                                styles.statusPillText,
-                                req.status === 'APPROVED' ? { color: '#15803D' } : req.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                              ]}>
-                                {req.status === 'APPROVED' ? translate('Đã duyệt') : req.status === 'REJECTED' ? translate('Từ chối') : req.status === 'CANCELLED' ? translate('Đã hủy') : translate('Chờ duyệt')}
-                              </Text>
-                            </View>
-                            {req.status === 'PENDING' && (
-                              <TouchableOpacity
-                                style={{ paddingHorizontal: 8, paddingVertical: 4, backgroundColor: '#F1F5F9', borderRadius: 6 }}
-                                onPress={() => handleTechCancelSchedule(req.id)}
-                              >
-                                <Text style={{ fontSize: 11, color: '#DC2626', fontWeight: '600' }}>{translate('Hủy')}</Text>
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        </View>
-                      ))
-                    )}
-                  </View>
-                </>
-              )}
-              </ScreenTransition>
-            </ScrollView>
-          )}
+                </ScreenTransition>
+              </ScrollView>
+            )}
           </ScreenTransition>
 
           {(techScreen === 'HOME' ||
@@ -8379,6 +9042,7 @@ function AppContent() {
         {renderTechCheckInModal()}
         {renderTechExplanationModal()}
         {renderPhotoViewerModal()}
+        {renderBmbIncidentPhotoModal()}
       </SafeAreaView>
     );
   }
@@ -8527,3026 +9191,3163 @@ function AppContent() {
           </View>
         ) : (
           <View style={styles.bmbSidebar}>
-          <ScrollView
-            style={styles.bmbSidebarNavigation}
-            contentContainerStyle={{ paddingBottom: 8 }}
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.bmbSidebarBrandRow}>
-              <View style={{ marginRight: 9 }}><ResiFixLogoMark size={26} /></View>
-              <Text style={styles.bmbSidebarLogoText}>ResiFix BMB</Text>
-              <View style={{ flex: 1 }} />
-              <RealTimeClock />
-            </View>
-            <Text style={styles.bmbSidebarSubText}>{translate("Hệ thống Quản lý Tòa nhà")}</Text>
-
-            <Text style={styles.bmbWorkspaceHeading}>{translate("KHÔNG GIAN QUẢN LÝ")}</Text>
-
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'TICKETS' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => setBmbNavTab('TICKETS')}
+            <ScrollView
+              style={styles.bmbSidebarNavigation}
+              contentContainerStyle={{ paddingBottom: 8 }}
+              showsVerticalScrollIndicator={false}
             >
-              <View style={styles.bmbMenuBtnInner}>
-                <Text style={[styles.bmbMenuIcon, bmbNavTab === 'TICKETS' && styles.bmbMenuIconActive]}>📋</Text>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'TICKETS' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Quản lý sự cố")}
-                </Text>
+              <View style={styles.bmbSidebarBrandRow}>
+                <View style={{ marginRight: 9 }}><ResiFixLogoMark size={26} /></View>
+                <Text style={styles.bmbSidebarLogoText}>ResiFix BMB</Text>
+                <View style={{ flex: 1 }} />
+                <RealTimeClock />
               </View>
-            </TouchableOpacity>
+              <Text style={styles.bmbSidebarSubText}>{translate("Hệ thống Quản lý Tòa nhà")}</Text>
 
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'TECHNICIANS' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => setBmbNavTab('TECHNICIANS')}
-            >
-              <View style={styles.bmbMenuBtnInner}>
-                <Text style={[styles.bmbMenuIcon, bmbNavTab === 'TECHNICIANS' && styles.bmbMenuIconActive]}>👷</Text>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'TECHNICIANS' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Kỹ thuật viên ca trực")}
-                </Text>
-              </View>
-            </TouchableOpacity>
+              <Text style={styles.bmbWorkspaceHeading}>{translate("KHÔNG GIAN QUẢN LÝ")}</Text>
 
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'NOTIFICATIONS' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => setBmbNavTab('NOTIFICATIONS')}
-            >
-              <View style={styles.rowBetween}>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'NOTIFICATIONS' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Thông báo hệ thống")}</Text>
-                {unreadCount > 0 && (
-                  <View style={styles.bmbSidebarNewRedTag}>
-                    <Text style={styles.bmbSidebarNewRedText}>
-                      {unreadCount}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'APARTMENTS' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => setBmbNavTab('APARTMENTS')}
-            >
-              <View style={styles.bmbMenuBtnInner}>
-                <Text style={[styles.bmbMenuIcon, bmbNavTab === 'APARTMENTS' && styles.bmbMenuIconActive]}>🏢</Text>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'APARTMENTS' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Căn hộ & Cư dân")}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'ATTENDANCE' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => {
-                setBmbNavTab('ATTENDANCE');
-                void fetchBmbAttendance();
-              }}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'ATTENDANCE' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Quản lý chấm công")}
-                </Text>
-                {bmbAttendanceStats.pendingReviewCount > 0 && (
-                  <View style={{ backgroundColor: '#EF4444', borderRadius: 10, paddingHorizontal: 6, paddingVertical: 1 }}>
-                    <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '700' }}>
-                      {bmbAttendanceStats.pendingReviewCount}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.bmbMenuBtn,
-                bmbNavTab === 'PAYROLL' && styles.bmbMenuBtnActive,
-              ]}
-              onPress={() => setBmbNavTab('PAYROLL')}
-            >
-              <View style={styles.bmbMenuBtnInner}>
-                <Text style={[styles.bmbMenuIcon, bmbNavTab === 'PAYROLL' && styles.bmbMenuIconActive]}>💰</Text>
-                <Text
-                  style={[
-                    styles.bmbMenuBtnText,
-                    bmbNavTab === 'PAYROLL' && styles.bmbMenuBtnTextActive,
-                  ]}
-                >
-                  {translate("Tính lương & Vận hành")}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          </ScrollView>
-
-          {/* Footer Sidebar: Tòa nhà đang quản lý + BMB: Cầm Dương Mỹ Hạnh + Đăng xuất */}
-          <View>
-            <View style={styles.bmbBuildingStatusBox}>
-              <Text style={styles.bmbBuildingSmallLabel}>{translate("TÒA NHÀ ĐANG QUẢN LÝ")}</Text>
-              <Text style={styles.bmbBuildingName}>ResiFix Residence</Text>
-              <Text style={styles.bmbBuildingOnline}>{translate("Hệ thống hoạt động")}</Text>
-            </View>
-
-            <View style={styles.bmbAdminFooter}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, overflow: 'hidden' }}>
-                <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center' }}>
-                  <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12 }}>
-                    {(user.fullName || 'BMB').split(' ').map((n: string) => n[0]).slice(-2).join('')}
-                  </Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.bmbAdminNameText} numberOfLines={1}>
-                    {user.fullName || translate('Chưa cập nhật hồ sơ')}
-                  </Text>
-                  <Text style={{ fontSize: 10.5, color: '#64748B' }}>
-                    {translate("Ban Quản trị BMB")}
-                  </Text>
-                </View>
-              </View>
               <TouchableOpacity
-                onPress={() => {
-                  handleLogout();
-                }}
-                style={{ paddingVertical: 4, paddingHorizontal: 6 }}
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'TICKETS' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => setBmbNavTab('TICKETS')}
               >
-                <Text style={styles.bmbSidebarLogoutText}>{translate("Đăng xuất")}</Text>
+                <View style={styles.bmbMenuBtnInner}>
+                  <Text style={[styles.bmbMenuIcon, bmbNavTab === 'TICKETS' && styles.bmbMenuIconActive]}>📋</Text>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'TICKETS' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Quản lý sự cố")}
+                  </Text>
+                </View>
               </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'TECHNICIANS' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => setBmbNavTab('TECHNICIANS')}
+              >
+                <View style={styles.bmbMenuBtnInner}>
+                  <Text style={[styles.bmbMenuIcon, bmbNavTab === 'TECHNICIANS' && styles.bmbMenuIconActive]}>👷</Text>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'TECHNICIANS' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Kỹ thuật viên ca trực")}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'NOTIFICATIONS' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => setBmbNavTab('NOTIFICATIONS')}
+              >
+                <View style={styles.rowBetween}>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'NOTIFICATIONS' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Thông báo hệ thống")}</Text>
+                  {unreadCount > 0 && (
+                    <View style={styles.bmbSidebarNewRedTag}>
+                      <Text style={styles.bmbSidebarNewRedText}>
+                        {unreadCount}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'APARTMENTS' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => setBmbNavTab('APARTMENTS')}
+              >
+                <View style={styles.bmbMenuBtnInner}>
+                  <Text style={[styles.bmbMenuIcon, bmbNavTab === 'APARTMENTS' && styles.bmbMenuIconActive]}>🏢</Text>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'APARTMENTS' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Căn hộ & Cư dân")}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'ATTENDANCE' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => {
+                  setBmbNavTab('ATTENDANCE');
+                  void fetchBmbAttendance();
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'ATTENDANCE' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Quản lý chấm công")}
+                  </Text>
+                  {bmbAttendanceStats.pendingReviewCount > 0 && (
+                    <View style={{ backgroundColor: '#EF4444', borderRadius: 10, paddingHorizontal: 6, paddingVertical: 1 }}>
+                      <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '700' }}>
+                        {bmbAttendanceStats.pendingReviewCount}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.bmbMenuBtn,
+                  bmbNavTab === 'PAYROLL' && styles.bmbMenuBtnActive,
+                ]}
+                onPress={() => setBmbNavTab('PAYROLL')}
+              >
+                <View style={styles.bmbMenuBtnInner}>
+                  <Text style={[styles.bmbMenuIcon, bmbNavTab === 'PAYROLL' && styles.bmbMenuIconActive]}>💰</Text>
+                  <Text
+                    style={[
+                      styles.bmbMenuBtnText,
+                      bmbNavTab === 'PAYROLL' && styles.bmbMenuBtnTextActive,
+                    ]}
+                  >
+                    {translate("Tính lương & Vận hành")}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </ScrollView>
+
+            {/* Footer Sidebar: Tòa nhà đang quản lý + BMB: Cầm Dương Mỹ Hạnh + Đăng xuất */}
+            <View>
+              <View style={styles.bmbBuildingStatusBox}>
+                <Text style={styles.bmbBuildingSmallLabel}>{translate("TÒA NHÀ ĐANG QUẢN LÝ")}</Text>
+                <Text style={styles.bmbBuildingName}>ResiFix Residence</Text>
+                <Text style={styles.bmbBuildingOnline}>{translate("Hệ thống hoạt động")}</Text>
+              </View>
+
+              <View style={styles.bmbAdminFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, overflow: 'hidden' }}>
+                  <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12 }}>
+                      {(user.fullName || 'BMB').split(' ').map((n: string) => n[0]).slice(-2).join('')}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.bmbAdminNameText} numberOfLines={1}>
+                      {user.fullName || translate('Chưa cập nhật hồ sơ')}
+                    </Text>
+                    <Text style={{ fontSize: 10.5, color: '#64748B' }}>
+                      {translate("Ban Quản trị BMB")}
+                    </Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    handleLogout();
+                  }}
+                  style={{ paddingVertical: 4, paddingHorizontal: 6 }}
+                >
+                  <Text style={styles.bmbSidebarLogoutText}>{translate("Đăng xuất")}</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
-        </View>
         )}
 
         {/* ==================================================================== */}
         {/* MÀN HÌNH 01 BMB: QUẢN LÝ SỰ CỐ (DANH SÁCH GIỮA + CHI TIẾT AI PHẢI)   */}
         {/* ==================================================================== */}
         <ScreenTransition transitionKey={bmbNavTab} style={{ flex: 1, flexDirection: isMobileLayout ? 'column' : 'row' }}>
-        {bmbNavTab === 'TICKETS' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            {/* CỘT GIỮA: DANH SÁCH SỰ CỐ TÒA NHÀ - HIỂN THỊ KHI DESKTOP HOẶC CHƯA CHỌN TICKET */}
-            {(!isMobileLayout || !bmbSelectedTicket) && (
-            <ScrollView
-              style={[styles.bmbCenterColumn, isMobileLayout && { flex: 1 }]}
-              showsVerticalScrollIndicator={false}
-            >
-              {toastMsg && (
-                <View style={[styles.toastBanner, { marginHorizontal: 0 }]}>
-                  <Text style={styles.toastText}>{toastMsg}</Text>
-                </View>
-              )}
-
-              <View style={styles.cardTopRow}>
-                <View>
-                  <Text style={styles.bmbPageTitle}>{translate("Danh sách Sự cố Tòa nhà")}</Text>
-                  <Text style={styles.bmbPageSubtitle}>
-                    {translate("Theo dõi, phê duyệt và điều phối xử lý sự cố")}</Text>
-                </View>
-                <View style={styles.rowCenter}>
-                  <RealTimeClock style={{ marginRight: 8 }} />
-                  <Text style={styles.bmbDateLabel}>{new Date().toLocaleDateString('vi-VN')}</Text>
-                </View>
-              </View>
-
-              {/* 4 Thẻ KPI */}
-              <View style={styles.bmbKpiRow}>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Chờ duyệt AI")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#EA580C' }]}>
-                    {String(bmbPendingCount).padStart(2, '0')}
-                  </Text>
-                </View>
-
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Đã phân công")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>
-                    {String(bmbAssignedCount).padStart(2, '0')}
-                  </Text>
-                </View>
-
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Đang xử lý")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#4F46E5' }]}>
-                    {String(bmbInProgressCount).padStart(2, '0')}
-                  </Text>
-                </View>
-
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Hoàn thành/Đóng")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#16A34A' }]}>
-                    {bmbCompletedCount + bmbClosedCount}
-                  </Text>
-                </View>
-              </View>
-
-              {/* Thanh tìm kiếm */}
-              <View style={styles.searchBarBox}>
-                <TextInput
-                  style={styles.searchBarInput}
-                  placeholder={translate("Tìm mã sự cố, căn hộ hoặc thiết bị...")}
-                  placeholderTextColor="#94A3B8"
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                />
-              </View>
-
-              {/* Hàng lọc trạng thái */}
-              <View style={styles.chipWrapRow}>
-                {[
-                  { key: 'ALL', label: `${translate('Tất cả')} (${tickets.length})` },
-                  {
-                    key: 'PENDING',
-                    label: `${translate('Chờ duyệt AI')} (${bmbPendingCount})`,
-                  },
-                  {
-                    key: 'ASSIGNED',
-                    label: `${translate('Đã phân công')} (${bmbAssignedCount})`,
-                  },
-                  {
-                    key: 'IN_PROGRESS',
-                    label: `${translate('Đang xử lý')} (${bmbInProgressCount})`,
-                  },
-                  {
-                    key: 'COMPLETED',
-                    label: `${translate('Hoàn thành')} (${bmbCompletedCount})`,
-                  },
-                  { key: 'CLOSED', label: `${translate('Đã đóng')} (${bmbClosedCount})` },
-                ].map((tab: any) => (
-                  <TouchableOpacity
-                    key={tab.key}
-                    style={[
-                      styles.bmbFilterChip,
-                      bmbTicketFilter === tab.key && styles.bmbFilterChipActive,
-                    ]}
-                    onPress={() => setBmbTicketFilter(tab.key)}
-                  >
-                    <Text
-                      style={[
-                        styles.bmbFilterChipText,
-                        bmbTicketFilter === tab.key && styles.bmbFilterChipTextActive,
-                      ]}
-                    >
-                      {tab.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <View style={[styles.cardTopRow, { marginVertical: 8 }]}>
-                <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
-                  {translate("Tất cả sự cố (")}{filteredBmbTickets.length})
-                </Text>
-                <Text style={{ color: '#64748B', fontSize: 12.5 }}>{translate("Mới nhất trước")}</Text>
-              </View>
-
-              {/* Danh sách Thẻ Sự cố */}
-              {filteredBmbTickets.map((t) => {
-                const isSelected = bmbSelectedTicket?.id === t.id;
-                const isPending = t.status === 'PENDING';
-                const isAssigned = t.status === 'ASSIGNED';
-                const isHigh =
-                  (t.finalPriority || t.aiSuggestedPriority) === 'HIGH';
-                const needsManualReview = t.isAiFallbackManual || !t.aiSuggestedCategory;
-
-                return (
-                  <TouchableOpacity
-                    key={t.id}
-                    style={[
-                      styles.resTicketCard,
-                      isSelected && { borderColor: '#2563EB', borderWidth: 2 },
-                    ]}
-                    onPress={() => handleSelectBmbTicket(t)}
-                  >
-                    <View style={styles.cardTopRow}>
-                      <View style={[styles.rowCenter, { flexWrap: 'wrap', gap: 4 }]}>
-                        <Text
-                          style={[
-                            styles.cardCodeText,
-                            isSelected && { color: '#2563EB', fontWeight: '800' },
-                          ]}
-                        >
-                          {t.ticketCode}
-                        </Text>
-                        {t.isAnonymous && (
-                          <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
-                          </View>
-                        )}
-                        {t.locationVerificationStatus === 'VERIFIED' ? (
-                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                          </View>
-                        ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
-                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
-                          </View>
-                        ) : null}
-                        {isHigh && (
-                          <Text style={styles.bmbUrgentInlineDot}> {translate("Khẩn cấp")}</Text>
-                        )}
-                      </View>
-                      <View
-                        style={[
-                          styles.statusPill,
-                          isPending
-                            ? { backgroundColor: '#FEF3C7' }
-                            : isAssigned
-                              ? { backgroundColor: '#DBEAFE' }
-                              : { backgroundColor: '#E0E7FF' },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.statusPillText,
-                            isPending
-                              ? { color: '#D97706' }
-                              : isAssigned
-                                ? { color: '#2563EB' }
-                                : { color: '#4F46E5' },
-                          ]}
-                        >
-                          {isPending
-                            ? translate('Chờ duyệt')
-                            : isAssigned
-                              ? translate('Đã phân công')
-                              : t.status === 'IN_PROGRESS'
-                                ? translate('Đang xử lý')
-                                : translate('Đã đóng')}
-                        </Text>
-                      </View>
+          {bmbNavTab === 'TICKETS' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              {/* CỘT GIỮA: DANH SÁCH SỰ CỐ TÒA NHÀ - HIỂN THỊ KHI DESKTOP HOẶC CHƯA CHỌN TICKET */}
+              {(!isMobileLayout || !bmbSelectedTicket) && (
+                <ScrollView
+                  style={[styles.bmbCenterColumn, isMobileLayout && { flex: 1 }]}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {toastMsg && (
+                    <View style={[styles.toastBanner, { marginHorizontal: 0 }]}>
+                      <Text style={styles.toastText}>{toastMsg}</Text>
                     </View>
-
-                    <Text style={styles.cardMainTitle}>{t.title}</Text>
-                    <Text style={styles.cardLocationText}>{t.locationNote}</Text>
-
-                    <View style={[styles.cardTopRow, { marginTop: 10, marginBottom: 0 }]}>
-                      {needsManualReview && !t.finalCategory ? (
-                        <View style={styles.bmbAiTimeoutTag}>
-                          <Text style={styles.bmbAiTimeoutText}>
-                            {translate("Cần phân loại thủ công")}</Text>
-                        </View>
-                      ) : (
-                        <View style={styles.bmbAiPurpleMiniTag}>
-                          <Text style={styles.bmbAiPurpleMiniText}>
-                            {translate(t.finalCategory ? "BMB đã duyệt" : "Gemini:")}{' '}
-                            {translate(CATEGORY_SHORT_VN[
-                              t.finalCategory || t.aiSuggestedCategory
-                            ] || 'Điện - Nước')}
-                          </Text>
-                        </View>
-                      )}
-                      <Text style={{ fontSize: 11.5, color: '#64748B' }}>
-                        {formatDateTime(t.createdAt)}</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-
-              {/* Thanh phân trang */}
-              <View style={[styles.cardTopRow, { marginTop: 8, paddingBottom: 24 }]}>
-                <Text style={{ fontSize: 12, color: '#64748B' }}>
-                  {translate("Hiển thị ")}{filteredBmbTickets.length} {translate("trong tổng số ")}{tickets.length} {translate("sự cố")}</Text>
-                <View style={styles.rowCenter}>
-                  <View style={styles.pageNumActive}>
-                    <Text style={{ color: '#2563EB', fontWeight: '800', fontSize: 12 }}>
-                      1
-                    </Text>
-                  </View>
-                  <Text style={styles.pageNumInactive}>2</Text>
-                  <Text style={styles.pageNumInactive}>3</Text>
-                  <Text style={styles.pageNumInactive}>&gt;</Text>
-                </View>
-              </View>
-            </ScrollView>
-            )}
-
-            {/* CỘT PHẢI: CHI TIẾT SỰ CỐ & TRỢ LÝ QUYẾT ĐỊNH GEMINI FLASH AI */}
-            {(!isMobileLayout || bmbSelectedTicket) && (
-            <ScrollView
-              style={[styles.bmbRightInspector, isMobileLayout && { flex: 1, borderRadius: 10, padding: 14 }]}
-              showsVerticalScrollIndicator={false}
-            >
-              {bmbSelectedTicket ? (
-                <View>
-                  {isMobileLayout && (
-                    <TouchableOpacity
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#EFF6FF', borderRadius: 8, alignSelf: 'flex-start' }}
-                      onPress={() => setBmbSelectedTicket(null)}
-                    >
-                      <Text style={{ fontSize: 13.5, fontWeight: '700', color: '#2563EB' }}>
-                        ← {translate('Quay lại danh sách sự cố')}
-                      </Text>
-                    </TouchableOpacity>
                   )}
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.bmbInspectorTitle}>
-                      {translate("Chi tiết sự cố ")}{bmbSelectedTicket.ticketCode}
-                    </Text>
-                    <TouchableOpacity onPress={() => setBmbSelectedTicket(null)}>
-                      <Text style={{ fontSize: 18, color: '#64748B', fontWeight: '700', padding: 4 }}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
 
-                  <View style={[styles.cardTopRow, { marginBottom: 14 }]}>
-                    <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
-                      <Text style={[styles.statusPillText, { color: '#D97706' }]}>
-                        {bmbSelectedTicket.status === 'PENDING'
-                          ? translate('Chờ duyệt')
-                          : translate(bmbSelectedTicket.status)}
-                      </Text>
-                    </View>
-                    <Text style={{ fontSize: 12, color: '#64748B' }}>
-                      {formatDateTime(bmbSelectedTicket.createdAt)}</Text>
-                  </View>
-
-                  <Text style={styles.bmbSmallSectionHead}>
-                    {bmbSelectedTicket.isAnonymous
-                      ? translate("THÔNG TIN KHÁCH BÁO CÁO (ẨN DANH)")
-                      : translate("THÔNG TIN CƯ DÂN PHẢN ÁNH")}
-                  </Text>
-
-                  {bmbSelectedTicket.isAnonymous ? (
-                    <View style={{
-                      backgroundColor: '#F8FAFC',
-                      borderWidth: 1,
-                      borderColor: '#E2E8F0',
-                      borderRadius: 8,
-                      padding: 10,
-                      marginTop: 6,
-                      marginBottom: 8,
-                    }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
-                          👤 {translate("Khách vãng lai (Báo cáo ẩn danh qua QR)")}
-                        </Text>
-                        {bmbSelectedTicket.locationVerificationStatus === 'VERIFIED' ? (
-                          <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#A7F3D0' }}>
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
-                          </View>
-                        ) : (
-                          <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#FDE68A' }}>
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={{ fontSize: 12, color: '#475569', fontStyle: 'italic' }}>
-                        {bmbSelectedTicket.locationVerificationReason || translate("Chưa có thông tin đối chiếu vị trí")}
-                      </Text>
-                    </View>
-                  ) : null}
-
-                  <View style={[styles.cardTopRow, { marginTop: 6 }]}>
-                    <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#0F172A', flex: 1 }}>
-                      {bmbSelectedTicket.locationNote}
-                    </Text>
-                    <View style={styles.qrVerifiedPill}>
-                      <Text style={styles.qrVerifiedPillText}>{translate("Đã xác thực QR")}</Text>
-                    </View>
-                  </View>
-
-                  <Text style={styles.bmbInspectorDesc}>
-                    {bmbSelectedTicket.description}
-                  </Text>
-
-                  {/* KHU VỰC HÌNH ẢNH CƯ DÂN BÁO CÁO (CHỈ LẤY ẢNH SCENE_BEFORE BAN ĐẦU) */}
-                  {(() => {
-                    const residentMedia = getResidentReportedMedia(bmbSelectedTicket);
-
-                    return (
-                      <View style={{ marginVertical: 12 }}>
-                        <View style={[styles.cardTopRow, { marginBottom: 8 }]}>
-                          <Text style={styles.bmbSmallSectionHead}>
-                            {translate("HÌNH ẢNH CƯ DÂN BÁO CÁO")}
-                          </Text>
-                          {residentMedia.length > 0 && (
-                            <View style={[styles.statusPill, { backgroundColor: '#EFF6FF', paddingHorizontal: 8, paddingVertical: 2 }]}>
-                              <Text style={[styles.statusPillText, { color: '#2563EB', fontWeight: '700', fontSize: 11.5 }]}>
-                                {residentMedia.length} {translate("ảnh")}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-
-                        {residentMedia.length === 0 ? (
-                          <View style={{
-                            backgroundColor: '#F8FAFC',
-                            borderWidth: 1,
-                            borderColor: '#E2E8F0',
-                            borderRadius: 8,
-                            paddingVertical: 12,
-                            paddingHorizontal: 14,
-                            flexDirection: 'row',
-                            alignItems: 'center',
-                            gap: 10,
-                          }}>
-                            <Text style={{ fontSize: 18 }}>📷</Text>
-                            <Text style={{ fontSize: 13, color: '#64748B', fontStyle: 'italic' }}>
-                              {translate("Cư dân chưa cung cấp hình ảnh")}
-                            </Text>
-                          </View>
-                        ) : (
-                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-                            {residentMedia.map((item, idx) => (
-                              <TouchableOpacity
-                                key={item.id || idx}
-                                style={{
-                                  width: 76,
-                                  height: 76,
-                                  borderRadius: 8,
-                                  borderWidth: 1.5,
-                                  borderColor: '#CBD5E1',
-                                  overflow: 'hidden',
-                                  backgroundColor: '#F1F5F9',
-                                  position: 'relative',
-                                }}
-                                activeOpacity={0.8}
-                                onPress={() => {
-                                  setBmbPhotoViewerList(residentMedia);
-                                  setBmbPhotoViewerIndex(idx);
-                                  setBmbPhotoModalLoading(true);
-                                  setBmbPhotoModalError(false);
-                                  setBmbPhotoViewerVisible(true);
-                                }}
-                              >
-                                <Image
-                                  source={{ uri: item.url }}
-                                  style={{ width: '100%', height: '100%' }}
-                                  resizeMode="cover"
-                                />
-                                <View style={{
-                                  position: 'absolute',
-                                  bottom: 3,
-                                  right: 3,
-                                  backgroundColor: 'rgba(15, 23, 42, 0.72)',
-                                  borderRadius: 4,
-                                  paddingHorizontal: 4,
-                                  paddingVertical: 1,
-                                }}>
-                                  <Text style={{ color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' }}>
-                                    🔍 {idx + 1}
-                                  </Text>
-                                </View>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        )}
-                      </View>
-                    );
-                  })()}
-
-                  {/* HỘP GỢI Ý TỪ GEMINI FLASH AI */}
-                  <View style={styles.bmbGeminiPurpleCard}>
-                    <View style={styles.cardTopRow}>
-                      <Text style={styles.bmbGeminiCardTitle}>
-                        {translate(bmbSelectedTicket.isAiFallbackManual ? "Gợi ý theo từ khóa" : bmbSelectedTicket.aiSuggestedCategory ? "Gợi ý phân loại từ Gemini" : "Phân loại sự cố")}
-                      </Text>
-                      <View style={styles.bmbLatencyGreenPill}>
-                        <Text style={styles.bmbLatencyGreenText}>
-                          {translate(bmbSelectedTicket.isAiFallbackManual || !bmbSelectedTicket.aiSuggestedCategory ? "Cần phân loại thủ công" : "Tự động")}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <Text style={styles.bmbAiSummaryBullet}>
-                      {translate("Tóm tắt: ")}{bmbSelectedTicket.aiSummary?.replace(/^\[Trợ lý AI ResiFix\]\s*/, '') || bmbSelectedTicket.description || bmbSelectedTicket.title}
-                    </Text>
-
-                    {bmbSelectedTicket.aiSuggestedCategory && bmbSelectedTicket.aiSuggestedPriority && (
-                      <Text style={styles.bmbRiskR1Hint}>
-                        {translate("Gợi ý ban đầu")} · {translate(CATEGORY_VN[bmbSelectedTicket.aiSuggestedCategory])} · {translate(PRIORITY_VN[bmbSelectedTicket.aiSuggestedPriority])}
-                      </Text>
-                    )}
-
-                    <Text style={styles.fieldLabel}>{translate("Danh mục sự cố")}</Text>
-                    <TouchableOpacity
-                      style={styles.bmbDropdownBox}
-                      onPress={() => {
-                        const nextIdx =
-                          (CATEGORIES_LIST.indexOf(bmbCategory) + 1) %
-                          CATEGORIES_LIST.length;
-                        setBmbCategory(CATEGORIES_LIST[nextIdx]);
-                      }}
-                    >
-                      <Text style={styles.bmbDropdownValue}>
-                        {translate(CATEGORY_VN[bmbCategory] || 'Hệ thống Điện - Nước')}
-                      </Text>
-                      <Text style={{ color: '#64748B' }}>⌄</Text>
-                    </TouchableOpacity>
-
-                    <Text style={styles.fieldLabel}>{translate("Mức độ ưu tiên")}</Text>
-                    <TouchableOpacity
-                      style={[
-                        styles.bmbDropdownBox,
-                        bmbPriority === 'HIGH' && {
-                          borderColor: '#EF4444',
-                          backgroundColor: '#FEF2F2',
-                        },
-                      ]}
-                      onPress={() => {
-                        const nextIdx =
-                          (PRIORITIES_LIST.indexOf(bmbPriority) + 1) %
-                          PRIORITIES_LIST.length;
-                        setBmbPriority(PRIORITIES_LIST[nextIdx]);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.bmbDropdownValue,
-                          bmbPriority === 'HIGH' && { color: '#DC2626', fontWeight: '800' },
-                        ]}
-                      >
-                        {translate(PRIORITY_VN[bmbPriority])}
-                      </Text>
-                      <Text style={{ color: bmbPriority === 'HIGH' ? '#DC2626' : '#64748B' }}>⌄</Text>
-                    </TouchableOpacity>
-
-                    <Text style={styles.bmbRiskR1Hint}>
-                      {translate("BMB có thể điều chỉnh gợi ý của AI trước khi duyệt.")}
-                    </Text>
-                  </View>
-
-                  {/* Phân công Kỹ thuật viên đang trực */}
-                  <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
-                    {translate("Phân công kỹ thuật viên")}
-                  </Text>
-                  {(() => {
-                    const selTech = technicians.find((x) => x.id === bmbTechId) || technicians[0];
-                    const isSelTechEligible = Boolean(
-                      selTech &&
-                      selTech.isEligibleForAssignment !== false &&
-                      selTech.isOnDuty &&
-                      selTech.isCheckedIn &&
-                      !selTech.isCheckedOut &&
-                      !selTech.onLeave
-                    );
-                    return (
-                      <>
-                        <TouchableOpacity
-                          style={[
-                            styles.bmbDropdownBox,
-                            !isSelTechEligible && { borderColor: '#EF4444', backgroundColor: '#FEF2F2' },
-                          ]}
-                          onPress={() => {
-                            if (technicians.length > 0) {
-                              const idx = technicians.findIndex((x) => x.id === bmbTechId);
-                              const nextTech = technicians[(idx + 1) % technicians.length];
-                              if (nextTech) setBmbTechId(nextTech.id);
-                            }
-                          }}
-                        >
-                          <Text style={[styles.bmbDropdownValue, !isSelTechEligible && { color: '#DC2626' }]}>
-                            {selTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa có KTV'))}{' '}
-                            ({selTech?.shiftName || 'Ca sáng'})
-                            {!isSelTechEligible ? ' [Ngoài ca / Đã kết thúc]' : ' [Đang trực]'}
-                          </Text>
-                          <Text style={{ color: !isSelTechEligible ? '#DC2626' : '#64748B' }}>⌄</Text>
-                        </TouchableOpacity>
-
-                        {!isSelTechEligible && (
-                          <Text style={{ fontSize: 11.5, color: '#DC2626', marginTop: 4, fontWeight: '600' }}>
-                            ⚠️ Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.
-                          </Text>
-                        )}
-
-                        <View style={[styles.techDivider, { marginTop: 16 }]} />
-
-                        <TouchableOpacity
-                          style={[
-                            styles.bmbWebLoginBtn,
-                            (loading || !bmbSelectedTicket || !bmbTechId || !isSelTechEligible) && { opacity: 0.6 },
-                            !isSelTechEligible && { backgroundColor: '#94A3B8' },
-                          ]}
-                          onPress={() => handleBmbDispatch()}
-                          disabled={loading || !bmbSelectedTicket || !bmbTechId || !isSelTechEligible}
-                        >
-                          <Text style={styles.bmbWebLoginBtnText}>
-                            {translate("Xác nhận & Giao việc")}
-                          </Text>
-                        </TouchableOpacity>
-                      </>
-                    );
-                  })()}
-                </View>
-              ) : (
-                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 60 }}>
-                  <Text style={{ fontSize: 32, marginBottom: 12 }}>📋</Text>
-                  <Text style={{ fontSize: 15, fontWeight: '700', color: '#334155' }}>
-                    {translate('Chưa chọn sự cố nào')}
-                  </Text>
-                  <Text style={{ fontSize: 13, color: '#64748B', textAlign: 'center', marginTop: 4, maxWidth: 260 }}>
-                    {translate('Vui lòng bấm chọn một sự cố từ danh sách bên trái để xem chi tiết và phê duyệt.')}
-                  </Text>
-                </View>
-              )}
-            </ScrollView>
-            )}
-          </View>
-        )}
-
-        {/* ==================================================================== */}
-        {/* MÀN HÌNH 02 BMB: KỸ THUẬT VIÊN CA TRỰC & WORKLOAD (FIGMA 02 BMB)     */}
-        {/* ==================================================================== */}
-        {bmbNavTab === 'TECHNICIANS' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            {/* CỘT GIỮA: DANH SÁCH KỸ THUẬT VIÊN & TẢI CÔNG VIỆC */}
-            <ScrollView
-              style={styles.bmbCenterColumn}
-              showsVerticalScrollIndicator={false}
-            >
-              {toastMsg && (
-                <View style={[styles.toastBanner, { marginHorizontal: 0 }]}>
-                  <Text style={styles.toastText}>{toastMsg}</Text>
-                </View>
-              )}
-              <Text style={styles.bmbPageTitle}>
-                {translate("Kỹ thuật viên & Tải công việc")}</Text>
-              <Text style={styles.bmbPageSubtitle}>
-                {translate("Theo dõi và điều phối công việc cho kỹ thuật viên")}</Text>
-
-              <TouchableOpacity style={styles.technicianAddButton} onPress={openCreateTechnician}>
-                <Text style={styles.technicianAddButtonText}>+ {translate('Thêm kỹ thuật viên')}</Text>
-              </TouchableOpacity>
-
-              <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
-                <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>{translate('Đang trực:')} {onDutyTechnicianCount} KTV</Text>
-                </View>
-                <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>{translate('Đang xử lý:')} {openTechnicianWorkCount} việc</Text>
-                </View>
-                <View style={styles.bmbStatPill}>
-                  <Text style={styles.bmbStatPillText}>{translate('Sẵn sàng:')} {availableTechnicianCount} KTV</Text>
-                </View>
-              </View>
-
-              {technicians.length === 0 ? (
-                <View style={{ padding: 32, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 12, marginTop: 16 }}>
-                  <Text style={{ color: '#64748B', fontSize: 13, fontWeight: '500' }}>
-                    {translate('Chưa có kỹ thuật viên nào đang hoạt động trong hệ thống.')}
-                  </Text>
-                </View>
-              ) : (
-                technicians.map((tech: any, idx: number) => {
-                const activeJobsCount =
-                  tech.assignedTickets?.length ??
-                  (idx === 0 ? 1 : idx === 1 ? 3 : 0);
-                const isHighLoad = activeJobsCount >= 3;
-                const isAssignSelected = bmbAssignTargetTech?.id === tech.id;
-                const isViewingSelected = bmbViewingWorkloadTech?.id === tech.id;
-                const initials = tech.fullName
-                  .split(' ')
-                  .slice(-2)
-                  .map((w: string) => w[0])
-                  .join('');
-
-                return (
-                  <View
-                    key={tech.id}
-                    style={[
-                      styles.resTicketCard,
-                      isAssignSelected && { borderColor: '#2563EB', borderWidth: 2 },
-                      isViewingSelected &&
-                      !isAssignSelected && { borderColor: '#4F46E5', borderWidth: 2 },
-                      !tech.isOnDuty && { backgroundColor: '#F8FAFC', opacity: 0.75 },
-                    ]}
-                  >
-                    <View style={styles.rowCenter}>
-                      <View style={styles.bmbTechInitialsCircle}>
-                        <Text style={styles.bmbTechInitialsText}>{initials}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.cardMainTitle}>
-                          {tech.fullName} ({tech.phone})
-                        </Text>
-                        {(() => {
-                          const isEligible = tech.isEligibleForAssignment !== false && tech.isOnDuty && tech.isCheckedIn && !tech.isCheckedOut && !tech.onLeave;
-                          return (
-                            <View
-                              style={[
-                                styles.statusPill,
-                                {
-                                  alignSelf: 'flex-start',
-                                  backgroundColor: isEligible ? '#DCFCE7' : '#FEE2E2',
-                                },
-                              ]}
-                            >
-                              <Text
-                                style={{
-                                  fontSize: 11.5,
-                                  fontWeight: '700',
-                                  color: isEligible ? '#15803D' : '#DC2626',
-                                }}
-                              >
-                                {isEligible
-                                  ? translate('Đang trực')
-                                  : tech.onLeave
-                                    ? translate('Nghỉ phép')
-                                    : tech.isCheckedOut
-                                      ? translate('Đã kết thúc ca')
-                                      : translate('Ngoài ca')}
-                              </Text>
-                            </View>
-                          );
-                        })()}
-                      </View>
-                    </View>
-
-                    {tech.isOnDuty && (
-                      <>
-                        <Text style={[styles.cardLocationText, { marginTop: 10 }]}>
-                          {translate('Chuyên môn:')} {tech.specialtyLabel}
-                        </Text>
-                        <Text
-                          style={{
-                            fontSize: 12.5,
-                            fontWeight: '600',
-                            color: isHighLoad ? '#D97706' : '#059669',
-                            marginTop: 6,
-                          }}
-                        >
-                          {activeJobsCount === 0
-                            ? translate('0 việc (Đang rảnh)')
-                            : isHighLoad
-                              ? `${translate('Đang xử lý:')} ${activeJobsCount} việc (${translate('Tải cao')})`
-                              : `${translate('Đang xử lý:')} ${activeJobsCount} việc`}
-                        </Text>
-
-                        <View style={[styles.rowBetween, { marginTop: 12, gap: 10 }]}>
-                          {(() => {
-                            const isEligible = tech.isEligibleForAssignment !== false && tech.isOnDuty && tech.isCheckedIn && !tech.isCheckedOut && !tech.onLeave;
-                            return (
-                              <TouchableOpacity
-                                style={[
-                                  styles.bmbWorkloadBtn,
-                                  isAssignSelected && styles.bmbWorkloadBtnBlueActive,
-                                  !isEligible && { opacity: 0.5, backgroundColor: '#F1F5F9' },
-                                ]}
-                                onPress={() => {
-                                  if (!isEligible) {
-                                    showToast('Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
-                                    return;
-                                  }
-                                  setBmbAssignTargetTech(tech);
-                                  setBmbTechId(tech.id);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.bmbWorkloadBtnText,
-                                    isAssignSelected && { color: '#FFFFFF' },
-                                    !isEligible && { color: '#94A3B8' },
-                                  ]}
-                                >
-                                  {!isEligible
-                                    ? translate('Không thể giao')
-                                    : isAssignSelected
-                                      ? translate('Đang chọn giao việc')
-                                      : translate('Giao việc')}
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          })()}
-
-                          {activeJobsCount > 0 && (
-                            <TouchableOpacity
-                              style={[
-                                styles.bmbWorkloadBtn,
-                                isViewingSelected && styles.bmbWorkloadBtnIndigoActive,
-                              ]}
-                              onPress={() => setBmbViewingWorkloadTech(tech)}
-                            >
-                              <Text
-                                style={[
-                                  styles.bmbWorkloadBtnText,
-                                  isViewingSelected && { color: '#FFFFFF' },
-                                ]}
-                              >
-                                {isViewingSelected
-                                  ? `${translate('Đang xem')} (${activeJobsCount})`
-                                  : `${translate('Xem việc')} (${activeJobsCount})`}
-                              </Text>
-                            </TouchableOpacity>
-                          )}
-                        </View>
-                      </>
-                    )}
-
-                    <View style={styles.technicianActions}>
-                      <TouchableOpacity
-                        style={styles.technicianEditButton}
-                        onPress={() => openEditTechnician(tech)}
-                      >
-                        <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.technicianDeleteButton}
-                        onPress={() => {
-                          setSelectedTechnician(tech);
-                          setTechnicianFormError(null);
-                          setTechnicianDialogMode('delete');
-                        }}
-                      >
-                        <Text style={styles.technicianDeleteButtonText}>{translate('Xóa')}</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                );
-              }))}
-            </ScrollView>
-
-            {/* CỘT PHẢI: 2 KHỐI XẾP DỌC (GIAO VIỆC MỚI + VIỆC ĐANG LÀM CỦA KTV) */}
-            <ScrollView
-              style={styles.bmbRightInspector}
-              showsVerticalScrollIndicator={false}
-            >
-              {/* Khối trên: Giao việc mới cho KTV */}
-              <View style={styles.bmbBlueOutlinePanel}>
-                <Text style={styles.bmbPanelBlueTitle}>
-                  {translate("Giao việc cho:")}{' '}
-                  {bmbAssignTargetTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa chọn KTV'))}
-                </Text>
-                <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 12 }}>
-                  {translate("Chuyên môn:")}{' '}
-                  {bmbAssignTargetTech?.specialtyLabel || 'Điện - Nước'}
-                </Text>
-
-                <Text style={styles.fieldLabel}>
-                  {translate("Chọn sự cố chờ phân công:")}</Text>
-
-                {pendingTicketsForRadio.map((pt) => {
-                  const isRadioChecked = bmbRadioTicketId === pt.id;
-                  const isHigh = (pt.finalPriority || pt.aiSuggestedPriority) === 'HIGH';
-                  return (
-                    <TouchableOpacity
-                      key={pt.id}
-                      style={[
-                        styles.bmbRadioTicketBox,
-                        isRadioChecked && styles.bmbRadioTicketBoxSelected,
-                      ]}
-                      onPress={() => setBmbRadioTicketId(pt.id)}
-                    >
-                      <View style={styles.rowCenter}>
-                        <View style={[
-                          styles.radioDotCircle,
-                          isRadioChecked && styles.radioDotCircleActive,
-                        ]}>
-                          {isRadioChecked && <View style={styles.radioDotInner} />}
-                        </View>
-                        <Text style={{ fontWeight: '700', color: '#2563EB', fontSize: 13, marginRight: 8 }}>
-                          {pt.ticketCode}
-                        </Text>
-                        {isHigh && (
-                          <View style={styles.bmbMiniOrangeBadge}>
-                            <Text style={styles.bmbMiniOrangeText}>{translate('Ưu tiên cao')}</Text>
-                          </View>
-                        )}
-                        <View style={styles.bmbMiniPurpleBadge}>
-                          <Text style={styles.bmbMiniPurpleText}>
-                            {CATEGORY_SHORT_VN[pt.aiSuggestedCategory] || 'Điện - Nước'}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={{ fontSize: 12.5, color: '#0F172A', marginTop: 6 }}>
-                        {pt.title} ({pt.locationNote})
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-                {pendingTicketsForRadio.length === 0 && (
-                  <Text style={styles.techInfoLine}>{translate('Hiện không có sự cố đang chờ phân công.')}</Text>
-                )}
-
-                <Text style={styles.fieldLabel}>{translate("Ghi chú điều phối (Tùy chọn):")}</Text>
-                <TextInput
-                  style={styles.bmbWebInput}
-                  value={bmbNote}
-                  onChangeText={setBmbNote}
-                  placeholder={translate("Mang theo dụng cụ cần thiết...")}
-                  placeholderTextColor="#94A3B8"
-                />
-
-                <TouchableOpacity
-                  style={[
-                    styles.bmbWebLoginBtn,
-                    { marginTop: 14 },
-                    (loading || pendingTicketsForRadio.length === 0 || !bmbAssignTargetTech?.id || !bmbRadioTicketId) && { opacity: 0.6 },
-                  ]}
-                  onPress={() =>
-                    handleBmbDispatch(
-                      bmbRadioTicketId,
-                      bmbAssignTargetTech?.id || bmbTechId
-                    )
-                  }
-                  disabled={loading || pendingTicketsForRadio.length === 0 || !bmbAssignTargetTech?.id || !bmbRadioTicketId}
-                >
-                  <Text style={styles.bmbWebLoginBtnText}>
-                    {translate("Xác nhận giao việc")}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Khối dưới: Việc đang làm của KTV */}
-              <View style={[styles.bmbBlueOutlinePanel, { borderColor: '#E2E8F0', marginTop: 14 }]}>
-                <Text style={[styles.bmbPanelBlueTitle, { color: '#0F172A' }]}>
-                  {translate("Việc đang làm của")}:{' '}
-                  {bmbViewingWorkloadTech?.fullName || (technicians[0]?.fullName ?? 'Kỹ thuật viên')}
-                  {viewingTechTickets.length > 0 ? ` (${viewingTechTickets.length})` : ''}
-                </Text>
-
-                {viewingTechTickets.length > 0 ? (
-                  viewingTechTickets.map((vTicket) => (
-                    <View key={vTicket.id} style={styles.bmbActiveJobItem}>
-                      <Text style={{ fontWeight: '700', fontSize: 13, color: '#0F172A' }}>
-                        {vTicket.ticketCode} • {vTicket.title}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: '#64748B', marginTop: 4 }}>
-                        {vTicket.status === 'IN_PROGRESS' ? translate('Đang xử lý') : translate('Đã phân công')} • {vTicket.locationNote}
-                      </Text>
-                    </View>
-                  ))
-                ) : (
-                  <Text style={[styles.techInfoLine, { marginTop: 8 }]}>
-                    {translate('Không có sự cố nào đang thực hiện.')}
-                  </Text>
-                )}
-              </View>
-            </ScrollView>
-          </View>
-        )}
-
-        {/* ==================================================================== */}
-        {/* MÀN HÌNH 03 BMB: TRUNG TÂM THÔNG BÁO & CLOUD STATUS (FIGMA 03 BMB)   */}
-        {/* ==================================================================== */}
-        {bmbNavTab === 'NOTIFICATIONS' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            {/* CỘT GIỮA: TRUNG TÂM THÔNG BÁO & NHẬT KÝ HỆ THỐNG */}
-            <ScrollView
-              style={styles.bmbCenterColumn}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.cardTopRow}>
-                <View>
-                  <Text style={styles.bmbPageTitle}>
-                    {translate("Trung tâm Thông báo & Nhật ký Hệ thống")}</Text>
-                  <Text style={styles.bmbPageSubtitle}>
-                    {translate("Cập nhật thời gian thực")}</Text>
-                </View>
-                <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
-                  <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 13 }}>
-                    {translate("Đánh dấu đã đọc tất cả")}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
-                {[
-                  { key: 'ALL', label: `${translate('Tất cả')} (${notifications.length})` },
-                  { key: 'UNREAD', label: `${translate('Chưa đọc')} (${unreadCount})` },
-                  { key: 'URGENT', label: `${translate('Khẩn cấp')} (${urgentNotificationCount})` },
-                  { key: 'TECH', label: `${translate('Kỹ thuật viên')} (${technicianNotificationCount})` },
-                ].map((tab: any) => (
-                  <TouchableOpacity
-                    key={tab.key}
-                    style={[
-                      styles.bmbFilterChip,
-                      bmbNotiFilter === tab.key && styles.bmbFilterChipActive,
-                    ]}
-                    onPress={() => setBmbNotiFilter(tab.key)}
-                  >
-                    <Text
-                      style={[
-                        styles.bmbFilterChipText,
-                        bmbNotiFilter === tab.key && styles.bmbFilterChipTextActive,
-                      ]}
-                    >
-                      {tab.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {filteredBmbNotifications.length === 0 ? (
-                <View style={styles.technicianEmptyState}>
-                  <Text style={styles.technicianEmptyText}>
-                    {translate('Không có thông báo phù hợp.')}
-                  </Text>
-                </View>
-              ) : (
-                <>
-                  {(() => {
-                    const sorted = [...filteredBmbNotifications].sort(
-                      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-                    );
-                    const displayed = showAllBmbNotifications ? sorted : sorted.slice(0, 5);
-                    return (
-                      <>
-                        {displayed.map((notification) => (
-                          <TouchableOpacity
-                            key={notification.id}
-                            style={[
-                              styles.resTicketCard,
-                              !notification.isRead && { borderColor: '#60A5FA', borderWidth: 1.5 },
-                            ]}
-                            onPress={() => handleOpenNotification(notification)}
-                          >
-                            <View style={styles.cardTopRow}>
-                              <Text style={styles.cardMainTitle}>{notification.title}</Text>
-                              {!notification.isRead && <View style={styles.blueUnreadDot} />}
-                            </View>
-                            <Text style={styles.cardLocationText}>{notification.message}</Text>
-                            {notification.ticket?.ticketCode && (
-                              <Text style={styles.cardLocationText}>
-                                {translate('Sự cố liên quan:')} {notification.ticket.ticketCode}
-                              </Text>
-                            )}
-                            <Text style={styles.techInfoLine}>
-                              {formatDateTime(notification.createdAt)}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                        {sorted.length > 5 && (
-                          <TouchableOpacity
-                            style={{
-                              paddingVertical: 10,
-                              alignItems: 'center',
-                              backgroundColor: '#F8FAFC',
-                              borderRadius: 8,
-                              marginTop: 8,
-                              borderWidth: 1,
-                              borderColor: '#E2E8F0',
-                            }}
-                            onPress={() => setShowAllBmbNotifications(!showAllBmbNotifications)}
-                          >
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#2563EB' }}>
-                              {showAllBmbNotifications
-                                ? translate('Thu gọn')
-                                : `${translate('Xem thêm')} (${sorted.length - 5})`}
-                            </Text>
-                          </TouchableOpacity>
-                        )}
-                      </>
-                    );
-                  })()}
-                </>
-              )}
-            </ScrollView>
-
-            {/* CỘT PHẢI: THÔNG TIN VẬN HÀNH & LIÊN HỆ KHẨN CẤP */}
-            <ScrollView
-              style={styles.bmbRightInspector}
-              showsVerticalScrollIndicator={false}
-            >
-              <Text style={styles.bmbInspectorTitle}>{translate('Thông tin vận hành')}</Text>
-
-              {/* Khối Quản lý Liên hệ Khẩn cấp */}
-              <View style={[styles.cleanInfoCard, { borderColor: '#DC2626', marginTop: 12 }]}>
-                <View style={styles.rowBetween}>
-                  <Text style={[styles.cleanInfoCardTitle, { color: '#DC2626' }]}>
-                    🚨 {translate('Liên hệ quản lý khẩn cấp')}
-                  </Text>
-                  <TouchableOpacity onPress={() => setEditingEmergencyContact(!editingEmergencyContact)}>
-                    <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 12 }}>
-                      {editingEmergencyContact ? translate('Hủy') : translate('Chỉnh sửa')}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-                {!editingEmergencyContact ? (
-                  <Text style={[styles.cardLocationText, { marginTop: 4, fontWeight: '600', color: '#0F172A' }]}>
-                    {emergencyContact.managerName} – {emergencyContact.managerPhone}
-                  </Text>
-                ) : (
-                  <View style={{ marginTop: 8 }}>
-                    <Text style={styles.fieldLabel}>{translate('Họ và tên:')}</Text>
-                    <TextInput
-                      style={[styles.bmbWebInput, { marginBottom: 6 }]}
-                      value={emergencyNameInput}
-                      onChangeText={setEmergencyNameInput}
-                      placeholder="Đặng Thành Quyết"
-                    />
-                    <Text style={styles.fieldLabel}>{translate('Số điện thoại:')}</Text>
-                    <TextInput
-                      style={[styles.bmbWebInput, { marginBottom: 8 }]}
-                      value={emergencyPhoneInput}
-                      onChangeText={(v) => setEmergencyPhoneInput(v.replace(/[^\d]/g, '').slice(0, 10))}
-                      placeholder="0913402803"
-                      keyboardType="phone-pad"
-                      maxLength={10}
-                    />
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { paddingVertical: 8 }]}
-                      onPress={handleSaveEmergencyContact}
-                      disabled={loading}
-                    >
-                      <Text style={styles.primaryActionBtnText}>{translate('Lưu liên hệ')}</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-
-              <View style={styles.cleanInfoCard}>
-                <Text style={styles.cleanInfoCardTitle}>{translate('Trợ lý AI')}</Text>
-                <Text style={styles.cleanInfoCardDesc}>
-                  {translate('Gợi ý phân loại tự động và đánh giá độ khẩn cấp.')}
-                </Text>
-              </View>
-
-              <View style={styles.cleanInfoCard}>
-                <Text style={styles.cleanInfoCardTitle}>{translate('Hộp thư thông báo')}</Text>
-                <Text style={styles.cleanInfoCardDesc}>
-                  {translate('Lưu trữ các cập nhật trạng thái sự cố và phân công.')}
-                </Text>
-              </View>
-
-              <View style={styles.techDivider} />
-
-              <Text style={styles.cardBlockTitle}>{translate('Hoạt động hôm nay')}</Text>
-              <View style={styles.bmbStatRow}>
-                <Text style={styles.bmbStatLabel}>{translate('Sự cố mới:')}</Text>
-                <Text style={styles.bmbStatValue}>{ticketsCreatedToday}</Text>
-              </View>
-              <View style={styles.bmbStatRow}>
-                <Text style={styles.bmbStatLabel}>{translate('Thông báo mới:')}</Text>
-                <Text style={styles.bmbStatValue}>{notificationsCreatedToday}</Text>
-              </View>
-            </ScrollView>
-          </View>
-        )}
-
-        {/* ==================================================================== */}
-        {/* MÀN HÌNH 04 BMB: QUẢN LÝ CĂN HỘ & CƯ DÂN                             */}
-        {/* ==================================================================== */}
-        {bmbNavTab === 'APARTMENTS' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            {/* CỘT TRÁI: DANH SÁCH CĂN HỘ & LỊCH SỬ SỬA CHỮA */}
-            <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
-              <View style={styles.cardTopRow}>
-                <View>
-                  <Text style={styles.bmbPageTitle}>{translate("Quản lý Căn hộ & Lịch sử sửa chữa")}</Text>
-                  <Text style={styles.bmbPageSubtitle}>
-                    {translate("Theo dõi cư dân, mã QR phòng và lịch sử bảo trì")}
-                  </Text>
-                </View>
-              </View>
-
-              {/* Bộ lọc Tòa (G, F, E), Tầng (1..5) và Trạng thái */}
-              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginVertical: 10, borderWidth: 1, borderColor: '#E2E8F0' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
-                    🏢 {translate("Hệ thống 75 Căn hộ")} • {translate("Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng")}
-                  </Text>
-                  <Text style={{ fontSize: 12, color: '#64748B' }}>
-                    {apartments.filter((a) => a.residents && a.residents.length > 0).length}/{apartments.length || 75} {translate("phòng đang ở")}
-                  </Text>
-                </View>
-
-                {/* Hàng 1: Lọc theo Tòa */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tòa:")}</Text>
-                  {(['ALL', 'G', 'F', 'E'] as const).map((b) => {
-                    const isSel = apartmentFilterBlock === b;
-                    const label = b === 'ALL' ? 'Tất cả 3 tòa (75)' : `Tòa ${b} (25)`;
-                    return (
-                      <TouchableOpacity
-                        key={b}
-                        style={{
-                          paddingHorizontal: 10,
-                          paddingVertical: 5,
-                          borderRadius: 6,
-                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
-                          borderWidth: 1,
-                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
-                        }}
-                        onPress={() => setApartmentFilterBlock(b)}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
-                          {translate(label)}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-
-                {/* Hàng 2: Lọc theo Tầng */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tầng:")}</Text>
-                  {(['ALL', 1, 2, 3, 4, 5] as const).map((fl) => {
-                    const isSel = apartmentFilterFloor === fl;
-                    const label = fl === 'ALL' ? 'Tất cả tầng' : `Tầng ${fl}`;
-                    return (
-                      <TouchableOpacity
-                        key={String(fl)}
-                        style={{
-                          paddingHorizontal: 10,
-                          paddingVertical: 5,
-                          borderRadius: 6,
-                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
-                          borderWidth: 1,
-                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
-                        }}
-                        onPress={() => setApartmentFilterFloor(fl)}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
-                          {translate(label)}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-
-                {/* Hàng 3: Lọc theo Trạng thái */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Trạng thái:")}</Text>
-                  {(['ALL', 'OCCUPIED', 'VACANT'] as const).map((st) => {
-                    const isSel = apartmentFilterStatus === st;
-                    const label = st === 'ALL' ? 'Tất cả' : st === 'OCCUPIED' ? 'Đang ở' : 'Còn trống';
-                    return (
-                      <TouchableOpacity
-                        key={st}
-                        style={{
-                          paddingHorizontal: 10,
-                          paddingVertical: 5,
-                          borderRadius: 6,
-                          backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
-                          borderWidth: 1,
-                          borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
-                        }}
-                        onPress={() => setApartmentFilterStatus(st)}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
-                          {translate(label)}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </View>
-
-              {/* Danh sách thẻ căn hộ hiển thị mã QR thật và thông tin chuẩn */}
-              <View style={[styles.chipWrapRow, { marginVertical: 8 }]}>
-                {apartments
-                  .filter((apt) => {
-                    if (apartmentFilterBlock !== 'ALL' && !apt.apartmentCode.startsWith(apartmentFilterBlock)) return false;
-                    if (apartmentFilterFloor !== 'ALL' && apt.floorNumber !== apartmentFilterFloor) return false;
-                    const hasResidents = apt.residents && apt.residents.length > 0;
-                    if (apartmentFilterStatus === 'OCCUPIED' && !hasResidents) return false;
-                    if (apartmentFilterStatus === 'VACANT' && hasResidents) return false;
-                    return true;
-                  })
-                  .map((apt) => {
-                    const isSel = selectedApartment?.apartmentCode === apt.apartmentCode;
-                    const hasResidents = apt.residents && apt.residents.length > 0;
-                    const qrVal = apt.roomQrCode || apt.qrCode || `ROOM:${apt.apartmentCode}`;
-                    return (
-                      <TouchableOpacity
-                        key={apt.apartmentCode}
-                        style={[
-                          styles.bmbRadioTicketBox,
-                          isSel && styles.bmbRadioTicketBoxSelected,
-                          { minWidth: 260, flex: 1, margin: 4, padding: 12 }
-                        ]}
-                        onPress={() => handleSelectApartment(apt)}
-                      >
-                        {/* Hàng trên: Tên phòng và Huy hiệu trạng thái */}
-                        <View style={styles.cardTopRow}>
-                          <Text style={{ fontWeight: '900', fontSize: 16, color: '#1E40AF' }}>
-                            Căn {apt.apartmentCode}
-                          </Text>
-                          <View style={[styles.statusPill, { backgroundColor: hasResidents ? '#DCFCE7' : '#F1F5F9' }]}>
-                            <Text style={[styles.statusPillText, { color: hasResidents ? '#15803D' : '#64748B', fontSize: 11 }]}>
-                              {translate(hasResidents ? `Đang ở (${apt.residents.length})` : 'Còn trống')}
-                            </Text>
-                          </View>
-                        </View>
-
-                        {/* Thân thẻ: Thông tin bên trái, Mã QR đen trắng bên phải */}
-                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
-                          <View style={{ flex: 1, paddingRight: 8 }}>
-                            <Text style={[styles.cardLocationText, { fontWeight: '700', color: '#0F172A' }]}>
-                              {apt.buildingBlock} • Tầng {apt.floorNumber}
-                            </Text>
-                            <Text style={[styles.cardLocationText, { fontSize: 11.5, color: '#64748B', marginTop: 2 }]} numberOfLines={1}>
-                              {apt.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
-                            </Text>
-                            <Text style={[styles.techInfoLine, { marginTop: 4, fontSize: 12 }]}>
-                              Chủ hộ: {apt.representative?.fullName || 'Chưa gán'}
-                            </Text>
-                            <Text style={{ fontSize: 11, color: '#7C3AED', fontWeight: '700', marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }}>
-                              {qrVal}
-                            </Text>
-                          </View>
-
-                          {/* Mã QR thật dạng pixel matrix độc lập */}
-                          <View style={{ alignItems: 'center' }}>
-                            <View style={{ borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 6, padding: 2, backgroundColor: '#FFFFFF' }}>
-                              <QrCodeView value={qrVal} size={58} quietZone={1} />
-                            </View>
-                            <TouchableOpacity
-                              style={{
-                                marginTop: 4,
-                                backgroundColor: '#EFF6FF',
-                                borderWidth: 1,
-                                borderColor: '#BFDBFE',
-                                paddingHorizontal: 6,
-                                paddingVertical: 2,
-                                borderRadius: 4,
-                              }}
-                              onPress={() => setZoomQrApartment(apt)}
-                            >
-                              <Text style={{ fontSize: 10, fontWeight: '700', color: '#1D4ED8' }}>
-                                🔍 {translate("Phóng to & In")}
-                              </Text>
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })}
-              </View>
-
-              {/* Modal Phóng to Mã QR Căn hộ & In / Tải file SVG */}
-              {zoomQrApartment && (
-                <Modal
-                  visible={zoomQrApartment !== null}
-                  transparent
-                  animationType="fade"
-                  onRequestClose={() => setZoomQrApartment(null)}
-                >
-                  <View style={styles.technicianModalOverlay}>
-                    <View style={[styles.technicianModalCard, { maxWidth: 420, alignItems: 'center' }]}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#2563EB', letterSpacing: 1, textTransform: 'uppercase' }}>
-                        {translate("Tem mã QR Căn hộ chính thức")}
-                      </Text>
-                      <Text style={{ fontSize: 26, fontWeight: '900', color: '#0F172A', marginTop: 4 }}>
-                        Căn {zoomQrApartment.apartmentCode}
-                      </Text>
-                      <Text style={{ fontSize: 13, color: '#475569', marginTop: 2, textAlign: 'center' }}>
-                        {zoomQrApartment.buildingBlock} • Tầng {zoomQrApartment.floorNumber}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: '#64748B', marginTop: 2, textAlign: 'center' }}>
-                        {zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
-                      </Text>
-
-                      {/* Khung QR to sắc nét */}
-                      <View style={{
-                        width: 236,
-                        height: 236,
-                        marginVertical: 14,
-                        padding: 8,
-                        backgroundColor: '#FFFFFF',
-                        borderWidth: 2,
-                        borderColor: '#0284C7',
-                        borderRadius: 12,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        shadowColor: '#000',
-                        shadowOpacity: 0.08,
-                        shadowRadius: 10,
-                        elevation: 4,
-                      }}>
-                        <QrCodeView
-                          value={zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
-                          size={220}
-                          quietZone={3}
-                        />
-                      </View>
-
-                      {/* Huy hiệu mã QR */}
-                      <View style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4, marginBottom: 8 }}>
-                        <Text style={{ fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontWeight: '800', fontSize: 14, color: '#1E293B' }}>
-                          {zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
-                        </Text>
-                      </View>
-
-                      <Text style={{ fontSize: 12, color: '#166534', backgroundColor: '#DCFCE7', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, marginBottom: 16 }}>
-                        ✓ {translate("Mã QR hoạt động hợp lệ • Gắn liền vĩnh viễn với phòng")}
-                      </Text>
-
-                      {/* Các nút hành động: In, Tải SVG, Đóng */}
-                      <View style={{ width: '100%', gap: 8 }}>
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
-                          <TouchableOpacity
-                            style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0284C7', paddingVertical: 10 }]}
-                            onPress={() => {
-                              const bAddress = zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
-                              const locStr = `${zoomQrApartment.buildingBlock} • Tầng ${zoomQrApartment.floorNumber}`;
-                              printQrCode(zoomQrApartment.apartmentCode, locStr, bAddress);
-                            }}
-                          >
-                            <Text style={styles.primaryActionBtnText}>🖨️ {translate("In tem QR")}</Text>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0F766E', paddingVertical: 10 }]}
-                            onPress={() => {
-                              downloadQrSvg(zoomQrApartment.apartmentCode);
-                              showToast(translate(`Đã tải file SVG mã QR căn ${zoomQrApartment.apartmentCode}`));
-                            }}
-                          >
-                            <Text style={styles.primaryActionBtnText}>⬇️ {translate("Tải file SVG")}</Text>
-                          </TouchableOpacity>
-                        </View>
-
-                        <TouchableOpacity
-                          style={[styles.technicianCancelButton, { width: '100%', paddingVertical: 9, alignItems: 'center' }]}
-                          onPress={() => setZoomQrApartment(null)}
-                        >
-                          <Text style={styles.technicianCancelButtonText}>{translate("Đóng")}</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  </View>
-                </Modal>
-              )}
-
-              {/* Lịch sử sửa chữa của căn hộ được chọn */}
-              {selectedApartment && (
-                <View style={[styles.whiteSectionCard, { marginTop: 14 }]}>
                   <View style={styles.cardTopRow}>
                     <View>
-                      <Text style={styles.cardBlockTitle}>
-                        {translate("Lịch sử sửa chữa căn")} {selectedApartment.apartmentCode}
-                      </Text>
-                      <Text style={styles.techDutySub}>
-                        {apartmentRepairsFullHistory ? translate("Toàn bộ lịch sử") : translate("Lịch sử sửa chữa (3 tháng)")}
-                      </Text>
+                      <Text style={styles.bmbPageTitle}>{translate("Danh sách Sự cố Tòa nhà")}</Text>
+                      <Text style={styles.bmbPageSubtitle}>
+                        {translate("Theo dõi, phê duyệt và điều phối xử lý sự cố")}</Text>
                     </View>
-                    <TouchableOpacity
-                      onPress={() => handleToggleApartmentRepairsHistory(!apartmentRepairsFullHistory)}
-                    >
-                      <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#2563EB' }}>
-                        {apartmentRepairsFullHistory ? translate("3 tháng gần nhất") : translate("Xem toàn bộ lịch sử")}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {apartmentRepairs.length === 0 ? (
-                    <Text style={[styles.techInfoLine, { marginTop: 10 }]}>
-                      {translate("Không có sự cố nào trong khoảng thời gian này.")}
-                    </Text>
-                  ) : (
-                    apartmentRepairs.map((rp) => (
-                      <View key={rp.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
-                        <View style={{ flex: 1 }}>
-                          <View style={styles.cardTopRow}>
-                            <Text style={styles.cardCodeText}>{rp.ticketCode}</Text>
-                            <View style={[styles.statusPill, { backgroundColor: '#F1F5F9' }]}>
-                              <Text style={[styles.statusPillText, { color: '#475569' }]}>{rp.status}</Text>
-                            </View>
-                          </View>
-                          <Text style={styles.cardMainTitle}>{rp.title}</Text>
-                          <Text style={styles.cardLocationText}>
-                            KTV: {rp.assignedTech?.fullName || 'Chưa giao'} • {formatDateTime(rp.createdAt)}
-                          </Text>
-                        </View>
-                      </View>
-                    ))
-                  )}
-                </View>
-              )}
-            </ScrollView>
-
-            {/* CỘT PHẢI: QUẢN LÝ TÀI KHOẢN CƯ DÂN */}
-            <ScrollView style={styles.bmbRightInspector} showsVerticalScrollIndicator={false}>
-              <View style={styles.cardTopRow}>
-                <Text style={styles.bmbPanelBlueTitle}>{translate("Danh sách Cư dân")}</Text>
-                <TouchableOpacity
-                  style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12 }]}
-                  onPress={() => {
-                    setSelectedResident(null);
-                    setResidentModalError(null);
-                    setResidentForm({
-                      fullName: '',
-                      phone: '',
-                      email: '',
-                      apartmentCode: selectedApartment?.apartmentCode || 'G101',
-                      buildingBlock: selectedApartment?.buildingBlock || 'Tòa G',
-                      floorNumber: selectedApartment?.floorNumber || 1,
-                      residencyRole: 'TENANT',
-                      moveInDate: new Date().toISOString().slice(0, 10),
-                      moveOutDate: '',
-                      isRepresentative: false,
-                    });
-                    setResidentModalMode('create');
-                  }}
-                >
-                  <Text style={styles.primaryActionBtnText}>+ {translate("Thêm cư dân")}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <TextInput
-                style={[styles.bmbWebInput, { marginVertical: 10 }]}
-                value={residentSearchQuery}
-                onChangeText={setResidentSearchQuery}
-                placeholder={translate("Tìm kiếm theo tên, SĐT, căn hộ...")}
-                placeholderTextColor="#94A3B8"
-              />
-
-              {residentsList
-                .filter((r) =>
-                  !residentSearchQuery ||
-                  r.fullName?.toLowerCase().includes(residentSearchQuery.toLowerCase()) ||
-                  r.phone?.includes(residentSearchQuery) ||
-                  r.apartmentCode?.toLowerCase().includes(residentSearchQuery.toLowerCase())
-                )
-                .map((res) => {
-                  const roleLabel = res.residencyRole === 'OWNER' ? 'Chủ sở hữu' : res.residencyRole === 'MEMBER' ? 'Thành viên hộ' : 'Khách thuê';
-                  const roleColor = res.residencyRole === 'OWNER' ? '#D97706' : res.residencyRole === 'MEMBER' ? '#7C3AED' : '#2563EB';
-                  const roleBg = res.residencyRole === 'OWNER' ? '#FEF3C7' : res.residencyRole === 'MEMBER' ? '#F3E8FF' : '#EFF6FF';
-
-                  return (
-                    <View key={res.id} style={[styles.bmbRadioTicketBox, { marginBottom: 8 }]}>
-                      <View style={styles.cardTopRow}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                            {res.fullName}
-                          </Text>
-                          <View style={[styles.statusPill, { backgroundColor: roleBg }]}>
-                            <Text style={[styles.statusPillText, { color: roleColor, fontWeight: '600' }]}>{roleLabel}</Text>
-                          </View>
-                        </View>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                          {res.isActivated === false && (
-                            <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
-                              <Text style={[styles.statusPillText, { color: '#D97706' }]}>
-                                {translate('Chờ OTP')}
-                              </Text>
-                            </View>
-                          )}
-                          <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
-                            <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
-                              {res.isActive ? translate('Hoạt động') : translate('Đã khóa')}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-                      <Text style={styles.cardLocationText}>
-                        SĐT: {res.phone} • {res.email ? `Email: ${res.email} • ` : ''}Căn: {res.apartmentCode || 'Chưa gán'}
-                      </Text>
-                      {res.moveInDate && (
-                        <Text style={[styles.cardLocationText, { fontSize: 11, color: '#64748B', marginTop: 2 }]}>
-                          Ngày vào: {res.moveInDate} {res.moveOutDate ? `• Rời: ${res.moveOutDate}` : ''}
-                        </Text>
-                      )}
-
-                      <View style={[styles.rowBetween, { marginTop: 8 }]}>
-                        <TouchableOpacity
-                          style={styles.technicianEditButton}
-                          onPress={() => {
-                            setSelectedResident(res);
-                            setResidentModalError(null);
-                            setResidentForm({
-                              fullName: res.fullName,
-                              phone: res.phone,
-                              email: res.email || '',
-                              apartmentCode: res.apartmentCode || 'G101',
-                              buildingBlock: res.buildingBlock || 'Tòa G',
-                              floorNumber: res.floorNumber || 1,
-                              residencyRole: res.residencyRole || (res.isRepresentative ? 'OWNER' : 'TENANT'),
-                              moveInDate: res.moveInDate || new Date().toISOString().slice(0, 10),
-                              moveOutDate: res.moveOutDate || '',
-                              isRepresentative: Boolean(res.isRepresentative),
-                            });
-                            setResidentModalMode('edit');
-                          }}
-                        >
-                          <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={[styles.technicianEditButton, { borderColor: '#D97706' }]}
-                          onPress={() => {
-                            setSelectedResident(res);
-                            setNewPasswordInput('');
-                            setResidentModalMode('reset_password');
-                          }}
-                        >
-                          <Text style={[styles.technicianEditButtonText, { color: '#D97706' }]}>
-                            {translate('Đặt lại MK')}
-                          </Text>
-                        </TouchableOpacity>
-
-                        {res.apartmentCode && (
-                          <TouchableOpacity
-                            style={[styles.technicianDeleteButton, { borderColor: '#D97706' }]}
-                            onPress={() => handleResidentDeparture(res.id)}
-                          >
-                            <Text style={[styles.technicianDeleteButtonText, { color: '#D97706' }]}>
-                              {translate('Chuyển đi')}
-                            </Text>
-                          </TouchableOpacity>
-                        )}
-
-                        <TouchableOpacity
-                          style={[styles.technicianDeleteButton, { borderColor: '#EF4444', backgroundColor: '#FEF2F2' }]}
-                          onPress={() => handleDeleteResident(res.id, res.fullName)}
-                        >
-                          <Text style={[styles.technicianDeleteButtonText, { color: '#DC2626' }]}>
-                            {translate('Xóa tài khoản')}
-                          </Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  );
-                })}
-            </ScrollView>
-          </View>
-        )}
-
-        {/* ==================================================================== */}
-        {/* MÀN HÌNH 04B BMB: QUẢN LÝ CHẤM CÔNG KỸ THUẬT VIÊN (GPS & CAMERA)      */}
-        {/* ==================================================================== */}
-        {bmbNavTab === 'ATTENDANCE' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-              {/* Tiêu đề & Nút làm mới */}
-              <View style={styles.cardTopRow}>
-                <View>
-                  <Text style={styles.bmbPageTitle}>{translate("Quản lý Chấm công Kỹ thuật viên")}</Text>
-                  <Text style={styles.bmbPageSubtitle}>
-                    {translate("Giám sát GPS, ảnh camera nhận diện ca trực, xét duyệt ngoại lệ & tính lương minh bạch (50.000 VNĐ/giờ)")}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.primaryActionBtn, { backgroundColor: '#2563EB', paddingVertical: 8, paddingHorizontal: 16 }]}
-                  onPress={() => fetchBmbAttendance()}
-                >
-                  <Text style={styles.primaryActionBtnText}>🔄 {translate("Làm mới dữ liệu")}</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Hàng KPI Thống kê Chấm công */}
-              <View style={styles.bmbKpiRow}>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Tổng lượt chấm công")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#0F172A' }]}>{bmbAttendanceStats.totalLogs}</Text>
-                </View>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Hợp lệ / Đã duyệt")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#16A34A' }]}>{bmbAttendanceStats.verifiedCount}</Text>
-                </View>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Đi muộn / Về sớm")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#D97706' }]}>{bmbAttendanceStats.lateCount}</Text>
-                </View>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Chờ BMB xem xét")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: bmbAttendanceStats.pendingReviewCount > 0 ? '#DC2626' : '#64748B' }]}>
-                    {bmbAttendanceStats.pendingReviewCount}
-                  </Text>
-                </View>
-                <View style={styles.bmbKpiCard}>
-                  <Text style={styles.bmbKpiLabel}>{translate("Tổng giờ tính lương")}</Text>
-                  <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>{bmbAttendanceStats.totalBillableHours}h</Text>
-                </View>
-              </View>
-
-              {/* Cảnh báo bất thường từ Backend */}
-              {bmbAnomalies.length > 0 && (
-                <View style={[styles.cleanInfoCard, { borderColor: '#F59E0B', backgroundColor: '#FFFBEB', marginBottom: 14, padding: 12 }]}>
-                  <Text style={{ fontWeight: '700', color: '#B45309', fontSize: 13.5 }}>⚠️ {translate("Cảnh báo chấm công cần xử lý:")}</Text>
-                  {bmbAnomalies.map((anom, idx) => (
-                    <Text key={idx} style={{ fontSize: 12.5, color: '#B45309', marginTop: 3 }}>• {anom}</Text>
-                  ))}
-                </View>
-              )}
-
-              {/* THANH BỘ LỌC ĐA NĂNG (Ngày, Tháng, KTV, Tòa nhà, Trạng thái) */}
-              <View style={[styles.whiteSectionCard, { marginBottom: 14, padding: 14 }]}>
-                <Text style={[styles.cardBlockTitle, { fontSize: 14, marginBottom: 8 }]}>🔍 {translate("Bộ lọc tra cứu chấm công")}</Text>
-
-                {/* Dòng 1: Lọc Ngày, Tháng, Tòa nhà */}
-                <View style={{ flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 10, marginBottom: 10 }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Lọc theo ngày (YYYY-MM-DD):")}</Text>
-                    <View style={{ flexDirection: 'row', gap: 6 }}>
-                      <TextInput
-                        style={[styles.bmbWebInput, { flex: 1, paddingVertical: 6, fontSize: 12.5 }]}
-                        value={bmbAttendanceFilterDate}
-                        onChangeText={(val) => {
-                          setBmbAttendanceFilterDate(val);
-                          void fetchBmbAttendance({ date: val });
-                        }}
-                        placeholder="VD: 2026-11-08"
-                        placeholderTextColor="#94A3B8"
-                      />
-                      <TouchableOpacity
-                        style={[styles.bmbFilterChip, { justifyContent: 'center', marginBottom: 0 }]}
-                        onPress={() => {
-                          const today = new Date().toISOString().slice(0, 10);
-                          setBmbAttendanceFilterDate(today);
-                          void fetchBmbAttendance({ date: today });
-                        }}
-                      >
-                        <Text style={styles.bmbFilterChipText}>{translate("Hôm nay")}</Text>
-                      </TouchableOpacity>
-                      {bmbAttendanceFilterDate ? (
-                        <TouchableOpacity
-                          style={[styles.bmbFilterChip, { justifyContent: 'center', marginBottom: 0, backgroundColor: '#F1F5F9' }]}
-                          onPress={() => {
-                            setBmbAttendanceFilterDate('');
-                            void fetchBmbAttendance({ date: '' });
-                          }}
-                        >
-                          <Text style={[styles.bmbFilterChipText, { color: '#DC2626' }]}>✕</Text>
-                        </TouchableOpacity>
-                      ) : null}
+                    <View style={styles.rowCenter}>
+                      <RealTimeClock style={{ marginRight: 8 }} />
+                      <Text style={styles.bmbDateLabel}>{new Date().toLocaleDateString('vi-VN')}</Text>
                     </View>
                   </View>
 
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Lọc theo tháng (YYYY-MM):")}</Text>
+                  {/* 4 Thẻ KPI */}
+                  <View style={styles.bmbKpiRow}>
+                    <View style={styles.bmbKpiCard}>
+                      <Text style={styles.bmbKpiLabel}>{translate("Chờ duyệt AI")}</Text>
+                      <Text style={[styles.bmbKpiNumber, { color: '#EA580C' }]}>
+                        {String(bmbPendingCount).padStart(2, '0')}
+                      </Text>
+                    </View>
+
+                    <View style={styles.bmbKpiCard}>
+                      <Text style={styles.bmbKpiLabel}>{translate("Đã phân công")}</Text>
+                      <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>
+                        {String(bmbAssignedCount).padStart(2, '0')}
+                      </Text>
+                    </View>
+
+                    <View style={styles.bmbKpiCard}>
+                      <Text style={styles.bmbKpiLabel}>{translate("Đang xử lý")}</Text>
+                      <Text style={[styles.bmbKpiNumber, { color: '#4F46E5' }]}>
+                        {String(bmbInProgressCount).padStart(2, '0')}
+                      </Text>
+                    </View>
+
+                    <View style={styles.bmbKpiCard}>
+                      <Text style={styles.bmbKpiLabel}>{translate("Hoàn thành/Đóng")}</Text>
+                      <Text style={[styles.bmbKpiNumber, { color: '#16A34A' }]}>
+                        {bmbCompletedCount + bmbClosedCount}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Thanh tìm kiếm */}
+                  <View style={styles.searchBarBox}>
                     <TextInput
-                      style={[styles.bmbWebInput, { paddingVertical: 6, fontSize: 12.5 }]}
-                      value={bmbAttendanceFilterMonth}
-                      onChangeText={(val) => {
-                        setBmbAttendanceFilterMonth(val);
-                        void fetchBmbAttendance({ month: val });
-                      }}
-                      placeholder="VD: 2026-11"
+                      style={styles.searchBarInput}
+                      placeholder={translate("Tìm mã sự cố, căn hộ hoặc thiết bị...")}
                       placeholderTextColor="#94A3B8"
+                      value={searchQuery}
+                      onChangeText={setSearchQuery}
                     />
                   </View>
 
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Tòa nhà:")}</Text>
-                    <View style={{ flexDirection: 'row', gap: 4 }}>
-                      {['ALL', 'Tòa S1', 'Tòa S2', 'Tòa S3'].map((b) => (
-                        <TouchableOpacity
-                          key={b}
-                          style={[
-                            styles.bmbFilterChip,
-                            bmbAttendanceFilterBuilding === b && styles.bmbFilterChipActive,
-                            { paddingHorizontal: 8, paddingVertical: 5, marginBottom: 0 }
-                          ]}
-                          onPress={() => {
-                            setBmbAttendanceFilterBuilding(b);
-                            void fetchBmbAttendance({ buildingBlock: b });
-                          }}
-                        >
-                          <Text style={[
-                            styles.bmbFilterChipText,
-                            bmbAttendanceFilterBuilding === b && styles.bmbFilterChipTextActive,
-                            { fontSize: 11.5 }
-                          ]}>
-                            {b === 'ALL' ? translate('Tất cả') : b}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </View>
-                </View>
-
-                {/* Dòng 2: Lọc theo KTV */}
-                <View style={{ marginBottom: 10 }}>
-                  <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Kỹ thuật viên:")}</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                    <View style={{ flexDirection: 'row', gap: 4 }}>
-                      <TouchableOpacity
-                        style={[
-                          styles.bmbFilterChip,
-                          bmbAttendanceFilterTech === 'ALL' && styles.bmbFilterChipActive,
-                          { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
-                        ]}
-                        onPress={() => {
-                          setBmbAttendanceFilterTech('ALL');
-                          void fetchBmbAttendance({ techId: 'ALL' });
-                        }}
-                      >
-                        <Text style={[
-                          styles.bmbFilterChipText,
-                          bmbAttendanceFilterTech === 'ALL' && styles.bmbFilterChipTextActive,
-                          { fontSize: 12 }
-                        ]}>
-                          {translate("Tất cả KTV")}
-                        </Text>
-                      </TouchableOpacity>
-                      {technicians.map((t) => (
-                        <TouchableOpacity
-                          key={t.id}
-                          style={[
-                            styles.bmbFilterChip,
-                            bmbAttendanceFilterTech === t.id && styles.bmbFilterChipActive,
-                            { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
-                          ]}
-                          onPress={() => {
-                            setBmbAttendanceFilterTech(t.id);
-                            void fetchBmbAttendance({ techId: t.id });
-                          }}
-                        >
-                          <Text style={[
-                            styles.bmbFilterChipText,
-                            bmbAttendanceFilterTech === t.id && styles.bmbFilterChipTextActive,
-                            { fontSize: 12 }
-                          ]}>
-                            {t.fullName}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </ScrollView>
-                </View>
-
-                {/* Dòng 3: Chip lọc theo Trạng thái */}
-                <View>
-                  <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Trạng thái xác minh & Đi muộn:")}</Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+                  {/* Hàng lọc trạng thái */}
+                  <View style={styles.chipWrapRow}>
                     {[
-                      { key: 'ALL', label: 'Tất cả trạng thái' },
-                      { key: 'VERIFIED', label: '✓ Hợp lệ / Đã duyệt' },
-                      { key: 'PENDING_REVIEW', label: '⏳ Chờ BMB xem xét' },
-                      { key: 'LATE', label: '⚠️ Đi muộn / Về sớm' },
-                      { key: 'EXCEPTION', label: '🚨 Có ngoại lệ GPS / Ảnh' },
-                      { key: 'REJECTED', label: '✕ Bị từ chối' },
-                    ].map((st) => (
+                      { key: 'ALL', label: `${translate('Tất cả')} (${tickets.length})` },
+                      {
+                        key: 'PENDING',
+                        label: `${translate('Chờ duyệt AI')} (${bmbPendingCount})`,
+                      },
+                      {
+                        key: 'ASSIGNED',
+                        label: `${translate('Đã phân công')} (${bmbAssignedCount})`,
+                      },
+                      {
+                        key: 'IN_PROGRESS',
+                        label: `${translate('Đang xử lý')} (${bmbInProgressCount})`,
+                      },
+                      {
+                        key: 'COMPLETED',
+                        label: `${translate('Hoàn thành')} (${bmbCompletedCount})`,
+                      },
+                      { key: 'CLOSED', label: `${translate('Đã đóng')} (${bmbClosedCount})` },
+                    ].map((tab: any) => (
                       <TouchableOpacity
-                        key={st.key}
+                        key={tab.key}
                         style={[
                           styles.bmbFilterChip,
-                          bmbAttendanceFilterStatus === st.key && styles.bmbFilterChipActive,
-                          { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
+                          bmbTicketFilter === tab.key && styles.bmbFilterChipActive,
                         ]}
-                        onPress={() => {
-                          setBmbAttendanceFilterStatus(st.key);
-                          void fetchBmbAttendance({ status: st.key });
-                        }}
+                        onPress={() => setBmbTicketFilter(tab.key)}
                       >
-                        <Text style={[
-                          styles.bmbFilterChipText,
-                          bmbAttendanceFilterStatus === st.key && styles.bmbFilterChipTextActive,
-                          { fontSize: 11.5 }
-                        ]}>
-                          {translate(st.label)}
+                        <Text
+                          style={[
+                            styles.bmbFilterChipText,
+                            bmbTicketFilter === tab.key && styles.bmbFilterChipTextActive,
+                          ]}
+                        >
+                          {tab.label}
                         </Text>
                       </TouchableOpacity>
                     ))}
                   </View>
-                </View>
-              </View>
 
-              {/* THÔNG TIN VÀ XÁC NHẬN TỌA ĐỘ TÒA NHÀ BMB */}
-              <View style={[styles.whiteSectionCard, { borderLeftWidth: 4, borderLeftColor: bmbBuildingLocation?.isConfirmed ? '#16A34A' : '#F59E0B' }]}>
-                <View style={styles.cardTopRow}>
-                  <View style={{ flex: 1, paddingRight: 8 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <Text style={[styles.cardBlockTitle, { marginBottom: 0 }]}>
-                        🏢 {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix SkyView'}
-                      </Text>
-                      <View style={[
-                        styles.statusPill,
-                        bmbBuildingLocation?.isConfirmed ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEF3C7' }
-                      ]}>
-                        <Text style={[
-                          styles.statusPillText,
-                          bmbBuildingLocation?.isConfirmed ? { color: '#15803D' } : { color: '#B45309' }
-                        ]}>
-                          {bmbBuildingLocation?.isConfirmed ? '✓ Đã xác nhận chuẩn' : '⚠️ Chưa xác nhận tọa độ'}
+                  <View style={[styles.cardTopRow, { marginVertical: 8 }]}>
+                    <Text style={{ fontWeight: '700', color: '#0F172A', fontSize: 13.5 }}>
+                      {translate("Tất cả sự cố (")}{filteredBmbTickets.length})
+                    </Text>
+                    <Text style={{ color: '#64748B', fontSize: 12.5 }}>{translate("Mới nhất trước")}</Text>
+                  </View>
+
+                  {/* Danh sách Thẻ Sự cố */}
+                  {filteredBmbTickets.map((t) => {
+                    const isSelected = bmbSelectedTicket?.id === t.id;
+                    const isPending = t.status === 'PENDING';
+                    const isAssigned = t.status === 'ASSIGNED';
+                    const isHigh =
+                      (t.finalPriority || t.aiSuggestedPriority) === 'HIGH';
+                    const isAnalyzing = t.aiStatus === 'ANALYZING';
+                    const isManualReview =
+                      t.aiStatus === 'MANUAL_REVIEW' ||
+                      (!isAnalyzing && (t.isAiFallbackManual || !t.aiSuggestedCategory));
+
+                    return (
+                      <TouchableOpacity
+                        key={t.id}
+                        style={[
+                          styles.resTicketCard,
+                          isSelected && { borderColor: '#2563EB', borderWidth: 2 },
+                        ]}
+                        onPress={() => handleSelectBmbTicket(t)}
+                      >
+                        <View style={styles.cardTopRow}>
+                          <View style={[styles.rowCenter, { flexWrap: 'wrap', gap: 4 }]}>
+                            <Text
+                              style={[
+                                styles.cardCodeText,
+                                isSelected && { color: '#2563EB', fontWeight: '800' },
+                              ]}
+                            >
+                              {t.ticketCode}
+                            </Text>
+                            {t.isAnonymous && (
+                              <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#CBD5E1' }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', color: '#475569' }}>👤 {translate('Ẩn danh')}</Text>
+                              </View>
+                            )}
+                            {t.locationVerificationStatus === 'VERIFIED' ? (
+                              <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                              </View>
+                            ) : t.locationVerificationStatus === 'UNVERIFIED' ? (
+                              <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4, borderWidth: 1, borderColor: '#FDE68A' }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                              </View>
+                            ) : null}
+                            {isHigh && (
+                              <Text style={styles.bmbUrgentInlineDot}> {translate("Khẩn cấp")}</Text>
+                            )}
+                          </View>
+                          <View
+                            style={[
+                              styles.statusPill,
+                              isPending
+                                ? { backgroundColor: '#FEF3C7' }
+                                : isAssigned
+                                  ? { backgroundColor: '#DBEAFE' }
+                                  : { backgroundColor: '#E0E7FF' },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.statusPillText,
+                                isPending
+                                  ? { color: '#D97706' }
+                                  : isAssigned
+                                    ? { color: '#2563EB' }
+                                    : { color: '#4F46E5' },
+                              ]}
+                            >
+                              {isPending
+                                ? translate('Chờ duyệt')
+                                : isAssigned
+                                  ? translate('Đã phân công')
+                                  : t.status === 'IN_PROGRESS'
+                                    ? translate('Đang xử lý')
+                                    : translate('Đã đóng')}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <Text style={styles.cardMainTitle}>{t.title}</Text>
+                        <Text style={styles.cardLocationText}>{t.locationNote}</Text>
+
+                        <View style={[styles.cardTopRow, { marginTop: 10, marginBottom: 0 }]}>
+                          {isAnalyzing ? (
+                            <View style={{ backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, flexDirection: 'row', alignItems: 'center' }}>
+                              <Text style={{ fontSize: 11, fontWeight: '700', color: '#2563EB' }}>
+                                ⏳ {translate("Đang phân tích")}
+                              </Text>
+                            </View>
+                          ) : isManualReview && !t.finalCategory ? (
+                            <View style={styles.bmbAiTimeoutTag}>
+                              <Text style={styles.bmbAiTimeoutText}>
+                                ⚠️ {translate("Cần đánh giá thủ công")}</Text>
+                            </View>
+                          ) : (
+                            <View style={styles.bmbAiPurpleMiniTag}>
+                              <Text style={styles.bmbAiPurpleMiniText}>
+                                {translate(t.finalCategory ? "BMB đã duyệt" : "Gemini:")}{' '}
+                                {translate(CATEGORY_SHORT_VN[
+                                  t.finalCategory || t.aiSuggestedCategory
+                                ] || 'Điện - Nước')}
+                              </Text>
+                            </View>
+                          )}
+                          <Text style={{ fontSize: 11.5, color: '#64748B' }}>
+                            {formatDateTime(t.createdAt)}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* Thanh phân trang */}
+                  <View style={[styles.cardTopRow, { marginTop: 8, paddingBottom: 24 }]}>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>
+                      {translate("Hiển thị ")}{filteredBmbTickets.length} {translate("trong tổng số ")}{tickets.length} {translate("sự cố")}</Text>
+                    <View style={styles.rowCenter}>
+                      <View style={styles.pageNumActive}>
+                        <Text style={{ color: '#2563EB', fontWeight: '800', fontSize: 12 }}>
+                          1
                         </Text>
                       </View>
+                      <Text style={styles.pageNumInactive}>2</Text>
+                      <Text style={styles.pageNumInactive}>3</Text>
+                      <Text style={styles.pageNumInactive}>&gt;</Text>
                     </View>
-                    <Text style={{ fontSize: 12, color: '#64748B', marginTop: 4 }}>
-                      📍 {bmbBuildingLocation?.buildingAddress || '123 Đường Nguyễn Hữu Thọ, Q7, TP.HCM'} • GPS: ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính: {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
+                  </View>
+                </ScrollView>
+              )}
+
+              {/* CỘT PHẢI: CHI TIẾT SỰ CỐ & TRỢ LÝ QUYẾT ĐỊNH GEMINI FLASH AI */}
+              {(!isMobileLayout || bmbSelectedTicket) && (
+                <ScrollView
+                  style={[styles.bmbRightInspector, isMobileLayout && { flex: 1, borderRadius: 10, padding: 14 }]}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {bmbSelectedTicket ? (
+                    <View>
+                      {isMobileLayout && (
+                        <TouchableOpacity
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#EFF6FF', borderRadius: 8, alignSelf: 'flex-start' }}
+                          onPress={() => setBmbSelectedTicket(null)}
+                        >
+                          <Text style={{ fontSize: 13.5, fontWeight: '700', color: '#2563EB' }}>
+                            ← {translate('Quay lại danh sách sự cố')}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      <View style={styles.cardTopRow}>
+                        <Text style={styles.bmbInspectorTitle}>
+                          {translate("Chi tiết sự cố ")}{bmbSelectedTicket.ticketCode}
+                        </Text>
+                        <TouchableOpacity onPress={() => setBmbSelectedTicket(null)}>
+                          <Text style={{ fontSize: 18, color: '#64748B', fontWeight: '700', padding: 4 }}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={[styles.cardTopRow, { marginBottom: 14 }]}>
+                        <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
+                          <Text style={[styles.statusPillText, { color: '#D97706' }]}>
+                            {bmbSelectedTicket.status === 'PENDING'
+                              ? translate('Chờ duyệt')
+                              : translate(bmbSelectedTicket.status)}
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: '#64748B' }}>
+                          {formatDateTime(bmbSelectedTicket.createdAt)}</Text>
+                      </View>
+
+                      <Text style={styles.bmbSmallSectionHead}>
+                        {bmbSelectedTicket.isAnonymous
+                          ? translate("THÔNG TIN KHÁCH BÁO CÁO (ẨN DANH)")
+                          : translate("THÔNG TIN CƯ DÂN PHẢN ÁNH")}
+                      </Text>
+
+                      {bmbSelectedTicket.isAnonymous ? (
+                        <View style={{
+                          backgroundColor: '#F8FAFC',
+                          borderWidth: 1,
+                          borderColor: '#E2E8F0',
+                          borderRadius: 8,
+                          padding: 10,
+                          marginTop: 6,
+                          marginBottom: 8,
+                        }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
+                              👤 {translate("Khách vãng lai (Báo cáo ẩn danh qua QR)")}
+                            </Text>
+                            {bmbSelectedTicket.locationVerificationStatus === 'VERIFIED' ? (
+                              <View style={{ backgroundColor: '#ECFDF5', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#A7F3D0' }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#059669' }}>📍 {translate('Đã xác minh vị trí')}</Text>
+                              </View>
+                            ) : (
+                              <View style={{ backgroundColor: '#FFFBEB', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, borderWidth: 1, borderColor: '#FDE68A' }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#D97706' }}>⚠️ {translate('Chưa xác minh vị trí')}</Text>
+                              </View>
+                            )}
+                          </View>
+                          <Text style={{ fontSize: 12, color: '#475569', fontStyle: 'italic' }}>
+                            {bmbSelectedTicket.locationVerificationReason || translate("Chưa có thông tin đối chiếu vị trí")}
+                          </Text>
+                        </View>
+                      ) : null}
+
+                      <View style={[styles.cardTopRow, { marginTop: 6 }]}>
+                        <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#0F172A', flex: 1 }}>
+                          {bmbSelectedTicket.locationNote}
+                        </Text>
+                        <View style={styles.qrVerifiedPill}>
+                          <Text style={styles.qrVerifiedPillText}>{translate("Đã xác thực QR")}</Text>
+                        </View>
+                      </View>
+
+                      <Text style={styles.bmbInspectorDesc}>
+                        {bmbSelectedTicket.description}
+                      </Text>
+
+                      {/* KHU VỰC ẢNH HIỆN TRƯỜNG (CHỈ LẤY ẢNH SCENE_BEFORE BAN ĐẦU) */}
+                      {(() => {
+                        const residentMedia = getResidentReportedMedia(bmbSelectedTicket);
+
+                        return (
+                          <View style={{ marginVertical: 12 }}>
+                            <View style={[styles.cardTopRow, { marginBottom: 8 }]}>
+                              <Text style={styles.bmbSmallSectionHead}>
+                                {translate("ẢNH HIỆN TRƯỜNG")}
+                              </Text>
+                              {residentMedia.length > 0 && (
+                                <View style={[styles.statusPill, { backgroundColor: '#EFF6FF', paddingHorizontal: 8, paddingVertical: 2 }]}>
+                                  <Text style={[styles.statusPillText, { color: '#2563EB', fontWeight: '700', fontSize: 11.5 }]}>
+                                    {residentMedia.length} {translate("ảnh")}
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+
+                            {residentMedia.length === 0 ? (
+                              <View style={{
+                                backgroundColor: '#F8FAFC',
+                                borderWidth: 1,
+                                borderColor: '#E2E8F0',
+                                borderRadius: 8,
+                                paddingVertical: 12,
+                                paddingHorizontal: 14,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 10,
+                              }}>
+                                <Text style={{ fontSize: 18 }}>📷</Text>
+                                <Text style={{ fontSize: 13, color: '#64748B', fontStyle: 'italic' }}>
+                                  {translate("Chưa có ảnh hiện trường.")}
+                                </Text>
+                              </View>
+                            ) : (
+                              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                                {residentMedia.map((item, idx) => (
+                                  <TouchableOpacity
+                                    key={item.id || idx}
+                                    style={{
+                                      width: 76,
+                                      height: 76,
+                                      borderRadius: 8,
+                                      borderWidth: 1.5,
+                                      borderColor: '#CBD5E1',
+                                      overflow: 'hidden',
+                                      backgroundColor: '#F1F5F9',
+                                      position: 'relative',
+                                    }}
+                                    activeOpacity={0.8}
+                                    onPress={() => openReportedPhoto(residentMedia, idx)}
+                                  >
+                                    {failedPhotoUrls[item.url] ? (
+                                      <View style={{ flex: 1, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center', padding: 4 }}>
+                                        <Text style={{ fontSize: 16 }}>⚠️</Text>
+                                        <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center', fontWeight: '600' }}>
+                                          {translate("Lỗi tải ảnh")}
+                                        </Text>
+                                      </View>
+                                    ) : (
+                                      <Image
+                                        source={{ uri: item.url }}
+                                        style={{ width: '100%', height: '100%' }}
+                                        resizeMode="cover"
+                                        onError={() => setFailedPhotoUrls((prev) => ({ ...prev, [item.url]: true }))}
+                                      />
+                                    )}
+                                    <View style={{
+                                      position: 'absolute',
+                                      bottom: 3,
+                                      right: 3,
+                                      backgroundColor: 'rgba(15, 23, 42, 0.72)',
+                                      borderRadius: 4,
+                                      paddingHorizontal: 4,
+                                      paddingVertical: 1,
+                                    }}>
+                                      <Text style={{ color: '#FFFFFF', fontSize: 9.5, fontWeight: '700' }}>
+                                        🔍 {idx + 1}
+                                      </Text>
+                                    </View>
+                                  </TouchableOpacity>
+                                ))}
+                              </View>
+                            )}
+                          </View>
+                        );
+                      })()}
+
+                      {/* HỘP GỢI Ý TỪ GEMINI FLASH AI */}
+                      <View style={styles.bmbGeminiPurpleCard}>
+                        <View style={styles.cardTopRow}>
+                          <Text style={styles.bmbGeminiCardTitle}>
+                            {translate(
+                              bmbSelectedTicket.aiStatus === 'ANALYZING'
+                                ? "Trợ lý AI Gemini"
+                                : bmbSelectedTicket.aiStatus === 'MANUAL_REVIEW' || bmbSelectedTicket.isAiFallbackManual
+                                  ? "Phân loại sự cố"
+                                  : "Gợi ý phân loại từ Gemini"
+                            )}
+                          </Text>
+                          <View
+                            style={[
+                              styles.bmbLatencyGreenPill,
+                              bmbSelectedTicket.aiStatus === 'ANALYZING' && {
+                                backgroundColor: '#EFF6FF',
+                                borderColor: '#BFDBFE',
+                              },
+                              (bmbSelectedTicket.aiStatus === 'MANUAL_REVIEW' ||
+                                bmbSelectedTicket.isAiFallbackManual) && {
+                                backgroundColor: '#FEF2F2',
+                                borderColor: '#FECACA',
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.bmbLatencyGreenText,
+                                bmbSelectedTicket.aiStatus === 'ANALYZING' && { color: '#2563EB' },
+                                (bmbSelectedTicket.aiStatus === 'MANUAL_REVIEW' ||
+                                  bmbSelectedTicket.isAiFallbackManual) && { color: '#DC2626' },
+                              ]}
+                            >
+                              {translate(
+                                bmbSelectedTicket.aiStatus === 'ANALYZING'
+                                  ? "Đang phân tích"
+                                  : bmbSelectedTicket.aiStatus === 'MANUAL_REVIEW' ||
+                                    bmbSelectedTicket.isAiFallbackManual ||
+                                    !bmbSelectedTicket.aiSuggestedCategory
+                                    ? "Cần đánh giá thủ công"
+                                    : "Đã phân tích"
+                              )}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <Text style={styles.bmbAiSummaryBullet}>
+                          {translate("Tóm tắt: ")}
+                          {bmbSelectedTicket.aiStatus === 'ANALYZING'
+                            ? translate("AI đang phân tích mô tả và ảnh hiện trường trong nền. BMB có thể phân loại và giao việc ngay mà không cần chờ AI.")
+                            : bmbSelectedTicket.aiSummary?.replace(/^\[Trợ lý AI ResiFix\]\s*/, '') ||
+                            bmbSelectedTicket.description ||
+                            bmbSelectedTicket.title}
+                        </Text>
+
+                        {bmbSelectedTicket.aiDiscrepancyNotes && (
+                          <View style={{ backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 8, padding: 8, marginTop: 8 }}>
+                            <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#B45309' }}>
+                              ⚠️ {translate("Điểm mâu thuẫn / Cần kiểm tra:")}
+                            </Text>
+                            <Text style={{ fontSize: 11.5, color: '#92400E', marginTop: 2 }}>
+                              {bmbSelectedTicket.aiDiscrepancyNotes}
+                            </Text>
+                          </View>
+                        )}
+
+                        {bmbSelectedTicket.aiSuggestedCategory && bmbSelectedTicket.aiSuggestedPriority && (
+                          <Text style={styles.bmbRiskR1Hint}>
+                            {translate("Gợi ý ban đầu")} · {translate(CATEGORY_VN[bmbSelectedTicket.aiSuggestedCategory])} · {translate(PRIORITY_VN[bmbSelectedTicket.aiSuggestedPriority])}
+                          </Text>
+                        )}
+
+                        <Text style={styles.fieldLabel}>{translate("Danh mục sự cố")}</Text>
+                        <TouchableOpacity
+                          style={styles.bmbDropdownBox}
+                          onPress={() => {
+                            const nextIdx =
+                              (CATEGORIES_LIST.indexOf(bmbCategory) + 1) %
+                              CATEGORIES_LIST.length;
+                            setBmbCategory(CATEGORIES_LIST[nextIdx]);
+                          }}
+                        >
+                          <Text style={styles.bmbDropdownValue}>
+                            {translate(CATEGORY_VN[bmbCategory] || 'Hệ thống Điện - Nước')}
+                          </Text>
+                          <Text style={{ color: '#64748B' }}>⌄</Text>
+                        </TouchableOpacity>
+
+                        <Text style={styles.fieldLabel}>{translate("Mức độ ưu tiên")}</Text>
+                        <TouchableOpacity
+                          style={[
+                            styles.bmbDropdownBox,
+                            bmbPriority === 'HIGH' && {
+                              borderColor: '#EF4444',
+                              backgroundColor: '#FEF2F2',
+                            },
+                          ]}
+                          onPress={() => {
+                            const nextIdx =
+                              (PRIORITIES_LIST.indexOf(bmbPriority) + 1) %
+                              PRIORITIES_LIST.length;
+                            setBmbPriority(PRIORITIES_LIST[nextIdx]);
+                          }}
+                        >
+                          <Text
+                            style={[
+                              styles.bmbDropdownValue,
+                              bmbPriority === 'HIGH' && { color: '#DC2626', fontWeight: '800' },
+                            ]}
+                          >
+                            {translate(PRIORITY_VN[bmbPriority])}
+                          </Text>
+                          <Text style={{ color: bmbPriority === 'HIGH' ? '#DC2626' : '#64748B' }}>⌄</Text>
+                        </TouchableOpacity>
+
+                        <Text style={styles.bmbRiskR1Hint}>
+                          {translate("BMB có thể điều chỉnh gợi ý của AI trước khi duyệt.")}
+                        </Text>
+                      </View>
+
+                      {/* GỢI Ý KỸ THUẬT VIÊN THEO CHUYÊN MÔN & KHOẢNG CÁCH */}
+                      <View style={{ marginTop: 14, marginBottom: 4 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <Text style={[styles.fieldLabel, { marginTop: 0, marginBottom: 0 }]}>
+                            {translate("Kỹ thuật viên gợi ý")}
+                          </Text>
+                          {loadingSuggestions && (
+                            <Text style={{ fontSize: 11, color: '#64748B' }}>
+                              {translate("Đang tìm KTV phù hợp...")}
+                            </Text>
+                          )}
+                        </View>
+
+                        {!bmbCategory ? (
+                          <Text style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic', marginBottom: 6 }}>
+                            {translate("Chọn danh mục để xem gợi ý kỹ thuật viên")}
+                          </Text>
+                        ) : suggestedTechnicians.length > 0 ? (
+                          <View style={{ gap: 8, marginBottom: 8 }}>
+                            {suggestedTechnicians.map((tech: any) => {
+                              const isSelected = bmbTechId === tech.id;
+                              return (
+                                <TouchableOpacity
+                                  key={tech.id}
+                                  onPress={() => setBmbTechId(tech.id)}
+                                  style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    padding: 10,
+                                    borderRadius: 8,
+                                    borderWidth: 1.5,
+                                    borderColor: isSelected ? '#2563EB' : '#E2E8F0',
+                                    backgroundColor: isSelected ? '#EFF6FF' : '#F8FAFC',
+                                  }}
+                                >
+                                  <View style={{ flex: 1, marginRight: 8 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                      <Text style={{ fontSize: 13, fontWeight: '700', color: isSelected ? '#1E40AF' : '#1E293B' }}>
+                                        {tech.fullName}
+                                      </Text>
+                                      <View style={{ backgroundColor: '#DBEAFE', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                                        <Text style={{ fontSize: 10.5, fontWeight: '600', color: '#1E40AF' }}>
+                                          {tech.specialtyLabel || tech.specialty}
+                                        </Text>
+                                      </View>
+                                    </View>
+                                    <Text style={{ fontSize: 11.5, color: isSelected ? '#1D4ED8' : '#64748B', marginTop: 3 }}>
+                                      {tech.reason}
+                                    </Text>
+                                  </View>
+                                  <View style={{
+                                    paddingHorizontal: 8,
+                                    paddingVertical: 4,
+                                    borderRadius: 6,
+                                    backgroundColor: isSelected ? '#2563EB' : '#FFFFFF',
+                                    borderWidth: 1,
+                                    borderColor: isSelected ? '#2563EB' : '#CBD5E1',
+                                  }}>
+                                    <Text style={{ fontSize: 11, fontWeight: '700', color: isSelected ? '#FFFFFF' : '#475569' }}>
+                                      {isSelected ? translate('✓ Đang chọn') : translate('Chọn')}
+                                    </Text>
+                                  </View>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        ) : suggestionsMessage ? (
+                          <Text style={{ fontSize: 12, color: '#64748B', fontStyle: 'italic', marginBottom: 6 }}>
+                            {suggestionsMessage}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      {/* Phân công Kỹ thuật viên đang trực */}
+                      <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
+                        {translate("Phân công kỹ thuật viên")}
+                      </Text>
+                      {(() => {
+                        const selTech = technicians.find((x) => x.id === bmbTechId) || technicians[0];
+                        const isSelTechEligible = Boolean(
+                          selTech &&
+                          selTech.isEligibleForAssignment !== false &&
+                          selTech.isOnDuty &&
+                          selTech.isCheckedIn &&
+                          !selTech.isCheckedOut &&
+                          !selTech.onLeave
+                        );
+                        return (
+                          <>
+                            <TouchableOpacity
+                              style={[
+                                styles.bmbDropdownBox,
+                                !isSelTechEligible && { borderColor: '#EF4444', backgroundColor: '#FEF2F2' },
+                              ]}
+                              onPress={() => {
+                                if (technicians.length > 0) {
+                                  const idx = technicians.findIndex((x) => x.id === bmbTechId);
+                                  const nextTech = technicians[(idx + 1) % technicians.length];
+                                  if (nextTech) setBmbTechId(nextTech.id);
+                                }
+                              }}
+                            >
+                              <Text style={[styles.bmbDropdownValue, !isSelTechEligible && { color: '#DC2626' }]}>
+                                {selTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa có KTV'))}{' '}
+                                ({selTech?.shiftName || 'Ca sáng'})
+                                {!isSelTechEligible ? ' [Ngoài ca / Đã kết thúc]' : ' [Đang trực]'}
+                              </Text>
+                              <Text style={{ color: !isSelTechEligible ? '#DC2626' : '#64748B' }}>⌄</Text>
+                            </TouchableOpacity>
+
+                            {!isSelTechEligible && (
+                              <Text style={{ fontSize: 11.5, color: '#DC2626', marginTop: 4, fontWeight: '600' }}>
+                                ⚠️ Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.
+                              </Text>
+                            )}
+
+                            <View style={[styles.techDivider, { marginTop: 16 }]} />
+
+                            <TouchableOpacity
+                              style={[
+                                styles.bmbWebLoginBtn,
+                                (loading || !bmbSelectedTicket || !bmbTechId || !isSelTechEligible) && { opacity: 0.6 },
+                                !isSelTechEligible && { backgroundColor: '#94A3B8' },
+                              ]}
+                              onPress={() => handleBmbDispatch()}
+                              disabled={loading || !bmbSelectedTicket || !bmbTechId || !isSelTechEligible}
+                            >
+                              <Text style={styles.bmbWebLoginBtnText}>
+                                {translate("Xác nhận & Giao việc")}
+                              </Text>
+                            </TouchableOpacity>
+                          </>
+                        );
+                      })()}
+                    </View>
+                  ) : (
+                    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 60 }}>
+                      <Text style={{ fontSize: 32, marginBottom: 12 }}>📋</Text>
+                      <Text style={{ fontSize: 15, fontWeight: '700', color: '#334155' }}>
+                        {translate('Chưa chọn sự cố nào')}
+                      </Text>
+                      <Text style={{ fontSize: 13, color: '#64748B', textAlign: 'center', marginTop: 4, maxWidth: 260 }}>
+                        {translate('Vui lòng bấm chọn một sự cố từ danh sách bên trái để xem chi tiết và phê duyệt.')}
+                      </Text>
+                    </View>
+                  )}
+                </ScrollView>
+              )}
+            </View>
+          )}
+
+          {/* ==================================================================== */}
+          {/* MÀN HÌNH 02 BMB: KỸ THUẬT VIÊN CA TRỰC & WORKLOAD (FIGMA 02 BMB)     */}
+          {/* ==================================================================== */}
+          {bmbNavTab === 'TECHNICIANS' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              {/* CỘT GIỮA: DANH SÁCH KỸ THUẬT VIÊN & TẢI CÔNG VIỆC */}
+              <ScrollView
+                style={styles.bmbCenterColumn}
+                showsVerticalScrollIndicator={false}
+              >
+                {toastMsg && (
+                  <View style={[styles.toastBanner, { marginHorizontal: 0 }]}>
+                    <Text style={styles.toastText}>{toastMsg}</Text>
+                  </View>
+                )}
+                <Text style={styles.bmbPageTitle}>
+                  {translate("Kỹ thuật viên & Tải công việc")}</Text>
+                <Text style={styles.bmbPageSubtitle}>
+                  {translate("Theo dõi và điều phối công việc cho kỹ thuật viên")}</Text>
+
+                <TouchableOpacity style={styles.technicianAddButton} onPress={openCreateTechnician}>
+                  <Text style={styles.technicianAddButtonText}>+ {translate('Thêm kỹ thuật viên')}</Text>
+                </TouchableOpacity>
+
+                <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
+                  <View style={styles.bmbStatPill}>
+                    <Text style={styles.bmbStatPillText}>{translate('Đang trực:')} {onDutyTechnicianCount} KTV</Text>
+                  </View>
+                  <View style={styles.bmbStatPill}>
+                    <Text style={styles.bmbStatPillText}>{translate('Đang xử lý:')} {openTechnicianWorkCount} việc</Text>
+                  </View>
+                  <View style={styles.bmbStatPill}>
+                    <Text style={styles.bmbStatPillText}>{translate('Sẵn sàng:')} {availableTechnicianCount} KTV</Text>
+                  </View>
+                </View>
+
+                {technicians.length === 0 ? (
+                  <View style={{ padding: 32, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 12, marginTop: 16 }}>
+                    <Text style={{ color: '#64748B', fontSize: 13, fontWeight: '500' }}>
+                      {translate('Chưa có kỹ thuật viên nào đang hoạt động trong hệ thống.')}
                     </Text>
-                    {bmbBuildingLocation?.isConfirmed ? (
-                      <Text style={{ fontSize: 11, color: '#16A34A', marginTop: 3 }}>
-                        ✓ Người xác nhận: {bmbBuildingLocation?.confirmedByName || 'BMB Quản lý'} ({formatDateTime(bmbBuildingLocation?.confirmedAt)})
+                  </View>
+                ) : (
+                  technicians.map((tech: any, idx: number) => {
+                    const activeJobsCount =
+                      tech.assignedTickets?.length ??
+                      (idx === 0 ? 1 : idx === 1 ? 3 : 0);
+                    const isHighLoad = activeJobsCount >= 3;
+                    const isAssignSelected = bmbAssignTargetTech?.id === tech.id;
+                    const isViewingSelected = bmbViewingWorkloadTech?.id === tech.id;
+                    const initials = tech.fullName
+                      .split(' ')
+                      .slice(-2)
+                      .map((w: string) => w[0])
+                      .join('');
+
+                    return (
+                      <View
+                        key={tech.id}
+                        style={[
+                          styles.resTicketCard,
+                          isAssignSelected && { borderColor: '#2563EB', borderWidth: 2 },
+                          isViewingSelected &&
+                          !isAssignSelected && { borderColor: '#4F46E5', borderWidth: 2 },
+                          !tech.isOnDuty && { backgroundColor: '#F8FAFC', opacity: 0.75 },
+                        ]}
+                      >
+                        <View style={styles.rowCenter}>
+                          <View style={styles.bmbTechInitialsCircle}>
+                            <Text style={styles.bmbTechInitialsText}>{initials}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.cardMainTitle}>
+                              {tech.fullName} ({tech.phone})
+                            </Text>
+                            {(() => {
+                              const isEligible = tech.isEligibleForAssignment !== false && tech.isOnDuty && tech.isCheckedIn && !tech.isCheckedOut && !tech.onLeave;
+                              return (
+                                <View
+                                  style={[
+                                    styles.statusPill,
+                                    {
+                                      alignSelf: 'flex-start',
+                                      backgroundColor: isEligible ? '#DCFCE7' : '#FEE2E2',
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={{
+                                      fontSize: 11.5,
+                                      fontWeight: '700',
+                                      color: isEligible ? '#15803D' : '#DC2626',
+                                    }}
+                                  >
+                                    {isEligible
+                                      ? translate('Đang trực')
+                                      : tech.onLeave
+                                        ? translate('Nghỉ phép')
+                                        : tech.isCheckedOut
+                                          ? translate('Đã kết thúc ca')
+                                          : translate('Ngoài ca')}
+                                  </Text>
+                                </View>
+                              );
+                            })()}
+                          </View>
+                        </View>
+
+                        {tech.isOnDuty && (
+                          <>
+                            <Text style={[styles.cardLocationText, { marginTop: 10 }]}>
+                              {translate('Chuyên môn:')} {tech.specialtyLabel}
+                            </Text>
+                            <Text
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: '600',
+                                color: isHighLoad ? '#D97706' : '#059669',
+                                marginTop: 6,
+                              }}
+                            >
+                              {activeJobsCount === 0
+                                ? translate('0 việc (Đang rảnh)')
+                                : isHighLoad
+                                  ? `${translate('Đang xử lý:')} ${activeJobsCount} việc (${translate('Tải cao')})`
+                                  : `${translate('Đang xử lý:')} ${activeJobsCount} việc`}
+                            </Text>
+
+                            <View style={[styles.rowBetween, { marginTop: 12, gap: 10 }]}>
+                              {(() => {
+                                const isEligible = tech.isEligibleForAssignment !== false && tech.isOnDuty && tech.isCheckedIn && !tech.isCheckedOut && !tech.onLeave;
+                                return (
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.bmbWorkloadBtn,
+                                      isAssignSelected && styles.bmbWorkloadBtnBlueActive,
+                                      !isEligible && { opacity: 0.5, backgroundColor: '#F1F5F9' },
+                                    ]}
+                                    onPress={() => {
+                                      if (!isEligible) {
+                                        showToast('Kỹ thuật viên đã kết thúc ca hoặc không còn trực. Vui lòng chọn kỹ thuật viên khác.');
+                                        return;
+                                      }
+                                      setBmbAssignTargetTech(tech);
+                                      setBmbTechId(tech.id);
+                                    }}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.bmbWorkloadBtnText,
+                                        isAssignSelected && { color: '#FFFFFF' },
+                                        !isEligible && { color: '#94A3B8' },
+                                      ]}
+                                    >
+                                      {!isEligible
+                                        ? translate('Không thể giao')
+                                        : isAssignSelected
+                                          ? translate('Đang chọn giao việc')
+                                          : translate('Giao việc')}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })()}
+
+                              {activeJobsCount > 0 && (
+                                <TouchableOpacity
+                                  style={[
+                                    styles.bmbWorkloadBtn,
+                                    isViewingSelected && styles.bmbWorkloadBtnIndigoActive,
+                                  ]}
+                                  onPress={() => setBmbViewingWorkloadTech(tech)}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.bmbWorkloadBtnText,
+                                      isViewingSelected && { color: '#FFFFFF' },
+                                    ]}
+                                  >
+                                    {isViewingSelected
+                                      ? `${translate('Đang xem')} (${activeJobsCount})`
+                                      : `${translate('Xem việc')} (${activeJobsCount})`}
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          </>
+                        )}
+
+                        <View style={styles.technicianActions}>
+                          <TouchableOpacity
+                            style={styles.technicianEditButton}
+                            onPress={() => openEditTechnician(tech)}
+                          >
+                            <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.technicianDeleteButton}
+                            onPress={() => {
+                              setSelectedTechnician(tech);
+                              setTechnicianFormError(null);
+                              setTechnicianDialogMode('delete');
+                            }}
+                          >
+                            <Text style={styles.technicianDeleteButtonText}>{translate('Xóa')}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  }))}
+              </ScrollView>
+
+              {/* CỘT PHẢI: 2 KHỐI XẾP DỌC (GIAO VIỆC MỚI + VIỆC ĐANG LÀM CỦA KTV) */}
+              <ScrollView
+                style={styles.bmbRightInspector}
+                showsVerticalScrollIndicator={false}
+              >
+                {/* Khối trên: Giao việc mới cho KTV */}
+                <View style={styles.bmbBlueOutlinePanel}>
+                  <Text style={styles.bmbPanelBlueTitle}>
+                    {translate("Giao việc cho:")}{' '}
+                    {bmbAssignTargetTech?.fullName || (technicians.length > 0 ? technicians[0]?.fullName : translate('Chưa chọn KTV'))}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 12 }}>
+                    {translate("Chuyên môn:")}{' '}
+                    {bmbAssignTargetTech?.specialtyLabel || 'Điện - Nước'}
+                  </Text>
+
+                  <Text style={styles.fieldLabel}>
+                    {translate("Chọn sự cố chờ phân công:")}</Text>
+
+                  {pendingTicketsForRadio.map((pt) => {
+                    const isRadioChecked = bmbRadioTicketId === pt.id;
+                    const isHigh = (pt.finalPriority || pt.aiSuggestedPriority) === 'HIGH';
+                    return (
+                      <TouchableOpacity
+                        key={pt.id}
+                        style={[
+                          styles.bmbRadioTicketBox,
+                          isRadioChecked && styles.bmbRadioTicketBoxSelected,
+                        ]}
+                        onPress={() => setBmbRadioTicketId(pt.id)}
+                      >
+                        <View style={styles.rowCenter}>
+                          <View style={[
+                            styles.radioDotCircle,
+                            isRadioChecked && styles.radioDotCircleActive,
+                          ]}>
+                            {isRadioChecked && <View style={styles.radioDotInner} />}
+                          </View>
+                          <Text style={{ fontWeight: '700', color: '#2563EB', fontSize: 13, marginRight: 8 }}>
+                            {pt.ticketCode}
+                          </Text>
+                          {isHigh && (
+                            <View style={styles.bmbMiniOrangeBadge}>
+                              <Text style={styles.bmbMiniOrangeText}>{translate('Ưu tiên cao')}</Text>
+                            </View>
+                          )}
+                          <View style={styles.bmbMiniPurpleBadge}>
+                            <Text style={styles.bmbMiniPurpleText}>
+                              {CATEGORY_SHORT_VN[pt.aiSuggestedCategory] || 'Điện - Nước'}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={{ fontSize: 12.5, color: '#0F172A', marginTop: 6 }}>
+                          {pt.title} ({pt.locationNote})
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {pendingTicketsForRadio.length === 0 && (
+                    <Text style={styles.techInfoLine}>{translate('Hiện không có sự cố đang chờ phân công.')}</Text>
+                  )}
+
+                  <Text style={styles.fieldLabel}>{translate("Ghi chú điều phối (Tùy chọn):")}</Text>
+                  <TextInput
+                    style={styles.bmbWebInput}
+                    value={bmbNote}
+                    onChangeText={setBmbNote}
+                    placeholder={translate("Mang theo dụng cụ cần thiết...")}
+                    placeholderTextColor="#94A3B8"
+                  />
+
+                  <TouchableOpacity
+                    style={[
+                      styles.bmbWebLoginBtn,
+                      { marginTop: 14 },
+                      (loading || pendingTicketsForRadio.length === 0 || !bmbAssignTargetTech?.id || !bmbRadioTicketId) && { opacity: 0.6 },
+                    ]}
+                    onPress={() =>
+                      handleBmbDispatch(
+                        bmbRadioTicketId,
+                        bmbAssignTargetTech?.id || bmbTechId
+                      )
+                    }
+                    disabled={loading || pendingTicketsForRadio.length === 0 || !bmbAssignTargetTech?.id || !bmbRadioTicketId}
+                  >
+                    <Text style={styles.bmbWebLoginBtnText}>
+                      {translate("Xác nhận giao việc")}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Khối dưới: Việc đang làm của KTV */}
+                <View style={[styles.bmbBlueOutlinePanel, { borderColor: '#E2E8F0', marginTop: 14 }]}>
+                  <Text style={[styles.bmbPanelBlueTitle, { color: '#0F172A' }]}>
+                    {translate("Việc đang làm của")}:{' '}
+                    {bmbViewingWorkloadTech?.fullName || (technicians[0]?.fullName ?? 'Kỹ thuật viên')}
+                    {viewingTechTickets.length > 0 ? ` (${viewingTechTickets.length})` : ''}
+                  </Text>
+
+                  {viewingTechTickets.length > 0 ? (
+                    viewingTechTickets.map((vTicket) => (
+                      <View key={vTicket.id} style={styles.bmbActiveJobItem}>
+                        <Text style={{ fontWeight: '700', fontSize: 13, color: '#0F172A' }}>
+                          {vTicket.ticketCode} • {vTicket.title}
+                        </Text>
+                        <Text style={{ fontSize: 12, color: '#64748B', marginTop: 4 }}>
+                          {vTicket.status === 'IN_PROGRESS' ? translate('Đang xử lý') : translate('Đã phân công')} • {vTicket.locationNote}
+                        </Text>
+                      </View>
+                    ))
+                  ) : (
+                    <Text style={[styles.techInfoLine, { marginTop: 8 }]}>
+                      {translate('Không có sự cố nào đang thực hiện.')}
+                    </Text>
+                  )}
+                </View>
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ==================================================================== */}
+          {/* MÀN HÌNH 03 BMB: TRUNG TÂM THÔNG BÁO & CLOUD STATUS (FIGMA 03 BMB)   */}
+          {/* ==================================================================== */}
+          {bmbNavTab === 'NOTIFICATIONS' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              {/* CỘT GIỮA: TRUNG TÂM THÔNG BÁO & NHẬT KÝ HỆ THỐNG */}
+              <ScrollView
+                style={styles.bmbCenterColumn}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.cardTopRow}>
+                  <View>
+                    <Text style={styles.bmbPageTitle}>
+                      {translate("Trung tâm Thông báo & Nhật ký Hệ thống")}</Text>
+                    <Text style={styles.bmbPageSubtitle}>
+                      {translate("Cập nhật thời gian thực")}</Text>
+                  </View>
+                  <TouchableOpacity onPress={handleMarkAllNotificationsRead}>
+                    <Text style={{ color: '#1D61E7', fontWeight: '700', fontSize: 13 }}>
+                      {translate("Đánh dấu đã đọc tất cả")}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={[styles.chipWrapRow, { marginTop: 12 }]}>
+                  {[
+                    { key: 'ALL', label: `${translate('Tất cả')} (${notifications.length})` },
+                    { key: 'UNREAD', label: `${translate('Chưa đọc')} (${unreadCount})` },
+                    { key: 'URGENT', label: `${translate('Khẩn cấp')} (${urgentNotificationCount})` },
+                    { key: 'TECH', label: `${translate('Kỹ thuật viên')} (${technicianNotificationCount})` },
+                  ].map((tab: any) => (
+                    <TouchableOpacity
+                      key={tab.key}
+                      style={[
+                        styles.bmbFilterChip,
+                        bmbNotiFilter === tab.key && styles.bmbFilterChipActive,
+                      ]}
+                      onPress={() => setBmbNotiFilter(tab.key)}
+                    >
+                      <Text
+                        style={[
+                          styles.bmbFilterChipText,
+                          bmbNotiFilter === tab.key && styles.bmbFilterChipTextActive,
+                        ]}
+                      >
+                        {tab.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {filteredBmbNotifications.length === 0 ? (
+                  <View style={styles.technicianEmptyState}>
+                    <Text style={styles.technicianEmptyText}>
+                      {translate('Không có thông báo phù hợp.')}
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    {(() => {
+                      const sorted = [...filteredBmbNotifications].sort(
+                        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                      );
+                      const displayed = showAllBmbNotifications ? sorted : sorted.slice(0, 5);
+                      return (
+                        <>
+                          {displayed.map((notification) => (
+                            <TouchableOpacity
+                              key={notification.id}
+                              style={[
+                                styles.resTicketCard,
+                                !notification.isRead && { borderColor: '#60A5FA', borderWidth: 1.5 },
+                              ]}
+                              onPress={() => handleOpenNotification(notification)}
+                            >
+                              <View style={styles.cardTopRow}>
+                                <Text style={styles.cardMainTitle}>{notification.title}</Text>
+                                {!notification.isRead && <View style={styles.blueUnreadDot} />}
+                              </View>
+                              <Text style={styles.cardLocationText}>{notification.message}</Text>
+                              {notification.ticket?.ticketCode && (
+                                <Text style={styles.cardLocationText}>
+                                  {translate('Sự cố liên quan:')} {notification.ticket.ticketCode}
+                                </Text>
+                              )}
+                              <Text style={styles.techInfoLine}>
+                                {formatDateTime(notification.createdAt)}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                          {sorted.length > 5 && (
+                            <TouchableOpacity
+                              style={{
+                                paddingVertical: 10,
+                                alignItems: 'center',
+                                backgroundColor: '#F8FAFC',
+                                borderRadius: 8,
+                                marginTop: 8,
+                                borderWidth: 1,
+                                borderColor: '#E2E8F0',
+                              }}
+                              onPress={() => setShowAllBmbNotifications(!showAllBmbNotifications)}
+                            >
+                              <Text style={{ fontSize: 13, fontWeight: '700', color: '#2563EB' }}>
+                                {showAllBmbNotifications
+                                  ? translate('Thu gọn')
+                                  : `${translate('Xem thêm')} (${sorted.length - 5})`}
+                              </Text>
+                            </TouchableOpacity>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+              </ScrollView>
+
+              {/* CỘT PHẢI: THÔNG TIN VẬN HÀNH & LIÊN HỆ KHẨN CẤP */}
+              <ScrollView
+                style={styles.bmbRightInspector}
+                showsVerticalScrollIndicator={false}
+              >
+                <Text style={styles.bmbInspectorTitle}>{translate('Thông tin vận hành')}</Text>
+
+                {/* Khối Quản lý Liên hệ Khẩn cấp */}
+                <View style={[styles.cleanInfoCard, { borderColor: '#DC2626', marginTop: 12 }]}>
+                  <View style={styles.rowBetween}>
+                    <Text style={[styles.cleanInfoCardTitle, { color: '#DC2626' }]}>
+                      🚨 {translate('Liên hệ quản lý khẩn cấp')}
+                    </Text>
+                    <TouchableOpacity onPress={() => setEditingEmergencyContact(!editingEmergencyContact)}>
+                      <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 12 }}>
+                        {editingEmergencyContact ? translate('Hủy') : translate('Chỉnh sửa')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {!editingEmergencyContact ? (
+                    <Text style={[styles.cardLocationText, { marginTop: 4, fontWeight: '600', color: '#0F172A' }]}>
+                      {emergencyContact.managerName} – {emergencyContact.managerPhone}
+                    </Text>
+                  ) : (
+                    <View style={{ marginTop: 8 }}>
+                      <Text style={styles.fieldLabel}>{translate('Họ và tên:')}</Text>
+                      <TextInput
+                        style={[styles.bmbWebInput, { marginBottom: 6 }]}
+                        value={emergencyNameInput}
+                        onChangeText={setEmergencyNameInput}
+                        placeholder="Đặng Thành Quyết"
+                      />
+                      <Text style={styles.fieldLabel}>{translate('Số điện thoại:')}</Text>
+                      <TextInput
+                        style={[styles.bmbWebInput, { marginBottom: 8 }]}
+                        value={emergencyPhoneInput}
+                        onChangeText={(v) => setEmergencyPhoneInput(v.replace(/[^\d]/g, '').slice(0, 10))}
+                        placeholder="0913402803"
+                        keyboardType="phone-pad"
+                        maxLength={10}
+                      />
+                      <TouchableOpacity
+                        style={[styles.primaryActionBtn, { paddingVertical: 8 }]}
+                        onPress={handleSaveEmergencyContact}
+                        disabled={loading}
+                      >
+                        <Text style={styles.primaryActionBtnText}>{translate('Lưu liên hệ')}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.cleanInfoCard}>
+                  <Text style={styles.cleanInfoCardTitle}>{translate('Trợ lý AI')}</Text>
+                  <Text style={styles.cleanInfoCardDesc}>
+                    {translate('Gợi ý phân loại tự động và đánh giá độ khẩn cấp.')}
+                  </Text>
+                </View>
+
+                <View style={styles.cleanInfoCard}>
+                  <Text style={styles.cleanInfoCardTitle}>{translate('Hộp thư thông báo')}</Text>
+                  <Text style={styles.cleanInfoCardDesc}>
+                    {translate('Lưu trữ các cập nhật trạng thái sự cố và phân công.')}
+                  </Text>
+                </View>
+
+                <View style={styles.techDivider} />
+
+                <Text style={styles.cardBlockTitle}>{translate('Hoạt động hôm nay')}</Text>
+                <View style={styles.bmbStatRow}>
+                  <Text style={styles.bmbStatLabel}>{translate('Sự cố mới:')}</Text>
+                  <Text style={styles.bmbStatValue}>{ticketsCreatedToday}</Text>
+                </View>
+                <View style={styles.bmbStatRow}>
+                  <Text style={styles.bmbStatLabel}>{translate('Thông báo mới:')}</Text>
+                  <Text style={styles.bmbStatValue}>{notificationsCreatedToday}</Text>
+                </View>
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ==================================================================== */}
+          {/* MÀN HÌNH 04 BMB: QUẢN LÝ CĂN HỘ & CƯ DÂN                             */}
+          {/* ==================================================================== */}
+          {bmbNavTab === 'APARTMENTS' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              {/* CỘT TRÁI: DANH SÁCH CĂN HỘ & LỊCH SỬ SỬA CHỮA */}
+              <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
+                <View style={styles.cardTopRow}>
+                  <View>
+                    <Text style={styles.bmbPageTitle}>{translate("Quản lý Căn hộ & Lịch sử sửa chữa")}</Text>
+                    <Text style={styles.bmbPageSubtitle}>
+                      {translate("Theo dõi cư dân, mã QR phòng và lịch sử bảo trì")}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Bộ lọc Tòa (G, F, E), Tầng (1..5) và Trạng thái */}
+                <View style={{ backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginVertical: 10, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#1E293B' }}>
+                      🏢 {translate("Hệ thống 75 Căn hộ")} • {translate("Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng")}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: '#64748B' }}>
+                      {apartments.filter((a) => a.residents && a.residents.length > 0).length}/{apartments.length || 75} {translate("phòng đang ở")}
+                    </Text>
+                  </View>
+
+                  {/* Hàng 1: Lọc theo Tòa */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tòa:")}</Text>
+                    {(['ALL', 'G', 'F', 'E'] as const).map((b) => {
+                      const isSel = apartmentFilterBlock === b;
+                      const label = b === 'ALL' ? 'Tất cả 3 tòa (75)' : `Tòa ${b} (25)`;
+                      return (
+                        <TouchableOpacity
+                          key={b}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                            borderRadius: 6,
+                            backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => setApartmentFilterBlock(b)}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            {translate(label)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Hàng 2: Lọc theo Tầng */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Tầng:")}</Text>
+                    {(['ALL', 1, 2, 3, 4, 5] as const).map((fl) => {
+                      const isSel = apartmentFilterFloor === fl;
+                      const label = fl === 'ALL' ? 'Tất cả tầng' : `Tầng ${fl}`;
+                      return (
+                        <TouchableOpacity
+                          key={String(fl)}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                            borderRadius: 6,
+                            backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => setApartmentFilterFloor(fl)}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            {translate(label)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Hàng 3: Lọc theo Trạng thái */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748B', width: 60 }}>{translate("Trạng thái:")}</Text>
+                    {(['ALL', 'OCCUPIED', 'VACANT'] as const).map((st) => {
+                      const isSel = apartmentFilterStatus === st;
+                      const label = st === 'ALL' ? 'Tất cả' : st === 'OCCUPIED' ? 'Đang ở' : 'Còn trống';
+                      return (
+                        <TouchableOpacity
+                          key={st}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                            borderRadius: 6,
+                            backgroundColor: isSel ? '#2563EB' : '#FFFFFF',
+                            borderWidth: 1,
+                            borderColor: isSel ? '#1D4ED8' : '#CBD5E1',
+                          }}
+                          onPress={() => setApartmentFilterStatus(st)}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : '#334155' }}>
+                            {translate(label)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                {/* Danh sách thẻ căn hộ hiển thị mã QR thật và thông tin chuẩn */}
+                <View style={[styles.chipWrapRow, { marginVertical: 8 }]}>
+                  {apartments
+                    .filter((apt) => {
+                      if (apartmentFilterBlock !== 'ALL' && !apt.apartmentCode.startsWith(apartmentFilterBlock)) return false;
+                      if (apartmentFilterFloor !== 'ALL' && apt.floorNumber !== apartmentFilterFloor) return false;
+                      const hasResidents = apt.residents && apt.residents.length > 0;
+                      if (apartmentFilterStatus === 'OCCUPIED' && !hasResidents) return false;
+                      if (apartmentFilterStatus === 'VACANT' && hasResidents) return false;
+                      return true;
+                    })
+                    .map((apt) => {
+                      const isSel = selectedApartment?.apartmentCode === apt.apartmentCode;
+                      const hasResidents = apt.residents && apt.residents.length > 0;
+                      const qrVal = apt.roomQrCode || apt.qrCode || `ROOM:${apt.apartmentCode}`;
+                      return (
+                        <TouchableOpacity
+                          key={apt.apartmentCode}
+                          style={[
+                            styles.bmbRadioTicketBox,
+                            isSel && styles.bmbRadioTicketBoxSelected,
+                            { minWidth: 260, flex: 1, margin: 4, padding: 12 }
+                          ]}
+                          onPress={() => handleSelectApartment(apt)}
+                        >
+                          {/* Hàng trên: Tên phòng và Huy hiệu trạng thái */}
+                          <View style={styles.cardTopRow}>
+                            <Text style={{ fontWeight: '900', fontSize: 16, color: '#1E40AF' }}>
+                              Căn {apt.apartmentCode}
+                            </Text>
+                            <View style={[styles.statusPill, { backgroundColor: hasResidents ? '#DCFCE7' : '#F1F5F9' }]}>
+                              <Text style={[styles.statusPillText, { color: hasResidents ? '#15803D' : '#64748B', fontSize: 11 }]}>
+                                {translate(hasResidents ? `Đang ở (${apt.residents.length})` : 'Còn trống')}
+                              </Text>
+                            </View>
+                          </View>
+
+                          {/* Thân thẻ: Thông tin bên trái, Mã QR đen trắng bên phải */}
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+                            <View style={{ flex: 1, paddingRight: 8 }}>
+                              <Text style={[styles.cardLocationText, { fontWeight: '700', color: '#0F172A' }]}>
+                                {apt.buildingBlock} • Tầng {apt.floorNumber}
+                              </Text>
+                              <Text style={[styles.cardLocationText, { fontSize: 11.5, color: '#64748B', marginTop: 2 }]} numberOfLines={1}>
+                                {apt.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
+                              </Text>
+                              <Text style={[styles.techInfoLine, { marginTop: 4, fontSize: 12 }]}>
+                                Chủ hộ: {apt.representative?.fullName || 'Chưa gán'}
+                              </Text>
+                              <Text style={{ fontSize: 11, color: '#7C3AED', fontWeight: '700', marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }}>
+                                {qrVal}
+                              </Text>
+                            </View>
+
+                            {/* Mã QR thật dạng pixel matrix độc lập */}
+                            <View style={{ alignItems: 'center' }}>
+                              <View style={{ borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 6, padding: 2, backgroundColor: '#FFFFFF' }}>
+                                <QrCodeView value={qrVal} size={58} quietZone={1} />
+                              </View>
+                              <TouchableOpacity
+                                style={{
+                                  marginTop: 4,
+                                  backgroundColor: '#EFF6FF',
+                                  borderWidth: 1,
+                                  borderColor: '#BFDBFE',
+                                  paddingHorizontal: 6,
+                                  paddingVertical: 2,
+                                  borderRadius: 4,
+                                }}
+                                onPress={() => setZoomQrApartment(apt)}
+                              >
+                                <Text style={{ fontSize: 10, fontWeight: '700', color: '#1D4ED8' }}>
+                                  🔍 {translate("Phóng to & In")}
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                </View>
+
+                {/* Modal Phóng to Mã QR Căn hộ & In / Tải file SVG */}
+                {zoomQrApartment && (
+                  <Modal
+                    visible={zoomQrApartment !== null}
+                    transparent
+                    animationType="fade"
+                    onRequestClose={() => setZoomQrApartment(null)}
+                  >
+                    <View style={styles.technicianModalOverlay}>
+                      <View style={[styles.technicianModalCard, { maxWidth: 420, alignItems: 'center' }]}>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#2563EB', letterSpacing: 1, textTransform: 'uppercase' }}>
+                          {translate("Tem mã QR Căn hộ chính thức")}
+                        </Text>
+                        <Text style={{ fontSize: 26, fontWeight: '900', color: '#0F172A', marginTop: 4 }}>
+                          Căn {zoomQrApartment.apartmentCode}
+                        </Text>
+                        <Text style={{ fontSize: 13, color: '#475569', marginTop: 2, textAlign: 'center' }}>
+                          {zoomQrApartment.buildingBlock} • Tầng {zoomQrApartment.floorNumber}
+                        </Text>
+                        <Text style={{ fontSize: 12, color: '#64748B', marginTop: 2, textAlign: 'center' }}>
+                          {zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng'}
+                        </Text>
+
+                        {/* Khung QR to sắc nét */}
+                        <View style={{
+                          width: 236,
+                          height: 236,
+                          marginVertical: 14,
+                          padding: 8,
+                          backgroundColor: '#FFFFFF',
+                          borderWidth: 2,
+                          borderColor: '#0284C7',
+                          borderRadius: 12,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          shadowColor: '#000',
+                          shadowOpacity: 0.08,
+                          shadowRadius: 10,
+                          elevation: 4,
+                        }}>
+                          <QrCodeView
+                            value={zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
+                            size={220}
+                            quietZone={3}
+                          />
+                        </View>
+
+                        {/* Huy hiệu mã QR */}
+                        <View style={{ backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4, marginBottom: 8 }}>
+                          <Text style={{ fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontWeight: '800', fontSize: 14, color: '#1E293B' }}>
+                            {zoomQrApartment.roomQrCode || zoomQrApartment.qrCode || `ROOM:${zoomQrApartment.apartmentCode}`}
+                          </Text>
+                        </View>
+
+                        <Text style={{ fontSize: 12, color: '#166534', backgroundColor: '#DCFCE7', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, marginBottom: 16 }}>
+                          ✓ {translate("Mã QR hoạt động hợp lệ • Gắn liền vĩnh viễn với phòng")}
+                        </Text>
+
+                        {/* Các nút hành động: In, Tải SVG, Đóng */}
+                        <View style={{ width: '100%', gap: 8 }}>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            <TouchableOpacity
+                              style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0284C7', paddingVertical: 10 }]}
+                              onPress={() => {
+                                const bAddress = zoomQrApartment.buildingAddress || 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
+                                const locStr = `${zoomQrApartment.buildingBlock} • Tầng ${zoomQrApartment.floorNumber}`;
+                                printQrCode(zoomQrApartment.apartmentCode, locStr, bAddress);
+                              }}
+                            >
+                              <Text style={styles.primaryActionBtnText}>🖨️ {translate("In tem QR")}</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#0F766E', paddingVertical: 10 }]}
+                              onPress={() => {
+                                downloadQrSvg(zoomQrApartment.apartmentCode);
+                                showToast(translate(`Đã tải file SVG mã QR căn ${zoomQrApartment.apartmentCode}`));
+                              }}
+                            >
+                              <Text style={styles.primaryActionBtnText}>⬇️ {translate("Tải file SVG")}</Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <TouchableOpacity
+                            style={[styles.technicianCancelButton, { width: '100%', paddingVertical: 9, alignItems: 'center' }]}
+                            onPress={() => setZoomQrApartment(null)}
+                          >
+                            <Text style={styles.technicianCancelButtonText}>{translate("Đóng")}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  </Modal>
+                )}
+
+                {/* Lịch sử sửa chữa của căn hộ được chọn */}
+                {selectedApartment && (
+                  <View style={[styles.whiteSectionCard, { marginTop: 14 }]}>
+                    <View style={styles.cardTopRow}>
+                      <View>
+                        <Text style={styles.cardBlockTitle}>
+                          {translate("Lịch sử sửa chữa căn")} {selectedApartment.apartmentCode}
+                        </Text>
+                        <Text style={styles.techDutySub}>
+                          {apartmentRepairsFullHistory ? translate("Toàn bộ lịch sử") : translate("Lịch sử sửa chữa (3 tháng)")}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => handleToggleApartmentRepairsHistory(!apartmentRepairsFullHistory)}
+                      >
+                        <Text style={{ fontSize: 12.5, fontWeight: '700', color: '#2563EB' }}>
+                          {apartmentRepairsFullHistory ? translate("3 tháng gần nhất") : translate("Xem toàn bộ lịch sử")}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {apartmentRepairs.length === 0 ? (
+                      <Text style={[styles.techInfoLine, { marginTop: 10 }]}>
+                        {translate("Không có sự cố nào trong khoảng thời gian này.")}
                       </Text>
                     ) : (
-                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3, fontWeight: '600' }}>
-                        ⚠️ Tọa độ chưa được BMB xác nhận thực địa. Tất cả ca chấm công sẽ tạm gắn cờ CHỜ XÁC MINH để chống gian lận.
-                      </Text>
+                      apartmentRepairs.map((rp) => (
+                        <View key={rp.id} style={[styles.notiBlueItem, { paddingVertical: 10 }]}>
+                          <View style={{ flex: 1 }}>
+                            <View style={styles.cardTopRow}>
+                              <Text style={styles.cardCodeText}>{rp.ticketCode}</Text>
+                              <View style={[styles.statusPill, { backgroundColor: '#F1F5F9' }]}>
+                                <Text style={[styles.statusPillText, { color: '#475569' }]}>{rp.status}</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.cardMainTitle}>{rp.title}</Text>
+                            <Text style={styles.cardLocationText}>
+                              KTV: {rp.assignedTech?.fullName || 'Chưa giao'} • {formatDateTime(rp.createdAt)}
+                            </Text>
+                          </View>
+                        </View>
+                      ))
                     )}
+                  </View>
+                )}
+              </ScrollView>
+
+              {/* CỘT PHẢI: QUẢN LÝ TÀI KHOẢN CƯ DÂN */}
+              <ScrollView style={styles.bmbRightInspector} showsVerticalScrollIndicator={false}>
+                <View style={styles.cardTopRow}>
+                  <Text style={styles.bmbPanelBlueTitle}>{translate("Danh sách Cư dân")}</Text>
+                  <TouchableOpacity
+                    style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12 }]}
+                    onPress={() => {
+                      setSelectedResident(null);
+                      setResidentModalError(null);
+                      setResidentForm({
+                        fullName: '',
+                        phone: '',
+                        email: '',
+                        apartmentCode: selectedApartment?.apartmentCode || 'G101',
+                        buildingBlock: selectedApartment?.buildingBlock || 'Tòa G',
+                        floorNumber: selectedApartment?.floorNumber || 1,
+                        residencyRole: 'TENANT',
+                        moveInDate: new Date().toISOString().slice(0, 10),
+                        moveOutDate: '',
+                        isRepresentative: false,
+                      });
+                      setResidentModalMode('create');
+                    }}
+                  >
+                    <Text style={styles.primaryActionBtnText}>+ {translate("Thêm cư dân")}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TextInput
+                  style={[styles.bmbWebInput, { marginVertical: 10 }]}
+                  value={residentSearchQuery}
+                  onChangeText={setResidentSearchQuery}
+                  placeholder={translate("Tìm kiếm theo tên, SĐT, căn hộ...")}
+                  placeholderTextColor="#94A3B8"
+                />
+
+                {residentsList
+                  .filter((r) =>
+                    !residentSearchQuery ||
+                    r.fullName?.toLowerCase().includes(residentSearchQuery.toLowerCase()) ||
+                    r.phone?.includes(residentSearchQuery) ||
+                    r.apartmentCode?.toLowerCase().includes(residentSearchQuery.toLowerCase())
+                  )
+                  .map((res) => {
+                    const roleLabel = res.residencyRole === 'OWNER' ? 'Chủ sở hữu' : res.residencyRole === 'MEMBER' ? 'Thành viên hộ' : 'Khách thuê';
+                    const roleColor = res.residencyRole === 'OWNER' ? '#D97706' : res.residencyRole === 'MEMBER' ? '#7C3AED' : '#2563EB';
+                    const roleBg = res.residencyRole === 'OWNER' ? '#FEF3C7' : res.residencyRole === 'MEMBER' ? '#F3E8FF' : '#EFF6FF';
+
+                    return (
+                      <View key={res.id} style={[styles.bmbRadioTicketBox, { marginBottom: 8 }]}>
+                        <View style={styles.cardTopRow}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                              {res.fullName}
+                            </Text>
+                            <View style={[styles.statusPill, { backgroundColor: roleBg }]}>
+                              <Text style={[styles.statusPillText, { color: roleColor, fontWeight: '600' }]}>{roleLabel}</Text>
+                            </View>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            {res.isActivated === false && (
+                              <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
+                                <Text style={[styles.statusPillText, { color: '#D97706' }]}>
+                                  {translate('Chờ OTP')}
+                                </Text>
+                              </View>
+                            )}
+                            <View style={[styles.statusPill, res.isActive ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }]}>
+                              <Text style={[styles.statusPillText, res.isActive ? { color: '#15803D' } : { color: '#B91C1C' }]}>
+                                {res.isActive ? translate('Hoạt động') : translate('Đã khóa')}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                        <Text style={styles.cardLocationText}>
+                          SĐT: {res.phone} • {res.email ? `Email: ${res.email} • ` : ''}Căn: {res.apartmentCode || 'Chưa gán'}
+                        </Text>
+                        {res.moveInDate && (
+                          <Text style={[styles.cardLocationText, { fontSize: 11, color: '#64748B', marginTop: 2 }]}>
+                            Ngày vào: {res.moveInDate} {res.moveOutDate ? `• Rời: ${res.moveOutDate}` : ''}
+                          </Text>
+                        )}
+
+                        <View style={[styles.rowBetween, { marginTop: 8 }]}>
+                          <TouchableOpacity
+                            style={styles.technicianEditButton}
+                            onPress={() => {
+                              setSelectedResident(res);
+                              setResidentModalError(null);
+                              setResidentForm({
+                                fullName: res.fullName,
+                                phone: res.phone,
+                                email: res.email || '',
+                                apartmentCode: res.apartmentCode || 'G101',
+                                buildingBlock: res.buildingBlock || 'Tòa G',
+                                floorNumber: res.floorNumber || 1,
+                                residencyRole: res.residencyRole || (res.isRepresentative ? 'OWNER' : 'TENANT'),
+                                moveInDate: res.moveInDate || new Date().toISOString().slice(0, 10),
+                                moveOutDate: res.moveOutDate || '',
+                                isRepresentative: Boolean(res.isRepresentative),
+                              });
+                              setResidentModalMode('edit');
+                            }}
+                          >
+                            <Text style={styles.technicianEditButtonText}>{translate('Sửa')}</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[styles.technicianEditButton, { borderColor: '#D97706' }]}
+                            onPress={() => {
+                              setSelectedResident(res);
+                              setNewPasswordInput('');
+                              setResidentModalMode('reset_password');
+                            }}
+                          >
+                            <Text style={[styles.technicianEditButtonText, { color: '#D97706' }]}>
+                              {translate('Đặt lại MK')}
+                            </Text>
+                          </TouchableOpacity>
+
+                          {res.apartmentCode && (
+                            <TouchableOpacity
+                              style={[styles.technicianDeleteButton, { borderColor: '#D97706' }]}
+                              onPress={() => handleResidentDeparture(res.id)}
+                            >
+                              <Text style={[styles.technicianDeleteButtonText, { color: '#D97706' }]}>
+                                {translate('Chuyển đi')}
+                              </Text>
+                            </TouchableOpacity>
+                          )}
+
+                          <TouchableOpacity
+                            style={[styles.technicianDeleteButton, { borderColor: '#EF4444', backgroundColor: '#FEF2F2' }]}
+                            onPress={() => handleDeleteResident(res.id, res.fullName)}
+                          >
+                            <Text style={[styles.technicianDeleteButtonText, { color: '#DC2626' }]}>
+                              {translate('Xóa tài khoản')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ==================================================================== */}
+          {/* MÀN HÌNH 04B BMB: QUẢN LÝ CHẤM CÔNG KỸ THUẬT VIÊN (GPS & CAMERA)      */}
+          {/* ==================================================================== */}
+          {bmbNavTab === 'ATTENDANCE' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                {/* Tiêu đề & Nút làm mới */}
+                <View style={styles.cardTopRow}>
+                  <View>
+                    <Text style={styles.bmbPageTitle}>{translate("Quản lý Chấm công Kỹ thuật viên")}</Text>
+                    <Text style={styles.bmbPageSubtitle}>
+                      {translate("Giám sát GPS, ảnh camera nhận diện ca trực, xét duyệt ngoại lệ & tính lương minh bạch (50.000 VNĐ/giờ)")}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.primaryActionBtn, { backgroundColor: '#2563EB', paddingVertical: 8, paddingHorizontal: 16 }]}
+                    onPress={() => fetchBmbAttendance()}
+                  >
+                    <Text style={styles.primaryActionBtnText}>🔄 {translate("Làm mới dữ liệu")}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Hàng KPI Thống kê Chấm công */}
+                <View style={styles.bmbKpiRow}>
+                  <View style={styles.bmbKpiCard}>
+                    <Text style={styles.bmbKpiLabel}>{translate("Tổng lượt chấm công")}</Text>
+                    <Text style={[styles.bmbKpiNumber, { color: '#0F172A' }]}>{bmbAttendanceStats.totalLogs}</Text>
+                  </View>
+                  <View style={styles.bmbKpiCard}>
+                    <Text style={styles.bmbKpiLabel}>{translate("Hợp lệ / Đã duyệt")}</Text>
+                    <Text style={[styles.bmbKpiNumber, { color: '#16A34A' }]}>{bmbAttendanceStats.verifiedCount}</Text>
+                  </View>
+                  <View style={styles.bmbKpiCard}>
+                    <Text style={styles.bmbKpiLabel}>{translate("Đi muộn / Về sớm")}</Text>
+                    <Text style={[styles.bmbKpiNumber, { color: '#D97706' }]}>{bmbAttendanceStats.lateCount}</Text>
+                  </View>
+                  <View style={styles.bmbKpiCard}>
+                    <Text style={styles.bmbKpiLabel}>{translate("Chờ BMB xem xét")}</Text>
+                    <Text style={[styles.bmbKpiNumber, { color: bmbAttendanceStats.pendingReviewCount > 0 ? '#DC2626' : '#64748B' }]}>
+                      {bmbAttendanceStats.pendingReviewCount}
+                    </Text>
+                  </View>
+                  <View style={styles.bmbKpiCard}>
+                    <Text style={styles.bmbKpiLabel}>{translate("Tổng giờ tính lương")}</Text>
+                    <Text style={[styles.bmbKpiNumber, { color: '#2563EB' }]}>{bmbAttendanceStats.totalBillableHours}h</Text>
+                  </View>
+                </View>
+
+                {/* Cảnh báo bất thường từ Backend */}
+                {bmbAnomalies.length > 0 && (
+                  <View style={[styles.cleanInfoCard, { borderColor: '#F59E0B', backgroundColor: '#FFFBEB', marginBottom: 14, padding: 12 }]}>
+                    <Text style={{ fontWeight: '700', color: '#B45309', fontSize: 13.5 }}>⚠️ {translate("Cảnh báo chấm công cần xử lý:")}</Text>
+                    {bmbAnomalies.map((anom, idx) => (
+                      <Text key={idx} style={{ fontSize: 12.5, color: '#B45309', marginTop: 3 }}>• {anom}</Text>
+                    ))}
+                  </View>
+                )}
+
+                {/* THANH BỘ LỌC ĐA NĂNG (Ngày, Tháng, KTV, Tòa nhà, Trạng thái) */}
+                <View style={[styles.whiteSectionCard, { marginBottom: 14, padding: 14 }]}>
+                  <Text style={[styles.cardBlockTitle, { fontSize: 14, marginBottom: 8 }]}>🔍 {translate("Bộ lọc tra cứu chấm công")}</Text>
+
+                  {/* Dòng 1: Lọc Ngày, Tháng, Tòa nhà */}
+                  <View style={{ flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 10, marginBottom: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Lọc theo ngày (YYYY-MM-DD):")}</Text>
+                      <View style={{ flexDirection: 'row', gap: 6 }}>
+                        <TextInput
+                          style={[styles.bmbWebInput, { flex: 1, paddingVertical: 6, fontSize: 12.5 }]}
+                          value={bmbAttendanceFilterDate}
+                          onChangeText={(val) => {
+                            setBmbAttendanceFilterDate(val);
+                            void fetchBmbAttendance({ date: val });
+                          }}
+                          placeholder="VD: 2026-11-08"
+                          placeholderTextColor="#94A3B8"
+                        />
+                        <TouchableOpacity
+                          style={[styles.bmbFilterChip, { justifyContent: 'center', marginBottom: 0 }]}
+                          onPress={() => {
+                            const today = new Date().toISOString().slice(0, 10);
+                            setBmbAttendanceFilterDate(today);
+                            void fetchBmbAttendance({ date: today });
+                          }}
+                        >
+                          <Text style={styles.bmbFilterChipText}>{translate("Hôm nay")}</Text>
+                        </TouchableOpacity>
+                        {bmbAttendanceFilterDate ? (
+                          <TouchableOpacity
+                            style={[styles.bmbFilterChip, { justifyContent: 'center', marginBottom: 0, backgroundColor: '#F1F5F9' }]}
+                            onPress={() => {
+                              setBmbAttendanceFilterDate('');
+                              void fetchBmbAttendance({ date: '' });
+                            }}
+                          >
+                            <Text style={[styles.bmbFilterChipText, { color: '#DC2626' }]}>✕</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    </View>
+
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Lọc theo tháng (YYYY-MM):")}</Text>
+                      <TextInput
+                        style={[styles.bmbWebInput, { paddingVertical: 6, fontSize: 12.5 }]}
+                        value={bmbAttendanceFilterMonth}
+                        onChangeText={(val) => {
+                          setBmbAttendanceFilterMonth(val);
+                          void fetchBmbAttendance({ month: val });
+                        }}
+                        placeholder="VD: 2026-11"
+                        placeholderTextColor="#94A3B8"
+                      />
+                    </View>
+
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Tòa nhà:")}</Text>
+                      <View style={{ flexDirection: 'row', gap: 4 }}>
+                        {['ALL', 'Tòa S1', 'Tòa S2', 'Tòa S3'].map((b) => (
+                          <TouchableOpacity
+                            key={b}
+                            style={[
+                              styles.bmbFilterChip,
+                              bmbAttendanceFilterBuilding === b && styles.bmbFilterChipActive,
+                              { paddingHorizontal: 8, paddingVertical: 5, marginBottom: 0 }
+                            ]}
+                            onPress={() => {
+                              setBmbAttendanceFilterBuilding(b);
+                              void fetchBmbAttendance({ buildingBlock: b });
+                            }}
+                          >
+                            <Text style={[
+                              styles.bmbFilterChipText,
+                              bmbAttendanceFilterBuilding === b && styles.bmbFilterChipTextActive,
+                              { fontSize: 11.5 }
+                            ]}>
+                              {b === 'ALL' ? translate('Tất cả') : b}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Dòng 2: Lọc theo KTV */}
+                  <View style={{ marginBottom: 10 }}>
+                    <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Kỹ thuật viên:")}</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <View style={{ flexDirection: 'row', gap: 4 }}>
+                        <TouchableOpacity
+                          style={[
+                            styles.bmbFilterChip,
+                            bmbAttendanceFilterTech === 'ALL' && styles.bmbFilterChipActive,
+                            { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
+                          ]}
+                          onPress={() => {
+                            setBmbAttendanceFilterTech('ALL');
+                            void fetchBmbAttendance({ techId: 'ALL' });
+                          }}
+                        >
+                          <Text style={[
+                            styles.bmbFilterChipText,
+                            bmbAttendanceFilterTech === 'ALL' && styles.bmbFilterChipTextActive,
+                            { fontSize: 12 }
+                          ]}>
+                            {translate("Tất cả KTV")}
+                          </Text>
+                        </TouchableOpacity>
+                        {technicians.map((t) => (
+                          <TouchableOpacity
+                            key={t.id}
+                            style={[
+                              styles.bmbFilterChip,
+                              bmbAttendanceFilterTech === t.id && styles.bmbFilterChipActive,
+                              { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
+                            ]}
+                            onPress={() => {
+                              setBmbAttendanceFilterTech(t.id);
+                              void fetchBmbAttendance({ techId: t.id });
+                            }}
+                          >
+                            <Text style={[
+                              styles.bmbFilterChipText,
+                              bmbAttendanceFilterTech === t.id && styles.bmbFilterChipTextActive,
+                              { fontSize: 12 }
+                            ]}>
+                              {t.fullName}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  </View>
+
+                  {/* Dòng 3: Chip lọc theo Trạng thái */}
+                  <View>
+                    <Text style={[styles.fieldLabel, { fontSize: 11.5, marginBottom: 3 }]}>{translate("Trạng thái xác minh & Đi muộn:")}</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+                      {[
+                        { key: 'ALL', label: 'Tất cả trạng thái' },
+                        { key: 'VERIFIED', label: '✓ Hợp lệ / Đã duyệt' },
+                        { key: 'PENDING_REVIEW', label: '⏳ Chờ BMB xem xét' },
+                        { key: 'LATE', label: '⚠️ Đi muộn / Về sớm' },
+                        { key: 'EXCEPTION', label: '🚨 Có ngoại lệ GPS / Ảnh' },
+                        { key: 'REJECTED', label: '✕ Bị từ chối' },
+                      ].map((st) => (
+                        <TouchableOpacity
+                          key={st.key}
+                          style={[
+                            styles.bmbFilterChip,
+                            bmbAttendanceFilterStatus === st.key && styles.bmbFilterChipActive,
+                            { paddingHorizontal: 10, paddingVertical: 4, marginBottom: 0 }
+                          ]}
+                          onPress={() => {
+                            setBmbAttendanceFilterStatus(st.key);
+                            void fetchBmbAttendance({ status: st.key });
+                          }}
+                        >
+                          <Text style={[
+                            styles.bmbFilterChipText,
+                            bmbAttendanceFilterStatus === st.key && styles.bmbFilterChipTextActive,
+                            { fontSize: 11.5 }
+                          ]}>
+                            {translate(st.label)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+
+                {/* THÔNG TIN VÀ XÁC NHẬN TỌA ĐỘ TÒA NHÀ BMB */}
+                <View style={[styles.whiteSectionCard, { borderLeftWidth: 4, borderLeftColor: bmbBuildingLocation?.isConfirmed ? '#16A34A' : '#F59E0B' }]}>
+                  <View style={styles.cardTopRow}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Text style={[styles.cardBlockTitle, { marginBottom: 0 }]}>
+                          🏢 {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix SkyView'}
+                        </Text>
+                        <View style={[
+                          styles.statusPill,
+                          bmbBuildingLocation?.isConfirmed ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEF3C7' }
+                        ]}>
+                          <Text style={[
+                            styles.statusPillText,
+                            bmbBuildingLocation?.isConfirmed ? { color: '#15803D' } : { color: '#B45309' }
+                          ]}>
+                            {bmbBuildingLocation?.isConfirmed ? '✓ Đã xác nhận chuẩn' : '⚠️ Chưa xác nhận tọa độ'}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={{ fontSize: 12, color: '#64748B', marginTop: 4 }}>
+                        📍 {bmbBuildingLocation?.buildingAddress || '123 Đường Nguyễn Hữu Thọ, Q7, TP.HCM'} • GPS: ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính: {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
+                      </Text>
+                      {bmbBuildingLocation?.isConfirmed ? (
+                        <Text style={{ fontSize: 11, color: '#16A34A', marginTop: 3 }}>
+                          ✓ Người xác nhận: {bmbBuildingLocation?.confirmedByName || 'BMB Quản lý'} ({formatDateTime(bmbBuildingLocation?.confirmedAt)})
+                        </Text>
+                      ) : (
+                        <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3, fontWeight: '600' }}>
+                          ⚠️ Tọa độ chưa được BMB xác nhận thực địa. Tất cả ca chấm công sẽ tạm gắn cờ CHỜ XÁC MINH để chống gian lận.
+                        </Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      style={[
+                        styles.primaryActionBtn,
+                        { paddingVertical: 8, paddingHorizontal: 12, backgroundColor: bmbBuildingLocation?.isConfirmed ? '#0284C7' : '#EA580C', alignSelf: 'center' }
+                      ]}
+                      onPress={() => {
+                        if (bmbBuildingLocation) {
+                          setBmbBuildingForm({
+                            buildingName: bmbBuildingLocation.buildingName || '',
+                            buildingAddress: bmbBuildingLocation.buildingAddress || '',
+                            latitude: String(bmbBuildingLocation.latitude ?? 10.7324),
+                            longitude: String(bmbBuildingLocation.longitude ?? 106.6992),
+                            allowedRadiusMeters: String(bmbBuildingLocation.allowedRadiusMeters ?? 300),
+                            note: '',
+                          });
+                        }
+                        setBmbBuildingModalVisible(true);
+                      }}
+                    >
+                      <Text style={styles.primaryActionBtnText}>
+                        {bmbBuildingLocation?.isConfirmed ? '⚙️ Chỉnh sửa tọa độ' : '⚠️ Xác nhận tọa độ BMB'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* DANH SÁCH CHI TIẾT CÁC CA CHẤM CÔNG (GRID RESPONSIVE CHUYÊN NGHIỆP) */}
+                {(() => {
+                  const displayedAttendanceLogs = bmbAttendanceLogs.filter((log: any) => {
+                    if (bmbAttendanceFilterTech !== 'ALL' && log.techId !== bmbAttendanceFilterTech) {
+                      return false;
+                    }
+                    return true;
+                  });
+
+                  return (
+                    <View style={[styles.whiteSectionCard, { width: '100%', maxWidth: '100%' }]}>
+                      <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6, marginBottom: 12 }]}>
+                        <Text style={styles.cardBlockTitle}>
+                          {translate("Danh sách ca chấm công")} ({displayedAttendanceLogs.length} {translate("bản ghi")})
+                        </Text>
+                        <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
+                          * {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix'} ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính hợp lệ: ≤ {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
+                        </Text>
+                      </View>
+
+                      {displayedAttendanceLogs.length === 0 ? (
+                        <View style={{ paddingVertical: 40, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 10, marginVertical: 8 }}>
+                          <Text style={{ fontSize: 24, marginBottom: 8 }}>📋</Text>
+                          <Text style={{ fontSize: 14, fontWeight: '700', color: '#475569' }}>
+                            {translate("Không tìm thấy dữ liệu chấm công phù hợp bộ lọc.")}
+                          </Text>
+                          <Text style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
+                            {translate("Hãy chọn 'Tất cả KTV' hoặc thay đổi mốc thời gian để xem các ca trực khác.")}
+                          </Text>
+                        </View>
+                      ) : (
+                        displayedAttendanceLogs.map((log: any) => {
+                          const punctuality = log.punctualityStatus || 'ON_TIME';
+                          const verification = log.verificationStatus || 'VERIFIED';
+                          const hasAnom = Boolean(log.anomalyNotes);
+                          const isPendingReview = verification === 'PENDING_REVIEW' || verification === 'NEEDS_EXPLANATION';
+
+                          return (
+                            <View
+                              key={log.id}
+                              style={{
+                                width: '100%',
+                                maxWidth: '100%',
+                                flexDirection: 'column',
+                                backgroundColor: isPendingReview ? '#FFFDF7' : '#FFFFFF',
+                                borderRadius: 14,
+                                borderWidth: 1.5,
+                                borderColor: hasAnom || isPendingReview ? '#F59E0B' : '#E2E8F0',
+                                padding: 16,
+                                marginBottom: 16,
+                                shadowColor: '#0F172A',
+                                shadowOffset: { width: 0, height: 2 },
+                                shadowOpacity: 0.04,
+                                shadowRadius: 4,
+                                elevation: 2,
+                              }}
+                            >
+                              {/* KHU VỰC 1: THÔNG TIN NHÂN VIÊN & TRẠNG THÁI (ĐẦU THẺ) */}
+                              <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 10, marginBottom: 10, alignItems: 'flex-start' }]}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 260 }}>
+                                  <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#BFDBFE' }}>
+                                    <Text style={{ fontSize: 20 }}>👷</Text>
+                                  </View>
+                                  <View style={{ flex: 1 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                      <Text style={{ fontWeight: '800', fontSize: 16, color: '#0F172A' }}>
+                                        {log.techName}
+                                      </Text>
+                                      <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
+                                        <Text style={{ fontSize: 11, fontWeight: '700', color: '#475569' }}>KTV</Text>
+                                      </View>
+                                    </View>
+                                    <Text style={[styles.cardLocationText, { marginTop: 2, fontSize: 12.5 }]}>
+                                      📞 {log.techPhone || '0913 402 803'} • 🏢 {log.buildingBlock || 'Tòa nhà ResiFix'} • 📅 {log.date}
+                                    </Text>
+                                  </View>
+                                </View>
+
+                                {/* Badges trạng thái */}
+                                <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                  {/* Badge Xác minh */}
+                                  <View style={[
+                                    styles.statusPill,
+                                    verification === 'VERIFIED' ? { backgroundColor: '#DCFCE7' } :
+                                      verification === 'APPROVED' ? { backgroundColor: '#DBEAFE' } :
+                                        verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } :
+                                          verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.statusPillText,
+                                      verification === 'VERIFIED' ? { color: '#15803D' } :
+                                        verification === 'APPROVED' ? { color: '#1D4ED8' } :
+                                          verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } :
+                                            verification === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                    ]}>
+                                      {verification === 'VERIFIED' ? '✓ Tự động hợp lệ' :
+                                        verification === 'APPROVED' ? '✓ BMB đã duyệt' :
+                                          verification === 'NEEDS_EXPLANATION' ? '💬 Yêu cầu giải trình' :
+                                            verification === 'REJECTED' ? '✕ Bị từ chối' : '⏳ Chờ BMB duyệt'}
+                                    </Text>
+                                  </View>
+
+                                  {/* Badge Đúng giờ / Muộn */}
+                                  <View style={[
+                                    styles.statusPill,
+                                    punctuality === 'ON_TIME' ? { backgroundColor: '#F0FDF4' } :
+                                      punctuality === 'ON_TRACK' ? { backgroundColor: '#EFF6FF' } : { backgroundColor: '#FFEDD5' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.statusPillText,
+                                      punctuality === 'ON_TIME' ? { color: '#16A34A' } :
+                                        punctuality === 'ON_TRACK' ? { color: '#2563EB' } : { color: '#C2410C' }
+                                    ]}>
+                                      {punctuality === 'ON_TIME' ? '🟢 Đúng giờ' :
+                                        punctuality === 'LATE' ? `⚠️ Đi muộn ${log.lateMinutes || 0}p` :
+                                          punctuality === 'EARLY_LEAVE' ? `⚠️ Về sớm ${log.earlyMinutes || 0}p` :
+                                            punctuality === 'LATE_AND_EARLY' ? `⚠️ Muộn ${log.lateMinutes || 0}p & Về sớm ${log.earlyMinutes || 0}p` :
+                                              '🔵 Đang trực'}
+                                    </Text>
+                                  </View>
+                                </View>
+                              </View>
+
+                              {/* Ca làm việc phân công */}
+                              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1, borderColor: '#F1F5F9' }}>
+                                <Text style={{ fontSize: 12.5, color: '#334155' }}>
+                                  🕒 <Text style={{ fontWeight: '700' }}>{translate("Ca phân công:")}</Text> {log.shiftScheduled || '07:00 - 15:00'} (Ca trực chính thức)
+                                </Text>
+                              </View>
+
+                              {/* KHU VỰC 2: GRID CHECK-IN VÀ CHECK-OUT (BỐ TRÍ GRID TRÊN DESKTOP, XẾP DỌC TRÊN MOBILE) */}
+                              <View style={{ flexDirection: windowWidth > 860 ? 'row' : 'column', gap: 12, marginBottom: 12, width: '100%' }}>
+                                {/* Cột Check-in */}
+                                <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                  <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
+                                    <Text style={{ fontWeight: '800', fontSize: 13.5, color: '#16A34A' }}>🟢 CHECK-IN</Text>
+                                    <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>{formatDateTime(log.checkIn)}</Text>
+                                  </View>
+
+                                  {/* GPS Snapshot */}
+                                  {log.checkInGps ? (
+                                    <View style={{ marginTop: 4 }}>
+                                      <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
+                                        📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
+                                      </Text>
+                                      <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
+                                        Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                      </Text>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                                        <View style={[
+                                          styles.statusPill,
+                                          (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                        ]}>
+                                          <Text style={[
+                                            styles.statusPillText,
+                                            (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                          ]}>
+                                            {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
+                                          </Text>
+                                        </View>
+                                        <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                          (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
+                                        </Text>
+                                        {log.checkInMapUrl && (
+                                          <TouchableOpacity onPress={() => Linking.openURL(log.checkInMapUrl)}>
+                                            <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
+                                          </TouchableOpacity>
+                                        )}
+                                      </View>
+                                      {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
+                                        <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
+                                          ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
+                                        </Text>
+                                      )}
+                                    </View>
+                                  ) : (
+                                    <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>📍 Không có dữ liệu GPS</Text>
+                                  )}
+
+                                  {/* Ảnh Check-in */}
+                                  {log.checkInPhotoUrl ? (
+                                    <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                      <TouchableOpacity
+                                        onPress={() => setViewingPhotoModal({
+                                          url: log.checkInPhotoUrl,
+                                          title: `Ảnh Check-in - ${log.techName}`,
+                                          meta: { time: log.checkIn, gps: log.checkInGps, techName: log.techName, date: log.date }
+                                        })}
+                                      >
+                                        <Image
+                                          source={{ uri: log.checkInPhotoUrl }}
+                                          style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
+                                        />
+                                      </TouchableOpacity>
+                                      <View>
+                                        <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-in</Text>
+                                        <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
+                                      </View>
+                                    </View>
+                                  ) : null}
+                                </View>
+
+                                {/* Cột Check-out */}
+                                <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                  <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
+                                    <Text style={{ fontWeight: '800', fontSize: 13.5, color: log.checkOut ? '#DC2626' : '#64748B' }}>
+                                      🔴 CHECK-OUT
+                                    </Text>
+                                    <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>
+                                      {log.checkOut ? formatDateTime(log.checkOut) : 'Chưa check-out'}
+                                    </Text>
+                                  </View>
+
+                                  {/* GPS Snapshot */}
+                                  {log.checkOutGps ? (
+                                    <View style={{ marginTop: 4 }}>
+                                      <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
+                                        📍 Tọa độ GPS: {log.checkOutGps.latitude?.toFixed(6)}, {log.checkOutGps.longitude?.toFixed(6)}
+                                      </Text>
+                                      <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
+                                        Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkOutGps.distanceMeters ?? log.checkOutGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
+                                      </Text>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                                        <View style={[
+                                          styles.statusPill,
+                                          (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
+                                        ]}>
+                                          <Text style={[
+                                            styles.statusPillText,
+                                            (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
+                                          ]}>
+                                            {(log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Vượt bán kính cho phép'}
+                                          </Text>
+                                        </View>
+                                        <Text style={{ fontSize: 11, color: '#64748B' }}>
+                                          (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters ?? 10}m)
+                                        </Text>
+                                        {log.checkOutMapUrl && (
+                                          <TouchableOpacity onPress={() => Linking.openURL(log.checkOutMapUrl)}>
+                                            <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
+                                          </TouchableOpacity>
+                                        )}
+                                      </View>
+                                      {(log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters) > 100 && (
+                                        <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
+                                          ⚠️ Độ chính xác GPS thấp (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters}m &gt; 100m)
+                                        </Text>
+                                      )}
+                                    </View>
+                                  ) : (
+                                    <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>
+                                      {log.checkOut ? '📍 Không có dữ liệu GPS' : '⏳ KTV đang trong ca trực'}
+                                    </Text>
+                                  )}
+
+                                  {/* Ảnh Check-out */}
+                                  {log.checkOutPhotoUrl ? (
+                                    <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                      <TouchableOpacity
+                                        onPress={() => setViewingPhotoModal({
+                                          url: log.checkOutPhotoUrl,
+                                          title: `Ảnh Check-out - ${log.techName}`,
+                                          meta: { time: log.checkOut, gps: log.checkOutGps, techName: log.techName, date: log.date }
+                                        })}
+                                      >
+                                        <Image
+                                          source={{ uri: log.checkOutPhotoUrl }}
+                                          style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
+                                        />
+                                      </TouchableOpacity>
+                                      <View>
+                                        <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-out</Text>
+                                        <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
+                                      </View>
+                                    </View>
+                                  ) : null}
+                                </View>
+                              </View>
+
+                              {/* KHU VỰC 3: GIỜ CÔNG & TIỀN LƯƠNG TÍNH TOÁN */}
+                              <View style={{ backgroundColor: '#F0F9FF', borderRadius: 10, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#BAE6FD' }}>
+                                <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6 }]}>
+                                  <Text style={{ fontSize: 13, fontWeight: '700', color: '#0369A1' }}>
+                                    ⏱️ Giờ công: {log.workHours || 0}h thực tế • {log.billableHours ?? log.workHours ?? 0}h tính lương
+                                    {log.nightHours ? ` (Trong đó: ${log.nightHours}h ca đêm 22h-6h)` : ''}
+                                  </Text>
+                                  <Text style={{ fontSize: 14, fontWeight: '800', color: '#0284C7' }}>
+                                    Ước tính: {Number(((log.regularHours ?? (log.billableHours ?? log.workHours ?? 0)) * 50000) + ((log.nightHours || 0) * 50000 * 1.3)).toLocaleString('vi-VN')} đ
+                                  </Text>
+                                </View>
+                                <Text style={{ fontSize: 11, color: '#0284C7', marginTop: 3 }}>
+                                  * Đơn giá: 50.000 VNĐ/giờ tiêu chuẩn • Ca đêm (22:00 - 06:00) phụ trội +30% (65.000 VNĐ/giờ).
+                                </Text>
+                              </View>
+
+                              {/* Ngoại lệ / Bất thường phát hiện tự động */}
+                              {log.anomalyNotes && (
+                                <View style={{ backgroundColor: '#FFFBEB', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#FDE68A' }}>
+                                  <Text style={{ fontSize: 12.5, color: '#B45309', fontWeight: '700' }}>
+                                    ⚠️ Ghi chú ngoại lệ: {log.anomalyNotes}
+                                  </Text>
+                                </View>
+                              )}
+
+                              {/* Giải trình từ Kỹ thuật viên */}
+                              {log.explanationText && (
+                                <View style={{ backgroundColor: '#F5F3FF', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#DDD6FE' }}>
+                                  <Text style={{ fontSize: 12.5, color: '#6D28D9', fontWeight: '700' }}>
+                                    💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>&quot;{log.explanationText}&quot;</Text>
+                                  </Text>
+                                </View>
+                              )}
+
+                              {/* Ghi chú duyệt của BMB */}
+                              {log.reviewNote && (
+                                <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                                  <Text style={{ fontSize: 12.5, color: '#334155' }}>
+                                    📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> &quot;{log.reviewNote}&quot; ({formatDateTime(log.reviewedAt)})
+                                  </Text>
+                                </View>
+                              )}
+
+                              {/* Lịch sử xác minh & chỉnh sửa (Audit Trail) */}
+                              {Array.isArray(log.auditLogs) && log.auditLogs.length > 0 && (
+                                <View style={{ marginBottom: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#F1F5F9' }}>
+                                  <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 4 }}>
+                                    📜 Lịch sử xác minh & Audit log:
+                                  </Text>
+                                  {log.auditLogs.map((al: any, aIdx: number) => (
+                                    <Text key={aIdx} style={{ fontSize: 11, color: '#64748B', marginLeft: 6 }}>
+                                      • [{formatDateTime(al.timestamp)}] <Text style={{ fontWeight: '600' }}>{al.actorName}</Text> ({al.action}): {al.note}
+                                    </Text>
+                                  ))}
+                                </View>
+                              )}
+
+                              {/* KHU VỰC 4: NÚT THAO TÁC BMB (PHÊ DUYỆT / YÊU CẦU GIẢI TRÌNH / TỪ CHỐI) */}
+                              <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                                <TouchableOpacity
+                                  style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#16A34A', borderRadius: 8 }]}
+                                  onPress={() => {
+                                    setSelectedAttendanceForReview(log);
+                                    setBmbReviewAction('APPROVE');
+                                    setBmbAdjustedHours(String(log.workHours || 8));
+                                    setBmbReviewNote('Đã kiểm tra minh chứng, hợp lệ tính công.');
+                                    setShowAttendanceReviewModal(true);
+                                  }}
+                                >
+                                  <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✓ {translate("Phê duyệt tính lương")}</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#8B5CF6', borderRadius: 8 }]}
+                                  onPress={() => {
+                                    setSelectedAttendanceForReview(log);
+                                    setBmbReviewAction('REQUEST_EXPLANATION');
+                                    setBmbAdjustedHours('');
+                                    setBmbReviewNote('Yêu cầu giải trình rõ lý do chênh lệch vị trí GPS / đi muộn.');
+                                    setShowAttendanceReviewModal(true);
+                                  }}
+                                >
+                                  <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>💬 {translate("Yêu cầu giải trình")}</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#DC2626', borderRadius: 8 }]}
+                                  onPress={() => {
+                                    setSelectedAttendanceForReview(log);
+                                    setBmbReviewAction('REJECT');
+                                    setBmbAdjustedHours('0');
+                                    setBmbReviewNote('Không công nhận ca trực do vi phạm quy chế chấm công.');
+                                    setShowAttendanceReviewModal(true);
+                                  }}
+                                >
+                                  <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✕ {translate("Từ chối ca trực")}</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  );
+                })()}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* ==================================================================== */}
+          {/* MÀN HÌNH 05 BMB: CHẤM CÔNG & TÍNH LƯƠNG KỸ THUẬT VIÊN                 */}
+          {/* ==================================================================== */}
+          {bmbNavTab === 'PAYROLL' && (
+            <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
+              {/* CỘT TRÁI: BẢNG LƯƠNG & DUYỆT TĂNG CA */}
+              <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
+                <View style={styles.cardTopRow}>
+                  <View>
+                    <Text style={styles.bmbPageTitle}>{translate("Chấm công & Tính lương Kỹ thuật viên")}</Text>
+                    <Text style={styles.bmbPageSubtitle}>
+                      {translate("Mô hình Lương cố định tháng + Tăng ca (OT) được duyệt")}
+                    </Text>
                   </View>
                   <TouchableOpacity
                     style={[
                       styles.primaryActionBtn,
-                      { paddingVertical: 8, paddingHorizontal: 12, backgroundColor: bmbBuildingLocation?.isConfirmed ? '#0284C7' : '#EA580C', alignSelf: 'center' }
+                      bmbPayrollSummary?.isLocked
+                        ? { backgroundColor: '#10B981' }
+                        : { backgroundColor: '#2563EB' }
                     ]}
-                    onPress={() => {
-                      if (bmbBuildingLocation) {
-                        setBmbBuildingForm({
-                          buildingName: bmbBuildingLocation.buildingName || '',
-                          buildingAddress: bmbBuildingLocation.buildingAddress || '',
-                          latitude: String(bmbBuildingLocation.latitude ?? 10.7324),
-                          longitude: String(bmbBuildingLocation.longitude ?? 106.6992),
-                          allowedRadiusMeters: String(bmbBuildingLocation.allowedRadiusMeters ?? 300),
-                          note: '',
-                        });
-                      }
-                      setBmbBuildingModalVisible(true);
-                    }}
+                    onPress={handleBmbLockMonth}
+                    disabled={loading || bmbPayrollSummary?.isLocked}
                   >
                     <Text style={styles.primaryActionBtnText}>
-                      {bmbBuildingLocation?.isConfirmed ? '⚙️ Chỉnh sửa tọa độ' : '⚠️ Xác nhận tọa độ BMB'}
+                      {bmbPayrollSummary?.isLocked
+                        ? '🔒 ' + translate('Đã khóa bảng lương')
+                        : '🔒 ' + translate('Khóa bảng lương tháng')}
                     </Text>
                   </TouchableOpacity>
                 </View>
-              </View>
 
-              {/* DANH SÁCH CHI TIẾT CÁC CA CHẤM CÔNG (GRID RESPONSIVE CHUYÊN NGHIỆP) */}
-              {(() => {
-                const displayedAttendanceLogs = bmbAttendanceLogs.filter((log: any) => {
-                  if (bmbAttendanceFilterTech !== 'ALL' && log.techId !== bmbAttendanceFilterTech) {
-                    return false;
-                  }
-                  return true;
-                });
-
-                return (
-                  <View style={[styles.whiteSectionCard, { width: '100%', maxWidth: '100%' }]}>
-                    <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6, marginBottom: 12 }]}>
-                      <Text style={styles.cardBlockTitle}>
-                        {translate("Danh sách ca chấm công")} ({displayedAttendanceLogs.length} {translate("bản ghi")})
-                      </Text>
-                      <Text style={[styles.cardLocationText, { fontSize: 12 }]}>
-                        * {bmbBuildingLocation?.buildingName || 'Tòa nhà ResiFix'} ({bmbBuildingLocation?.latitude ?? 10.7324}, {bmbBuildingLocation?.longitude ?? 106.6992}) • Bán kính hợp lệ: ≤ {bmbBuildingLocation?.allowedRadiusMeters ?? 300}m
-                      </Text>
-                    </View>
-
-                    {displayedAttendanceLogs.length === 0 ? (
-                      <View style={{ paddingVertical: 40, alignItems: 'center', backgroundColor: '#F8FAFC', borderRadius: 10, marginVertical: 8 }}>
-                        <Text style={{ fontSize: 24, marginBottom: 8 }}>📋</Text>
-                        <Text style={{ fontSize: 14, fontWeight: '700', color: '#475569' }}>
-                          {translate("Không tìm thấy dữ liệu chấm công phù hợp bộ lọc.")}
-                        </Text>
-                        <Text style={{ fontSize: 12.5, color: '#94A3B8', marginTop: 4 }}>
-                          {translate("Hãy chọn 'Tất cả KTV' hoặc thay đổi mốc thời gian để xem các ca trực khác.")}
-                        </Text>
-                      </View>
-                    ) : (
-                      displayedAttendanceLogs.map((log: any) => {
-                        const punctuality = log.punctualityStatus || 'ON_TIME';
-                        const verification = log.verificationStatus || 'VERIFIED';
-                        const hasAnom = Boolean(log.anomalyNotes);
-                        const isPendingReview = verification === 'PENDING_REVIEW' || verification === 'NEEDS_EXPLANATION';
-
-                        return (
-                          <View
-                            key={log.id}
-                            style={{
-                              width: '100%',
-                              maxWidth: '100%',
-                              flexDirection: 'column',
-                              backgroundColor: isPendingReview ? '#FFFDF7' : '#FFFFFF',
-                              borderRadius: 14,
-                              borderWidth: 1.5,
-                              borderColor: hasAnom || isPendingReview ? '#F59E0B' : '#E2E8F0',
-                              padding: 16,
-                              marginBottom: 16,
-                              shadowColor: '#0F172A',
-                              shadowOffset: { width: 0, height: 2 },
-                              shadowOpacity: 0.04,
-                              shadowRadius: 4,
-                              elevation: 2,
-                            }}
-                          >
-                            {/* KHU VỰC 1: THÔNG TIN NHÂN VIÊN & TRẠNG THÁI (ĐẦU THẺ) */}
-                            <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 10, marginBottom: 10, alignItems: 'flex-start' }]}>
-                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 260 }}>
-                                <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#BFDBFE' }}>
-                                  <Text style={{ fontSize: 20 }}>👷</Text>
-                                </View>
-                                <View style={{ flex: 1 }}>
-                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                    <Text style={{ fontWeight: '800', fontSize: 16, color: '#0F172A' }}>
-                                      {log.techName}
-                                    </Text>
-                                    <View style={{ backgroundColor: '#F1F5F9', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
-                                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#475569' }}>KTV</Text>
-                                    </View>
-                                  </View>
-                                  <Text style={[styles.cardLocationText, { marginTop: 2, fontSize: 12.5 }]}>
-                                    📞 {log.techPhone || '0913 402 803'} • 🏢 {log.buildingBlock || 'Tòa nhà ResiFix'} • 📅 {log.date}
-                                  </Text>
-                                </View>
-                              </View>
-
-                              {/* Badges trạng thái */}
-                              <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                                {/* Badge Xác minh */}
-                                <View style={[
-                                  styles.statusPill,
-                                  verification === 'VERIFIED' ? { backgroundColor: '#DCFCE7' } :
-                                  verification === 'APPROVED' ? { backgroundColor: '#DBEAFE' } :
-                                  verification === 'NEEDS_EXPLANATION' ? { backgroundColor: '#F3E8FF' } :
-                                  verification === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                                ]}>
-                                  <Text style={[
-                                    styles.statusPillText,
-                                    verification === 'VERIFIED' ? { color: '#15803D' } :
-                                    verification === 'APPROVED' ? { color: '#1D4ED8' } :
-                                    verification === 'NEEDS_EXPLANATION' ? { color: '#7E22CE' } :
-                                    verification === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                                  ]}>
-                                    {verification === 'VERIFIED' ? '✓ Tự động hợp lệ' :
-                                     verification === 'APPROVED' ? '✓ BMB đã duyệt' :
-                                     verification === 'NEEDS_EXPLANATION' ? '💬 Yêu cầu giải trình' :
-                                     verification === 'REJECTED' ? '✕ Bị từ chối' : '⏳ Chờ BMB duyệt'}
-                                  </Text>
-                                </View>
-
-                                {/* Badge Đúng giờ / Muộn */}
-                                <View style={[
-                                  styles.statusPill,
-                                  punctuality === 'ON_TIME' ? { backgroundColor: '#F0FDF4' } :
-                                  punctuality === 'ON_TRACK' ? { backgroundColor: '#EFF6FF' } : { backgroundColor: '#FFEDD5' }
-                                ]}>
-                                  <Text style={[
-                                    styles.statusPillText,
-                                    punctuality === 'ON_TIME' ? { color: '#16A34A' } :
-                                    punctuality === 'ON_TRACK' ? { color: '#2563EB' } : { color: '#C2410C' }
-                                  ]}>
-                                    {punctuality === 'ON_TIME' ? '🟢 Đúng giờ' :
-                                     punctuality === 'LATE' ? `⚠️ Đi muộn ${log.lateMinutes || 0}p` :
-                                     punctuality === 'EARLY_LEAVE' ? `⚠️ Về sớm ${log.earlyMinutes || 0}p` :
-                                     punctuality === 'LATE_AND_EARLY' ? `⚠️ Muộn ${log.lateMinutes || 0}p & Về sớm ${log.earlyMinutes || 0}p` :
-                                     '🔵 Đang trực'}
-                                  </Text>
-                                </View>
-                              </View>
-                            </View>
-
-                            {/* Ca làm việc phân công */}
-                            <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1, borderColor: '#F1F5F9' }}>
-                              <Text style={{ fontSize: 12.5, color: '#334155' }}>
-                                🕒 <Text style={{ fontWeight: '700' }}>{translate("Ca phân công:")}</Text> {log.shiftScheduled || '07:00 - 15:00'} (Ca trực chính thức)
-                              </Text>
-                            </View>
-
-                            {/* KHU VỰC 2: GRID CHECK-IN VÀ CHECK-OUT (BỐ TRÍ GRID TRÊN DESKTOP, XẾP DỌC TRÊN MOBILE) */}
-                            <View style={{ flexDirection: windowWidth > 860 ? 'row' : 'column', gap: 12, marginBottom: 12, width: '100%' }}>
-                              {/* Cột Check-in */}
-                              <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
-                                <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
-                                  <Text style={{ fontWeight: '800', fontSize: 13.5, color: '#16A34A' }}>🟢 CHECK-IN</Text>
-                                  <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>{formatDateTime(log.checkIn)}</Text>
-                                </View>
-
-                                {/* GPS Snapshot */}
-                                {log.checkInGps ? (
-                                  <View style={{ marginTop: 4 }}>
-                                    <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
-                                      📍 Tọa độ GPS: {log.checkInGps.latitude?.toFixed(6)}, {log.checkInGps.longitude?.toFixed(6)}
-                                    </Text>
-                                    <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
-                                      Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkInGps.distanceMeters ?? log.checkInGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
-                                    </Text>
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
-                                      <View style={[
-                                        styles.statusPill,
-                                        (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
-                                      ]}>
-                                        <Text style={[
-                                          styles.statusPillText,
-                                          (log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
-                                        ]}>
-                                          {(log.checkInGps.isWithinAllowedRadius ?? log.checkInGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Ngoài bán kính (>300m)'}
-                                        </Text>
-                                      </View>
-                                      <Text style={{ fontSize: 11, color: '#64748B' }}>
-                                        (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters ?? 10}m)
-                                      </Text>
-                                      {log.checkInMapUrl && (
-                                        <TouchableOpacity onPress={() => Linking.openURL(log.checkInMapUrl)}>
-                                          <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
-                                        </TouchableOpacity>
-                                      )}
-                                    </View>
-                                    {(log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters) > 100 && (
-                                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
-                                        ⚠️ Độ chính xác GPS thấp (±{log.checkInGps.accuracy ?? log.checkInGps.accuracyMeters}m &gt; 100m)
-                                      </Text>
-                                    )}
-                                  </View>
-                                ) : (
-                                  <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>📍 Không có dữ liệu GPS</Text>
-                                )}
-
-                                {/* Ảnh Check-in */}
-                                {log.checkInPhotoUrl ? (
-                                  <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                    <TouchableOpacity
-                                      onPress={() => setViewingPhotoModal({
-                                        url: log.checkInPhotoUrl,
-                                        title: `Ảnh Check-in - ${log.techName}`,
-                                        meta: { time: log.checkIn, gps: log.checkInGps, techName: log.techName, date: log.date }
-                                      })}
-                                    >
-                                      <Image
-                                        source={{ uri: log.checkInPhotoUrl }}
-                                        style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
-                                      />
-                                    </TouchableOpacity>
-                                    <View>
-                                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-in</Text>
-                                      <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
-                                    </View>
-                                  </View>
-                                ) : null}
-                              </View>
-
-                              {/* Cột Check-out */}
-                              <View style={{ flex: 1, backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
-                                <View style={[styles.cardTopRow, { marginBottom: 6 }]}>
-                                  <Text style={{ fontWeight: '800', fontSize: 13.5, color: log.checkOut ? '#DC2626' : '#64748B' }}>
-                                    🔴 CHECK-OUT
-                                  </Text>
-                                  <Text style={{ fontSize: 12, color: '#475569', fontWeight: '600' }}>
-                                    {log.checkOut ? formatDateTime(log.checkOut) : 'Chưa check-out'}
-                                  </Text>
-                                </View>
-
-                                {/* GPS Snapshot */}
-                                {log.checkOutGps ? (
-                                  <View style={{ marginTop: 4 }}>
-                                    <Text style={{ fontSize: 12, color: '#0F172A', fontWeight: '600' }}>
-                                      📍 Tọa độ GPS: {log.checkOutGps.latitude?.toFixed(6)}, {log.checkOutGps.longitude?.toFixed(6)}
-                                    </Text>
-                                    <Text style={{ fontSize: 12, color: '#334155', marginTop: 3 }}>
-                                      Khoảng cách: <Text style={{ fontWeight: '700' }}>~{log.checkOutGps.distanceMeters ?? log.checkOutGps.distanceToBuildingMeters ?? 0}m</Text> • Giới hạn: ≤ 300m
-                                    </Text>
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
-                                      <View style={[
-                                        styles.statusPill,
-                                        (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { backgroundColor: '#DCFCE7' } : { backgroundColor: '#FEE2E2' }
-                                      ]}>
-                                        <Text style={[
-                                          styles.statusPillText,
-                                          (log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? { color: '#15803D' } : { color: '#B91C1C' }
-                                        ]}>
-                                          {(log.checkOutGps.isWithinAllowedRadius ?? log.checkOutGps.isWithinRadius) ? '✓ Trong bán kính 300m' : '⚠️ Vượt bán kính cho phép'}
-                                        </Text>
-                                      </View>
-                                      <Text style={{ fontSize: 11, color: '#64748B' }}>
-                                        (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters ?? 10}m)
-                                      </Text>
-                                      {log.checkOutMapUrl && (
-                                        <TouchableOpacity onPress={() => Linking.openURL(log.checkOutMapUrl)}>
-                                          <Text style={{ fontSize: 11.5, color: '#2563EB', fontWeight: '700' }}>🗺️ Bản đồ</Text>
-                                        </TouchableOpacity>
-                                      )}
-                                    </View>
-                                    {(log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters) > 100 && (
-                                      <Text style={{ fontSize: 11, color: '#D97706', marginTop: 3 }}>
-                                        ⚠️ Độ chính xác GPS thấp (±{log.checkOutGps.accuracy ?? log.checkOutGps.accuracyMeters}m &gt; 100m)
-                                      </Text>
-                                    )}
-                                  </View>
-                                ) : (
-                                  <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>
-                                    {log.checkOut ? '📍 Không có dữ liệu GPS' : '⏳ KTV đang trong ca trực'}
-                                  </Text>
-                                )}
-
-                                {/* Ảnh Check-out */}
-                                {log.checkOutPhotoUrl ? (
-                                  <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                                    <TouchableOpacity
-                                      onPress={() => setViewingPhotoModal({
-                                        url: log.checkOutPhotoUrl,
-                                        title: `Ảnh Check-out - ${log.techName}`,
-                                        meta: { time: log.checkOut, gps: log.checkOutGps, techName: log.techName, date: log.date }
-                                      })}
-                                    >
-                                      <Image
-                                        source={{ uri: log.checkOutPhotoUrl }}
-                                        style={{ width: 56, height: 56, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E1' }}
-                                      />
-                                    </TouchableOpacity>
-                                    <View>
-                                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#0F172A' }}>📷 Ảnh Check-out</Text>
-                                      <Text style={{ fontSize: 10.5, color: '#64748B' }}>Có gắn timestamp server</Text>
-                                    </View>
-                                  </View>
-                                ) : null}
-                              </View>
-                            </View>
-
-                            {/* KHU VỰC 3: GIỜ CÔNG & TIỀN LƯƠNG TÍNH TOÁN */}
-                            <View style={{ backgroundColor: '#F0F9FF', borderRadius: 10, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#BAE6FD' }}>
-                              <View style={[styles.cardTopRow, { flexWrap: 'wrap', gap: 6 }]}>
-                                <Text style={{ fontSize: 13, fontWeight: '700', color: '#0369A1' }}>
-                                  ⏱️ Giờ công: {log.workHours || 0}h thực tế • {log.billableHours ?? log.workHours ?? 0}h tính lương
-                                  {log.nightHours ? ` (Trong đó: ${log.nightHours}h ca đêm 22h-6h)` : ''}
-                                </Text>
-                                <Text style={{ fontSize: 14, fontWeight: '800', color: '#0284C7' }}>
-                                  Ước tính: {Number(((log.regularHours ?? (log.billableHours ?? log.workHours ?? 0)) * 50000) + ((log.nightHours || 0) * 50000 * 1.3)).toLocaleString('vi-VN')} đ
-                                </Text>
-                              </View>
-                              <Text style={{ fontSize: 11, color: '#0284C7', marginTop: 3 }}>
-                                * Đơn giá: 50.000 VNĐ/giờ tiêu chuẩn • Ca đêm (22:00 - 06:00) phụ trội +30% (65.000 VNĐ/giờ).
-                              </Text>
-                            </View>
-
-                            {/* Ngoại lệ / Bất thường phát hiện tự động */}
-                            {log.anomalyNotes && (
-                              <View style={{ backgroundColor: '#FFFBEB', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#FDE68A' }}>
-                                <Text style={{ fontSize: 12.5, color: '#B45309', fontWeight: '700' }}>
-                                  ⚠️ Ghi chú ngoại lệ: {log.anomalyNotes}
-                                </Text>
-                              </View>
-                            )}
-
-                            {/* Giải trình từ Kỹ thuật viên */}
-                            {log.explanationText && (
-                              <View style={{ backgroundColor: '#F5F3FF', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#DDD6FE' }}>
-                                <Text style={{ fontSize: 12.5, color: '#6D28D9', fontWeight: '700' }}>
-                                  💬 Giải trình từ KTV: <Text style={{ fontWeight: '400', fontStyle: 'italic' }}>&quot;{log.explanationText}&quot;</Text>
-                                </Text>
-                              </View>
-                            )}
-
-                            {/* Ghi chú duyệt của BMB */}
-                            {log.reviewNote && (
-                              <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
-                                <Text style={{ fontSize: 12.5, color: '#334155' }}>
-                                  📝 <Text style={{ fontWeight: '700' }}>Quyết định BMB ({log.reviewedBy || 'BMB'}):</Text> &quot;{log.reviewNote}&quot; ({formatDateTime(log.reviewedAt)})
-                                </Text>
-                              </View>
-                            )}
-
-                            {/* Lịch sử xác minh & chỉnh sửa (Audit Trail) */}
-                            {Array.isArray(log.auditLogs) && log.auditLogs.length > 0 && (
-                              <View style={{ marginBottom: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#F1F5F9' }}>
-                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 4 }}>
-                                  📜 Lịch sử xác minh & Audit log:
-                                </Text>
-                                {log.auditLogs.map((al: any, aIdx: number) => (
-                                  <Text key={aIdx} style={{ fontSize: 11, color: '#64748B', marginLeft: 6 }}>
-                                    • [{formatDateTime(al.timestamp)}] <Text style={{ fontWeight: '600' }}>{al.actorName}</Text> ({al.action}): {al.note}
-                                  </Text>
-                                ))}
-                              </View>
-                            )}
-
-                            {/* KHU VỰC 4: NÚT THAO TÁC BMB (PHÊ DUYỆT / YÊU CẦU GIẢI TRÌNH / TỪ CHỐI) */}
-                            <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                              <TouchableOpacity
-                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#16A34A', borderRadius: 8 }]}
-                                onPress={() => {
-                                  setSelectedAttendanceForReview(log);
-                                  setBmbReviewAction('APPROVE');
-                                  setBmbAdjustedHours(String(log.workHours || 8));
-                                  setBmbReviewNote('Đã kiểm tra minh chứng, hợp lệ tính công.');
-                                  setShowAttendanceReviewModal(true);
-                                }}
-                              >
-                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✓ {translate("Phê duyệt tính lương")}</Text>
-                              </TouchableOpacity>
-
-                              <TouchableOpacity
-                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#8B5CF6', borderRadius: 8 }]}
-                                onPress={() => {
-                                  setSelectedAttendanceForReview(log);
-                                  setBmbReviewAction('REQUEST_EXPLANATION');
-                                  setBmbAdjustedHours('');
-                                  setBmbReviewNote('Yêu cầu giải trình rõ lý do chênh lệch vị trí GPS / đi muộn.');
-                                  setShowAttendanceReviewModal(true);
-                                }}
-                              >
-                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>💬 {translate("Yêu cầu giải trình")}</Text>
-                              </TouchableOpacity>
-
-                              <TouchableOpacity
-                                style={[styles.primaryActionBtn, { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#DC2626', borderRadius: 8 }]}
-                                onPress={() => {
-                                  setSelectedAttendanceForReview(log);
-                                  setBmbReviewAction('REJECT');
-                                  setBmbAdjustedHours('0');
-                                  setBmbReviewNote('Không công nhận ca trực do vi phạm quy chế chấm công.');
-                                  setShowAttendanceReviewModal(true);
-                                }}
-                              >
-                                <Text style={[styles.primaryActionBtnText, { fontSize: 12.5, fontWeight: '700' }]}>✕ {translate("Từ chối ca trực")}</Text>
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        );
-                      })
-                    )}
-                  </View>
-                );
-              })()}
-            </ScrollView>
-          </View>
-        )}
-
-        {/* ==================================================================== */}
-        {/* MÀN HÌNH 05 BMB: CHẤM CÔNG & TÍNH LƯƠNG KỸ THUẬT VIÊN                 */}
-        {/* ==================================================================== */}
-        {bmbNavTab === 'PAYROLL' && (
-          <View style={[styles.bmbContentTwoCols, isMobileLayout && { flexDirection: 'column', padding: 12, gap: 12 }]}>
-            {/* CỘT TRÁI: BẢNG LƯƠNG & DUYỆT TĂNG CA */}
-            <ScrollView style={styles.bmbCenterColumn} showsVerticalScrollIndicator={false}>
-              <View style={styles.cardTopRow}>
-                <View>
-                  <Text style={styles.bmbPageTitle}>{translate("Chấm công & Tính lương Kỹ thuật viên")}</Text>
-                  <Text style={styles.bmbPageSubtitle}>
-                    {translate("Mô hình Lương cố định tháng + Tăng ca (OT) được duyệt")}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[
-                    styles.primaryActionBtn,
-                    bmbPayrollSummary?.isLocked
-                      ? { backgroundColor: '#10B981' }
-                      : { backgroundColor: '#2563EB' }
-                  ]}
-                  onPress={handleBmbLockMonth}
-                  disabled={loading || bmbPayrollSummary?.isLocked}
-                >
-                  <Text style={styles.primaryActionBtnText}>
-                    {bmbPayrollSummary?.isLocked
-                      ? '🔒 ' + translate('Đã khóa bảng lương')
-                      : '🔒 ' + translate('Khóa bảng lương tháng')}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Sub-tabs BMB Payroll */}
-              <View style={[styles.chipWrapRow, { marginVertical: 12 }]}>
-                {[
-                  { key: 'SUMMARY', label: 'Bảng lương tổng hợp' },
-                  { key: 'OVERTIME', label: `Duyệt tăng ca (${bmbOvertimeRequests.filter((o) => o.status === 'PENDING').length})` },
-                  { key: 'ATTENDANCE', label: 'Nhật ký chấm công' },
-                  { key: 'SCHEDULE', label: `Đổi ca/Nghỉ (${scheduleRequests.filter((r) => r.status === 'PENDING').length})` },
-                  { key: 'COSTS', label: `Chi phí vật tư (${costReport?.pendingCount || 0})` },
-                  { key: 'SLA', label: `SLA & Giám sát (${slaDashboard?.breachedCount || 0})` },
-                  { key: 'CONFIG', label: 'Cấu hình lương' },
-                ].map((pt) => (
-                  <TouchableOpacity
-                    key={pt.key}
-                    style={[
-                      styles.bmbFilterChip,
-                      bmbPayrollTab === pt.key && styles.bmbFilterChipActive,
-                    ]}
-                    onPress={() => setBmbPayrollTab(pt.key as any)}
-                  >
-                    <Text
+                {/* Sub-tabs BMB Payroll */}
+                <View style={[styles.chipWrapRow, { marginVertical: 12 }]}>
+                  {[
+                    { key: 'SUMMARY', label: 'Bảng lương tổng hợp' },
+                    { key: 'OVERTIME', label: `Duyệt tăng ca (${bmbOvertimeRequests.filter((o) => o.status === 'PENDING').length})` },
+                    { key: 'ATTENDANCE', label: 'Nhật ký chấm công' },
+                    { key: 'SCHEDULE', label: `Đổi ca/Nghỉ (${scheduleRequests.filter((r) => r.status === 'PENDING').length})` },
+                    { key: 'COSTS', label: `Chi phí vật tư (${costReport?.pendingCount || 0})` },
+                    { key: 'SLA', label: `SLA & Giám sát (${slaDashboard?.breachedCount || 0})` },
+                    { key: 'CONFIG', label: 'Cấu hình lương' },
+                  ].map((pt) => (
+                    <TouchableOpacity
+                      key={pt.key}
                       style={[
-                        styles.bmbFilterChipText,
-                        bmbPayrollTab === pt.key && styles.bmbFilterChipTextActive,
+                        styles.bmbFilterChip,
+                        bmbPayrollTab === pt.key && styles.bmbFilterChipActive,
                       ]}
+                      onPress={() => setBmbPayrollTab(pt.key as any)}
                     >
-                      {translate(pt.label)}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Sub-tab 1: Bảng lương tổng hợp */}
-              <ScreenTransition transitionKey={bmbPayrollTab} style={{ flex: 1 }}>
-              {bmbPayrollTab === 'SUMMARY' && (
-                <View style={styles.whiteSectionCard}>
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardBlockTitle}>
-                      {translate("Bảng lương tháng")} {bmbPayrollSummary?.month || new Date().toISOString().slice(0, 7)}
-                    </Text>
-                    <Text style={{ fontWeight: '800', fontSize: 16, color: '#2563EB' }}>
-                      Tổng: {Number(bmbPayrollSummary?.totalPayout || 0).toLocaleString('vi-VN')} đ
-                    </Text>
-                  </View>
-
-                  {(bmbPayrollSummary?.payrolls || []).map((p: any) => (
-                    <View key={p.techId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.cardTopRow}>
-                          <Text style={{ fontWeight: '700', fontSize: 14.5, color: '#0F172A' }}>
-                            {p.fullName} ({p.specialtyLabel || 'Điện - Nước'})
-                          </Text>
-                          <Text style={{ fontWeight: '800', fontSize: 15, color: '#16A34A' }}>
-                            {Number(p.totalSalary).toLocaleString('vi-VN')} đ
-                          </Text>
-                        </View>
-                        <Text style={styles.cardLocationText}>
-                          Lương CB: {Number(p.baseSalary).toLocaleString('vi-VN')} đ • OT: {p.otHours}h (+{Number(p.otPay).toLocaleString('vi-VN')} đ) • Phụ cấp: +{Number(p.allowance).toLocaleString('vi-VN')} đ
-                        </Text>
-                      </View>
-                    </View>
+                      <Text
+                        style={[
+                          styles.bmbFilterChipText,
+                          bmbPayrollTab === pt.key && styles.bmbFilterChipTextActive,
+                        ]}
+                      >
+                        {translate(pt.label)}
+                      </Text>
+                    </TouchableOpacity>
                   ))}
                 </View>
-              )}
 
-              {/* Sub-tab 2: Duyệt tăng ca */}
-              {bmbPayrollTab === 'OVERTIME' && (
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Danh sách yêu cầu tăng ca")}</Text>
-                  {bmbOvertimeRequests.length === 0 ? (
-                    <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu tăng ca nào.")}</Text>
-                  ) : (
-                    bmbOvertimeRequests.map((ot: any) => (
-                      <View key={ot.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
-                        <View style={{ flex: 1 }}>
-                          <View style={styles.cardTopRow}>
-                            <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                              {ot.techName} • {ot.hours} giờ ({ot.date})
-                            </Text>
-                            <View style={[
-                              styles.statusPill,
-                              ot.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : ot.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                            ]}>
-                              <Text style={[
-                                styles.statusPillText,
-                                ot.status === 'APPROVED' ? { color: '#15803D' } : ot.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                              ]}>
-                                {ot.status}
+                {/* Sub-tab 1: Bảng lương tổng hợp */}
+                <ScreenTransition transitionKey={bmbPayrollTab} style={{ flex: 1 }}>
+                  {bmbPayrollTab === 'SUMMARY' && (
+                    <View style={styles.whiteSectionCard}>
+                      <View style={styles.cardTopRow}>
+                        <Text style={styles.cardBlockTitle}>
+                          {translate("Bảng lương tháng")} {bmbPayrollSummary?.month || new Date().toISOString().slice(0, 7)}
+                        </Text>
+                        <Text style={{ fontWeight: '800', fontSize: 16, color: '#2563EB' }}>
+                          Tổng: {Number(bmbPayrollSummary?.totalPayout || 0).toLocaleString('vi-VN')} đ
+                        </Text>
+                      </View>
+
+                      {(bmbPayrollSummary?.payrolls || []).map((p: any) => (
+                        <View key={p.techId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
+                          <View style={{ flex: 1 }}>
+                            <View style={styles.cardTopRow}>
+                              <Text style={{ fontWeight: '700', fontSize: 14.5, color: '#0F172A' }}>
+                                {p.fullName} ({p.specialtyLabel || 'Điện - Nước'})
+                              </Text>
+                              <Text style={{ fontWeight: '800', fontSize: 15, color: '#16A34A' }}>
+                                {Number(p.totalSalary).toLocaleString('vi-VN')} đ
                               </Text>
                             </View>
+                            <Text style={styles.cardLocationText}>
+                              Lương CB: {Number(p.baseSalary).toLocaleString('vi-VN')} đ • OT: {p.otHours}h (+{Number(p.otPay).toLocaleString('vi-VN')} đ) • Phụ cấp: +{Number(p.allowance).toLocaleString('vi-VN')} đ
+                            </Text>
                           </View>
-                          <Text style={styles.cardLocationText}>
-                            Lý do: {ot.reason} {ot.ticketId ? `• Sự cố: ${ot.ticketId}` : ''}
-                          </Text>
-
-                          {ot.status === 'PENDING' && (
-                            <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
-                              <TouchableOpacity
-                                style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 14, backgroundColor: '#16A34A' }]}
-                                onPress={() => handleBmbReviewOvertime(ot.id, 'APPROVED', ot.hours)}
-                              >
-                                <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt")}</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 14, backgroundColor: '#DC2626' }]}
-                                onPress={() => handleBmbReviewOvertime(ot.id, 'REJECTED')}
-                              >
-                                <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối")}</Text>
-                              </TouchableOpacity>
-                            </View>
-                          )}
                         </View>
-                      </View>
-                    ))
-                  )}
-                </View>
-              )}
-
-              {/* Sub-tab 3: Nhật ký chấm công & Cảnh báo bất thường */}
-              {bmbPayrollTab === 'ATTENDANCE' && (
-                <View style={styles.whiteSectionCard}>
-                  <View style={[styles.cleanInfoCard, { borderColor: '#2563EB', backgroundColor: '#EFF6FF', marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
-                    <View style={{ flex: 1, marginRight: 8 }}>
-                      <Text style={{ fontWeight: '700', color: '#1D4ED8', fontSize: 13 }}>
-                        💡 {translate("Chức năng Quản lý Chấm công đã được nâng cấp chuyên sâu:")}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: '#1E40AF', marginTop: 2 }}>
-                        {translate("Hỗ trợ lọc theo ngày/tháng/KTV/tòa, xem GPS bản đồ, ảnh camera có watermark và xét duyệt ngoại lệ.")}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#2563EB' }]}
-                      onPress={() => {
-                        setBmbNavTab('ATTENDANCE');
-                        void fetchBmbAttendance();
-                      }}
-                    >
-                      <Text style={[styles.primaryActionBtnText, { fontSize: 12 }]}>{translate("Mở Quản lý chấm công")}</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <Text style={styles.cardBlockTitle}>{translate("Nhật ký chấm công toàn bộ KTV")}</Text>
-                  {bmbAnomalies.length > 0 && (
-                    <View style={[styles.cleanInfoCard, { borderColor: '#F59E0B', backgroundColor: '#FFFBEB', marginBottom: 12 }]}>
-                      <Text style={{ fontWeight: '700', color: '#B45309', fontSize: 13 }}>⚠️ {translate("Cảnh báo bất thường:")}</Text>
-                      {bmbAnomalies.map((anom, idx) => (
-                        <Text key={idx} style={{ fontSize: 12, color: '#B45309', marginTop: 2 }}>• {anom}</Text>
                       ))}
                     </View>
                   )}
 
-                  {bmbAttendanceLogs.map((log: any) => (
-                    <View key={log.id} style={[styles.notiBlueItem, { paddingVertical: 10, marginBottom: 6 }]}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontWeight: '700', fontSize: 13.5, color: '#0F172A' }}>
-                          {log.techName} • {log.date}
-                        </Text>
-                        <Text style={styles.cardLocationText}>
-                          Vào: {new Date(log.checkIn).toLocaleTimeString('vi-VN')} • Ra: {log.checkOut ? new Date(log.checkOut).toLocaleTimeString('vi-VN') : 'Chưa check-out'}
-                        </Text>
-                      </View>
-                      <View style={[styles.unreadPillBadge, { backgroundColor: '#F1F5F9' }]}>
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
-                          {log.workHours ? `${log.workHours}h` : 'Đang trực'}
-                        </Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-
-              {/* Sub-tab 4: Cấu hình lương */}
-              {bmbPayrollTab === 'CONFIG' && (
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Cấu hình mức lương & hệ số tăng ca")}</Text>
-                  <Text style={styles.fieldLabel}>{translate("Lương cơ bản mặc định (VND/tháng):")}</Text>
-                  <TextInput
-                    style={styles.bmbWebInput}
-                    value={String(payrollConfig.baseSalaryDefault)}
-                    onChangeText={(val) => setPayrollConfig((c) => ({ ...c, baseSalaryDefault: Number(val) || 0 }))}
-                    keyboardType="numeric"
-                  />
-                  <Text style={styles.fieldLabel}>{translate("Giờ làm việc tiêu chuẩn trong tháng (giờ):")}</Text>
-                  <TextInput
-                    style={styles.bmbWebInput}
-                    value={String(payrollConfig.standardMonthlyHours)}
-                    onChangeText={(val) => setPayrollConfig((c) => ({ ...c, standardMonthlyHours: Number(val) || 0 }))}
-                    keyboardType="numeric"
-                  />
-                  <Text style={styles.fieldLabel}>{translate("Hệ số tăng ca ngày thường:")}</Text>
-                  <TextInput
-                    style={styles.bmbWebInput}
-                    value={String(payrollConfig.otMultiplierNormal)}
-                    onChangeText={(val) => setPayrollConfig((c) => ({ ...c, otMultiplierNormal: Number(val) || 0 }))}
-                    keyboardType="numeric"
-                  />
-                  <Text style={styles.fieldLabel}>{translate("Phụ cấp ăn trưa/đi lại (VND):")}</Text>
-                  <TextInput
-                    style={styles.bmbWebInput}
-                    value={String(payrollConfig.standardAllowance)}
-                    onChangeText={(val) => setPayrollConfig((c) => ({ ...c, standardAllowance: Number(val) || 0 }))}
-                    keyboardType="numeric"
-                  />
-                  <TouchableOpacity
-                    style={[styles.primaryActionBtn, { marginTop: 14 }]}
-                    onPress={async () => {
-                      try {
-                        const res = await fetch(`${API_BASE_URL}/payroll/admin/config`, {
-                          method: 'PATCH',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                          body: JSON.stringify(payrollConfig),
-                        });
-                        const data = await res.json();
-                        showToast(data.message || 'Đã lưu cấu hình lương thành công.');
-                      } catch {
-                        showToast('Lỗi khi lưu cấu hình.');
-                      }
-                    }}
-                  >
-                    <Text style={styles.primaryActionBtnText}>{translate("Lưu cấu hình lương")}</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* Sub-tab: Đổi ca & Nghỉ phép */}
-              {bmbPayrollTab === 'SCHEDULE' && (
-                <View style={styles.whiteSectionCard}>
-                  <View style={styles.cardTopRow}>
-                    <Text style={styles.cardBlockTitle}>{translate("Duyệt Đổi ca & Nghỉ phép KTV")}</Text>
-                    <View style={[styles.unreadPillBadge, { backgroundColor: '#EFF6FF' }]}>
-                      <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
-                        {scheduleRequests.filter((r) => r.status === 'PENDING').length} {translate("yêu cầu chờ duyệt")}
-                      </Text>
-                    </View>
-                  </View>
-                  {scheduleRequests.length === 0 ? (
-                    <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu nào từ kỹ thuật viên.")}</Text>
-                  ) : (
-                    scheduleRequests.map((r: any) => {
-                      const isPending = r.status === 'PENDING';
-                      return (
-                        <View key={r.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
-                          <View style={{ flex: 1 }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                                {r.type === 'LEAVE' ? `🏖️ [Nghỉ phép] ${r.techName}` : `🔄 [Đổi ca] ${r.techName}`}
-                              </Text>
-                              <View style={[
-                                styles.statusPill,
-                                r.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : r.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                              ]}>
-                                <Text style={[
-                                  styles.statusPillText,
-                                  r.status === 'APPROVED' ? { color: '#15803D' } : r.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                                ]}>
-                                  {r.status === 'APPROVED' ? translate('Đã duyệt') : r.status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
+                  {/* Sub-tab 2: Duyệt tăng ca */}
+                  {bmbPayrollTab === 'OVERTIME' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>{translate("Danh sách yêu cầu tăng ca")}</Text>
+                      {bmbOvertimeRequests.length === 0 ? (
+                        <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu tăng ca nào.")}</Text>
+                      ) : (
+                        bmbOvertimeRequests.map((ot: any) => (
+                          <View key={ot.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 8 }]}>
+                            <View style={{ flex: 1 }}>
+                              <View style={styles.cardTopRow}>
+                                <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                                  {ot.techName} • {ot.hours} giờ ({ot.date})
                                 </Text>
-                              </View>
-                            </View>
-                            <Text style={styles.cardLocationText}>
-                              {r.type === 'LEAVE' ? `Loại: ${r.leaveType || 'Phép năm'} • Ngày: ${r.date}` : `Ca: ${r.shiftName || '08:00 - 17:00'} • Ngày: ${r.date}`}
-                            </Text>
-                            <Text style={[styles.techNotiBodyText, { marginTop: 4 }]}>
-                              {translate("Lý do:")} {r.reason}
-                            </Text>
-                            {r.reviewNote && (
-                              <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
-                                Ghi chú BMB: {r.reviewNote}
-                              </Text>
-                            )}
-
-                            {isPending && r.type === 'LEAVE' && (
-                              <View style={{ marginTop: 8 }}>
-                                <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Bàn giao công việc cho KTV (nếu còn việc đang làm):")}</Text>
-                                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                                  {technicians.filter((t) => t.id !== r.techId).map((t) => (
-                                    <TouchableOpacity
-                                      key={t.id}
-                                      style={[
-                                        styles.filterPill,
-                                        scheduleHandoverTechId[r.id] === t.id && styles.filterPillActive,
-                                        { paddingVertical: 4, paddingHorizontal: 8 }
-                                      ]}
-                                      onPress={() => setScheduleHandoverTechId((prev) => ({ ...prev, [r.id]: t.id }))}
-                                    >
-                                      <Text style={[
-                                        styles.filterPillText,
-                                        scheduleHandoverTechId[r.id] === t.id && styles.filterPillTextActive,
-                                        { fontSize: 11 }
-                                      ]}>
-                                        {t.fullName}
-                                      </Text>
-                                    </TouchableOpacity>
-                                  ))}
+                                <View style={[
+                                  styles.statusPill,
+                                  ot.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : ot.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                                ]}>
+                                  <Text style={[
+                                    styles.statusPillText,
+                                    ot.status === 'APPROVED' ? { color: '#15803D' } : ot.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                  ]}>
+                                    {ot.status}
+                                  </Text>
                                 </View>
                               </View>
-                            )}
-
-                            {isPending && (
-                              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                                <TouchableOpacity
-                                  style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', paddingVertical: 8 }]}
-                                  onPress={() => handleBmbReviewSchedule(r.id, 'APPROVED', scheduleHandoverTechId[r.id])}
-                                  disabled={loading}
-                                >
-                                  <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt")}</Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                  style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', paddingVertical: 8 }]}
-                                  onPress={() => handleBmbReviewSchedule(r.id, 'REJECTED')}
-                                  disabled={loading}
-                                >
-                                  <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối")}</Text>
-                                </TouchableOpacity>
-                              </View>
-                            )}
-                          </View>
-                        </View>
-                      );
-                    })
-                  )}
-                </View>
-              )}
-
-              {/* Sub-tab: Chi phí sửa chữa & Vật tư */}
-              {bmbPayrollTab === 'COSTS' && (
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Báo cáo Chi phí sửa chữa & Vật tư")}</Text>
-
-                  {/* Cards thống kê */}
-                  <View style={{ flexDirection: 'row', gap: 8, marginVertical: 10 }}>
-                    <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
-                      <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Đã phê duyệt")}</Text>
-                      <Text style={{ fontSize: 16, fontWeight: '800', color: '#16A34A' }}>
-                        {Number(costReport?.totalApprovedCost || 0).toLocaleString('vi-VN')} đ
-                      </Text>
-                    </View>
-                    <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
-                      <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Chờ xét duyệt")}</Text>
-                      <Text style={{ fontSize: 16, fontWeight: '800', color: '#D97706' }}>
-                        {Number(costReport?.totalPendingCost || 0).toLocaleString('vi-VN')} đ
-                      </Text>
-                    </View>
-                  </View>
-
-                  {/* Cảnh báo bất thường nếu có chi phí > 5 triệu */}
-                  {(costReport?.anomalies || []).length > 0 && (
-                    <View style={{ backgroundColor: '#FEF2F2', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FCA5A5', marginBottom: 12 }}>
-                      <Text style={{ fontWeight: '700', color: '#B91C1C', fontSize: 12.5 }}>
-                        🚨 {translate("Cảnh báo bất thường:")} Phát hiện {(costReport?.anomalies || []).length} phiếu chi phí vượt hạn mức thẩm định (trên 5.000.000 VND).
-                      </Text>
-                    </View>
-                  )}
-
-                  <Text style={[styles.cardBlockTitle, { fontSize: 13.5, marginTop: 4 }]}>
-                    {translate("Danh sách đề xuất chi phí")} ({costReport?.tickets?.length || 0})
-                  </Text>
-
-                  {(costReport?.tickets || []).length === 0 ? (
-                    <Text style={styles.techInfoLine}>{translate("Chưa có đề xuất chi phí nào.")}</Text>
-                  ) : (
-                    costReport.tickets.map((c: any) => {
-                      const isPending = c.status === 'PENDING_APPROVAL';
-                      return (
-                        <View key={c.ticketId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
-                          <View style={{ flex: 1 }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                                {c.ticketCode} • {Number(c.totalCost || 0).toLocaleString('vi-VN')} đ
+                              <Text style={styles.cardLocationText}>
+                                Lý do: {ot.reason} {ot.ticketId ? `• Sự cố: ${ot.ticketId}` : ''}
                               </Text>
-                              <View style={[
-                                styles.statusPill,
-                                c.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : c.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
-                              ]}>
-                                <Text style={[
-                                  styles.statusPillText,
-                                  c.status === 'APPROVED' ? { color: '#15803D' } : c.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
-                                ]}>
-                                  {c.status === 'APPROVED' ? translate('Đã duyệt') : c.status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
-                                </Text>
-                              </View>
+
+                              {ot.status === 'PENDING' && (
+                                <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                                  <TouchableOpacity
+                                    style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 14, backgroundColor: '#16A34A' }]}
+                                    onPress={() => handleBmbReviewOvertime(ot.id, 'APPROVED', ot.hours)}
+                                  >
+                                    <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt")}</Text>
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 14, backgroundColor: '#DC2626' }]}
+                                    onPress={() => handleBmbReviewOvertime(ot.id, 'REJECTED')}
+                                  >
+                                    <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối")}</Text>
+                                  </TouchableOpacity>
+                                </View>
+                              )}
                             </View>
-                            <Text style={styles.cardLocationText}>{c.ticketTitle}</Text>
-                            {(c.items || []).map((it: any, i: number) => (
-                              <Text key={i} style={[styles.techNotiBodyText, { fontSize: 12 }]}>
-                                • {it.materialName} ({it.quantity} {it.unit} x {Number(it.unitPrice).toLocaleString('vi-VN')} đ = {Number(it.totalPrice).toLocaleString('vi-VN')} đ)
-                              </Text>
-                            ))}
-                            {Number(c.otherCost || 0) > 0 && (
-                              <Text style={[styles.techNotiBodyText, { fontSize: 12, fontStyle: 'italic' }]}>
-                                • Phụ phí khác: {Number(c.otherCost).toLocaleString('vi-VN')} đ
-                              </Text>
-                            )}
-
-                            {isPending && (
-                              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                                <TouchableOpacity
-                                  style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', paddingVertical: 8 }]}
-                                  onPress={() => handleBmbReviewCost(c.ticketId, 'APPROVED')}
-                                  disabled={loading}
-                                >
-                                  <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt chi phí")}</Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                  style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', paddingVertical: 8 }]}
-                                  onPress={() => handleBmbReviewCost(c.ticketId, 'REJECTED')}
-                                  disabled={loading}
-                                >
-                                  <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối chi phí")}</Text>
-                                </TouchableOpacity>
-                              </View>
-                            )}
                           </View>
-                        </View>
-                      );
-                    })
+                        ))
+                      )}
+                    </View>
                   )}
-                </View>
-              )}
 
-              {/* Sub-tab: SLA & Giám sát Leo thang */}
-              {bmbPayrollTab === 'SLA' && (
-                <View style={styles.whiteSectionCard}>
-                  <Text style={styles.cardBlockTitle}>{translate("Giám sát SLA & Cảnh báo Leo thang")}</Text>
+                  {/* Sub-tab 3: Nhật ký chấm công & Cảnh báo bất thường */}
+                  {bmbPayrollTab === 'ATTENDANCE' && (
+                    <View style={styles.whiteSectionCard}>
+                      <View style={[styles.cleanInfoCard, { borderColor: '#2563EB', backgroundColor: '#EFF6FF', marginBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+                        <View style={{ flex: 1, marginRight: 8 }}>
+                          <Text style={{ fontWeight: '700', color: '#1D4ED8', fontSize: 13 }}>
+                            💡 {translate("Chức năng Quản lý Chấm công đã được nâng cấp chuyên sâu:")}
+                          </Text>
+                          <Text style={{ fontSize: 12, color: '#1E40AF', marginTop: 2 }}>
+                            {translate("Hỗ trợ lọc theo ngày/tháng/KTV/tòa, xem GPS bản đồ, ảnh camera có watermark và xét duyệt ngoại lệ.")}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          style={[styles.primaryActionBtn, { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#2563EB' }]}
+                          onPress={() => {
+                            setBmbNavTab('ATTENDANCE');
+                            void fetchBmbAttendance();
+                          }}
+                        >
+                          <Text style={[styles.primaryActionBtnText, { fontSize: 12 }]}>{translate("Mở Quản lý chấm công")}</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.cardBlockTitle}>{translate("Nhật ký chấm công toàn bộ KTV")}</Text>
+                      {bmbAnomalies.length > 0 && (
+                        <View style={[styles.cleanInfoCard, { borderColor: '#F59E0B', backgroundColor: '#FFFBEB', marginBottom: 12 }]}>
+                          <Text style={{ fontWeight: '700', color: '#B45309', fontSize: 13 }}>⚠️ {translate("Cảnh báo bất thường:")}</Text>
+                          {bmbAnomalies.map((anom, idx) => (
+                            <Text key={idx} style={{ fontSize: 12, color: '#B45309', marginTop: 2 }}>• {anom}</Text>
+                          ))}
+                        </View>
+                      )}
 
-                  {/* Nút phát tín hiệu khẩn cấp BMB */}
-                  <View style={{ backgroundColor: '#FEF2F2', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#FCA5A5', marginVertical: 10 }}>
-                    <Text style={{ fontWeight: '700', color: '#991B1B', fontSize: 13, marginBottom: 4 }}>
-                      🚨 {translate("Cảnh báo khẩn cấp hệ thống")}
-                    </Text>
-                    <Text style={{ fontSize: 12, color: '#7F1D1D', marginBottom: 8 }}>
-                      {translate("Phát tín hiệu trực tiếp bỏ qua hàng đợi AI, gửi thông báo khẩn tới toàn bộ KTV và Quản lý tòa nhà.")}
-                    </Text>
-                    <TouchableOpacity
-                      style={[styles.primaryActionBtn, { backgroundColor: '#DC2626', paddingVertical: 8 }]}
-                      onPress={handleEmergencyBroadcast}
-                      disabled={loading}
-                    >
-                      <Text style={styles.primaryActionBtnText}>🚨 {translate("Phát tín hiệu khẩn cấp")}</Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Thống kê SLA */}
-                  <View style={{ flexDirection: 'row', gap: 8, marginVertical: 10 }}>
-                    <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
-                      <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Đúng hạn")}</Text>
-                      <Text style={{ fontSize: 18, fontWeight: '800', color: '#16A34A' }}>
-                        {slaDashboard?.onTrackCount || 0}
-                      </Text>
-                    </View>
-                    <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
-                      <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Sắp quá hạn")}</Text>
-                      <Text style={{ fontSize: 18, fontWeight: '800', color: '#D97706' }}>
-                        {slaDashboard?.atRiskCount || 0}
-                      </Text>
-                    </View>
-                    <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
-                      <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Quá hạn SLA")}</Text>
-                      <Text style={{ fontSize: 18, fontWeight: '800', color: '#DC2626' }}>
-                        {slaDashboard?.breachedCount || 0}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <Text style={[styles.cardBlockTitle, { fontSize: 13.5, marginTop: 4 }]}>
-                    {translate("Sự cố đang giám sát SLA")} ({slaDashboard?.activeTrackings?.length || 0})
-                  </Text>
-
-                  {(slaDashboard?.activeTrackings || []).length === 0 ? (
-                    <Text style={styles.techInfoLine}>{translate("Không có sự cố nào đang theo dõi SLA.")}</Text>
-                  ) : (
-                    slaDashboard.activeTrackings.map((t: any) => {
-                      const status = t.status || 'ON_TRACK';
-                      const bg = status === 'BREACHED' ? '#FEE2E2' : status === 'AT_RISK' ? '#FEF3C7' : status === 'PAUSED' ? '#F1F5F9' : '#DCFCE7';
-                      const fg = status === 'BREACHED' ? '#B91C1C' : status === 'AT_RISK' ? '#B45309' : status === 'PAUSED' ? '#64748B' : '#15803D';
-                      const label = status === 'BREACHED' ? 'Quá hạn SLA' : status === 'AT_RISK' ? 'Sắp quá hạn' : status === 'PAUSED' ? 'Tạm dừng' : 'Đúng hạn';
-                      return (
-                        <View key={t.ticketId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
+                      {bmbAttendanceLogs.map((log: any) => (
+                        <View key={log.id} style={[styles.notiBlueItem, { paddingVertical: 10, marginBottom: 6 }]}>
                           <View style={{ flex: 1 }}>
-                            <View style={styles.cardTopRow}>
-                              <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
-                                {t.ticketCode} • {t.ticketTitle}
-                              </Text>
-                              <View style={[styles.statusPill, { backgroundColor: bg }]}>
-                                <Text style={[styles.statusPillText, { color: fg }]}>{translate(label)}</Text>
-                              </View>
-                            </View>
+                            <Text style={{ fontWeight: '700', fontSize: 13.5, color: '#0F172A' }}>
+                              {log.techName} • {log.date}
+                            </Text>
                             <Text style={styles.cardLocationText}>
-                              Ưu tiên: {translate(PRIORITY_VN[t.priority] || t.priority)} • Danh mục: {translate(CATEGORY_SHORT_VN[t.category] || t.category)}
+                              Vào: {new Date(log.checkIn).toLocaleTimeString('vi-VN')} • Ra: {log.checkOut ? new Date(log.checkOut).toLocaleTimeString('vi-VN') : 'Chưa check-out'}
                             </Text>
-                            <Text style={[styles.techNotiBodyText, { fontSize: 11.5, marginTop: 2 }]}>
-                              Hạn xử lý: {t.resolutionDeadline ? new Date(t.resolutionDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : 'N/A'}
+                          </View>
+                          <View style={[styles.unreadPillBadge, { backgroundColor: '#F1F5F9' }]}>
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
+                              {log.workHours ? `${log.workHours}h` : 'Đang trực'}
                             </Text>
-                            {t.escalationLevel > 0 && (
-                              <Text style={{ fontSize: 11.5, color: '#DC2626', fontWeight: '700', marginTop: 3 }}>
-                                ⚠️ Cấp leo thang {t.escalationLevel}: Đã kích hoạt báo động cấp quản lý
-                              </Text>
-                            )}
-
-                            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                              <TouchableOpacity
-                                style={[
-                                  styles.primaryActionBtn,
-                                  { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: status === 'PAUSED' ? '#16A34A' : '#64748B' }
-                                ]}
-                                onPress={() => handleBmbTogglePauseSla(t.ticketId, status === 'PAUSED')}
-                                disabled={loading}
-                              >
-                                <Text style={[styles.primaryActionBtnText, { fontSize: 11.5 }]}>
-                                  {status === 'PAUSED' ? `▶ ${translate('Tiếp tục SLA')}` : `⏸ ${translate('Tạm dừng SLA')}`}
-                                </Text>
-                              </TouchableOpacity>
-                            </View>
                           </View>
                         </View>
-                      );
-                    })
+                      ))}
+                    </View>
                   )}
+
+                  {/* Sub-tab 4: Cấu hình lương */}
+                  {bmbPayrollTab === 'CONFIG' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>{translate("Cấu hình mức lương & hệ số tăng ca")}</Text>
+                      <Text style={styles.fieldLabel}>{translate("Lương cơ bản mặc định (VND/tháng):")}</Text>
+                      <TextInput
+                        style={styles.bmbWebInput}
+                        value={String(payrollConfig.baseSalaryDefault)}
+                        onChangeText={(val) => setPayrollConfig((c) => ({ ...c, baseSalaryDefault: Number(val) || 0 }))}
+                        keyboardType="numeric"
+                      />
+                      <Text style={styles.fieldLabel}>{translate("Giờ làm việc tiêu chuẩn trong tháng (giờ):")}</Text>
+                      <TextInput
+                        style={styles.bmbWebInput}
+                        value={String(payrollConfig.standardMonthlyHours)}
+                        onChangeText={(val) => setPayrollConfig((c) => ({ ...c, standardMonthlyHours: Number(val) || 0 }))}
+                        keyboardType="numeric"
+                      />
+                      <Text style={styles.fieldLabel}>{translate("Hệ số tăng ca ngày thường:")}</Text>
+                      <TextInput
+                        style={styles.bmbWebInput}
+                        value={String(payrollConfig.otMultiplierNormal)}
+                        onChangeText={(val) => setPayrollConfig((c) => ({ ...c, otMultiplierNormal: Number(val) || 0 }))}
+                        keyboardType="numeric"
+                      />
+                      <Text style={styles.fieldLabel}>{translate("Phụ cấp ăn trưa/đi lại (VND):")}</Text>
+                      <TextInput
+                        style={styles.bmbWebInput}
+                        value={String(payrollConfig.standardAllowance)}
+                        onChangeText={(val) => setPayrollConfig((c) => ({ ...c, standardAllowance: Number(val) || 0 }))}
+                        keyboardType="numeric"
+                      />
+                      <TouchableOpacity
+                        style={[styles.primaryActionBtn, { marginTop: 14 }]}
+                        onPress={async () => {
+                          try {
+                            const res = await fetch(`${API_BASE_URL}/payroll/admin/config`, {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                              body: JSON.stringify(payrollConfig),
+                            });
+                            const data = await res.json();
+                            showToast(data.message || 'Đã lưu cấu hình lương thành công.');
+                          } catch {
+                            showToast('Lỗi khi lưu cấu hình.');
+                          }
+                        }}
+                      >
+                        <Text style={styles.primaryActionBtnText}>{translate("Lưu cấu hình lương")}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Sub-tab: Đổi ca & Nghỉ phép */}
+                  {bmbPayrollTab === 'SCHEDULE' && (
+                    <View style={styles.whiteSectionCard}>
+                      <View style={styles.cardTopRow}>
+                        <Text style={styles.cardBlockTitle}>{translate("Duyệt Đổi ca & Nghỉ phép KTV")}</Text>
+                        <View style={[styles.unreadPillBadge, { backgroundColor: '#EFF6FF' }]}>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>
+                            {scheduleRequests.filter((r) => r.status === 'PENDING').length} {translate("yêu cầu chờ duyệt")}
+                          </Text>
+                        </View>
+                      </View>
+                      {scheduleRequests.length === 0 ? (
+                        <Text style={styles.techInfoLine}>{translate("Chưa có yêu cầu nào từ kỹ thuật viên.")}</Text>
+                      ) : (
+                        scheduleRequests.map((r: any) => {
+                          const isPending = r.status === 'PENDING';
+                          return (
+                            <View key={r.id} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
+                              <View style={{ flex: 1 }}>
+                                <View style={styles.cardTopRow}>
+                                  <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                                    {r.type === 'LEAVE' ? `🏖️ [Nghỉ phép] ${r.techName}` : `🔄 [Đổi ca] ${r.techName}`}
+                                  </Text>
+                                  <View style={[
+                                    styles.statusPill,
+                                    r.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : r.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.statusPillText,
+                                      r.status === 'APPROVED' ? { color: '#15803D' } : r.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                    ]}>
+                                      {r.status === 'APPROVED' ? translate('Đã duyệt') : r.status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
+                                    </Text>
+                                  </View>
+                                </View>
+                                <Text style={styles.cardLocationText}>
+                                  {r.type === 'LEAVE' ? `Loại: ${r.leaveType || 'Phép năm'} • Ngày: ${r.date}` : `Ca: ${r.shiftName || '08:00 - 17:00'} • Ngày: ${r.date}`}
+                                </Text>
+                                <Text style={[styles.techNotiBodyText, { marginTop: 4 }]}>
+                                  {translate("Lý do:")} {r.reason}
+                                </Text>
+                                {r.reviewNote && (
+                                  <Text style={{ fontSize: 11.5, color: '#64748B', fontStyle: 'italic', marginTop: 2 }}>
+                                    Ghi chú BMB: {r.reviewNote}
+                                  </Text>
+                                )}
+
+                                {isPending && r.type === 'LEAVE' && (
+                                  <View style={{ marginTop: 8 }}>
+                                    <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Bàn giao công việc cho KTV (nếu còn việc đang làm):")}</Text>
+                                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                                      {technicians.filter((t) => t.id !== r.techId).map((t) => (
+                                        <TouchableOpacity
+                                          key={t.id}
+                                          style={[
+                                            styles.filterPill,
+                                            scheduleHandoverTechId[r.id] === t.id && styles.filterPillActive,
+                                            { paddingVertical: 4, paddingHorizontal: 8 }
+                                          ]}
+                                          onPress={() => setScheduleHandoverTechId((prev) => ({ ...prev, [r.id]: t.id }))}
+                                        >
+                                          <Text style={[
+                                            styles.filterPillText,
+                                            scheduleHandoverTechId[r.id] === t.id && styles.filterPillTextActive,
+                                            { fontSize: 11 }
+                                          ]}>
+                                            {t.fullName}
+                                          </Text>
+                                        </TouchableOpacity>
+                                      ))}
+                                    </View>
+                                  </View>
+                                )}
+
+                                {isPending && (
+                                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                                    <TouchableOpacity
+                                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', paddingVertical: 8 }]}
+                                      onPress={() => handleBmbReviewSchedule(r.id, 'APPROVED', scheduleHandoverTechId[r.id])}
+                                      disabled={loading}
+                                    >
+                                      <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt")}</Text>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', paddingVertical: 8 }]}
+                                      onPress={() => handleBmbReviewSchedule(r.id, 'REJECTED')}
+                                      disabled={loading}
+                                    >
+                                      <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối")}</Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  )}
+
+                  {/* Sub-tab: Chi phí sửa chữa & Vật tư */}
+                  {bmbPayrollTab === 'COSTS' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>{translate("Báo cáo Chi phí sửa chữa & Vật tư")}</Text>
+
+                      {/* Cards thống kê */}
+                      <View style={{ flexDirection: 'row', gap: 8, marginVertical: 10 }}>
+                        <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
+                          <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Đã phê duyệt")}</Text>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: '#16A34A' }}>
+                            {Number(costReport?.totalApprovedCost || 0).toLocaleString('vi-VN')} đ
+                          </Text>
+                        </View>
+                        <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
+                          <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Chờ xét duyệt")}</Text>
+                          <Text style={{ fontSize: 16, fontWeight: '800', color: '#D97706' }}>
+                            {Number(costReport?.totalPendingCost || 0).toLocaleString('vi-VN')} đ
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Cảnh báo bất thường nếu có chi phí > 5 triệu */}
+                      {(costReport?.anomalies || []).length > 0 && (
+                        <View style={{ backgroundColor: '#FEF2F2', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#FCA5A5', marginBottom: 12 }}>
+                          <Text style={{ fontWeight: '700', color: '#B91C1C', fontSize: 12.5 }}>
+                            🚨 {translate("Cảnh báo bất thường:")} Phát hiện {(costReport?.anomalies || []).length} phiếu chi phí vượt hạn mức thẩm định (trên 5.000.000 VND).
+                          </Text>
+                        </View>
+                      )}
+
+                      <Text style={[styles.cardBlockTitle, { fontSize: 13.5, marginTop: 4 }]}>
+                        {translate("Danh sách đề xuất chi phí")} ({costReport?.tickets?.length || 0})
+                      </Text>
+
+                      {(costReport?.tickets || []).length === 0 ? (
+                        <Text style={styles.techInfoLine}>{translate("Chưa có đề xuất chi phí nào.")}</Text>
+                      ) : (
+                        costReport.tickets.map((c: any) => {
+                          const isPending = c.status === 'PENDING_APPROVAL';
+                          return (
+                            <View key={c.ticketId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
+                              <View style={{ flex: 1 }}>
+                                <View style={styles.cardTopRow}>
+                                  <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                                    {c.ticketCode} • {Number(c.totalCost || 0).toLocaleString('vi-VN')} đ
+                                  </Text>
+                                  <View style={[
+                                    styles.statusPill,
+                                    c.status === 'APPROVED' ? { backgroundColor: '#DCFCE7' } : c.status === 'REJECTED' ? { backgroundColor: '#FEE2E2' } : { backgroundColor: '#FEF3C7' }
+                                  ]}>
+                                    <Text style={[
+                                      styles.statusPillText,
+                                      c.status === 'APPROVED' ? { color: '#15803D' } : c.status === 'REJECTED' ? { color: '#B91C1C' } : { color: '#B45309' }
+                                    ]}>
+                                      {c.status === 'APPROVED' ? translate('Đã duyệt') : c.status === 'REJECTED' ? translate('Từ chối') : translate('Chờ duyệt')}
+                                    </Text>
+                                  </View>
+                                </View>
+                                <Text style={styles.cardLocationText}>{c.ticketTitle}</Text>
+                                {(c.items || []).map((it: any, i: number) => (
+                                  <Text key={i} style={[styles.techNotiBodyText, { fontSize: 12 }]}>
+                                    • {it.materialName} ({it.quantity} {it.unit} x {Number(it.unitPrice).toLocaleString('vi-VN')} đ = {Number(it.totalPrice).toLocaleString('vi-VN')} đ)
+                                  </Text>
+                                ))}
+                                {Number(c.otherCost || 0) > 0 && (
+                                  <Text style={[styles.techNotiBodyText, { fontSize: 12, fontStyle: 'italic' }]}>
+                                    • Phụ phí khác: {Number(c.otherCost).toLocaleString('vi-VN')} đ
+                                  </Text>
+                                )}
+
+                                {isPending && (
+                                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                                    <TouchableOpacity
+                                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#16A34A', paddingVertical: 8 }]}
+                                      onPress={() => handleBmbReviewCost(c.ticketId, 'APPROVED')}
+                                      disabled={loading}
+                                    >
+                                      <Text style={styles.primaryActionBtnText}>✓ {translate("Duyệt chi phí")}</Text>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                      style={[styles.primaryActionBtn, { flex: 1, backgroundColor: '#DC2626', paddingVertical: 8 }]}
+                                      onPress={() => handleBmbReviewCost(c.ticketId, 'REJECTED')}
+                                      disabled={loading}
+                                    >
+                                      <Text style={styles.primaryActionBtnText}>✕ {translate("Từ chối chi phí")}</Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  )}
+
+                  {/* Sub-tab: SLA & Giám sát Leo thang */}
+                  {bmbPayrollTab === 'SLA' && (
+                    <View style={styles.whiteSectionCard}>
+                      <Text style={styles.cardBlockTitle}>{translate("Giám sát SLA & Cảnh báo Leo thang")}</Text>
+
+                      {/* Nút phát tín hiệu khẩn cấp BMB */}
+                      <View style={{ backgroundColor: '#FEF2F2', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#FCA5A5', marginVertical: 10 }}>
+                        <Text style={{ fontWeight: '700', color: '#991B1B', fontSize: 13, marginBottom: 4 }}>
+                          🚨 {translate("Cảnh báo khẩn cấp hệ thống")}
+                        </Text>
+                        <Text style={{ fontSize: 12, color: '#7F1D1D', marginBottom: 8 }}>
+                          {translate("Phát tín hiệu trực tiếp bỏ qua hàng đợi AI, gửi thông báo khẩn tới toàn bộ KTV và Quản lý tòa nhà.")}
+                        </Text>
+                        <TouchableOpacity
+                          style={[styles.primaryActionBtn, { backgroundColor: '#DC2626', paddingVertical: 8 }]}
+                          onPress={handleEmergencyBroadcast}
+                          disabled={loading}
+                        >
+                          <Text style={styles.primaryActionBtnText}>🚨 {translate("Phát tín hiệu khẩn cấp")}</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Thống kê SLA */}
+                      <View style={{ flexDirection: 'row', gap: 8, marginVertical: 10 }}>
+                        <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
+                          <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Đúng hạn")}</Text>
+                          <Text style={{ fontSize: 18, fontWeight: '800', color: '#16A34A' }}>
+                            {slaDashboard?.onTrackCount || 0}
+                          </Text>
+                        </View>
+                        <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
+                          <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Sắp quá hạn")}</Text>
+                          <Text style={{ fontSize: 18, fontWeight: '800', color: '#D97706' }}>
+                            {slaDashboard?.atRiskCount || 0}
+                          </Text>
+                        </View>
+                        <View style={[styles.notiBlueItem, { flex: 1, paddingVertical: 8 }]}>
+                          <Text style={[styles.fieldLabel, { fontSize: 11 }]}>{translate("Quá hạn SLA")}</Text>
+                          <Text style={{ fontSize: 18, fontWeight: '800', color: '#DC2626' }}>
+                            {slaDashboard?.breachedCount || 0}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text style={[styles.cardBlockTitle, { fontSize: 13.5, marginTop: 4 }]}>
+                        {translate("Sự cố đang giám sát SLA")} ({slaDashboard?.activeTrackings?.length || 0})
+                      </Text>
+
+                      {(slaDashboard?.activeTrackings || []).length === 0 ? (
+                        <Text style={styles.techInfoLine}>{translate("Không có sự cố nào đang theo dõi SLA.")}</Text>
+                      ) : (
+                        slaDashboard.activeTrackings.map((t: any) => {
+                          const status = t.status || 'ON_TRACK';
+                          const bg = status === 'BREACHED' ? '#FEE2E2' : status === 'AT_RISK' ? '#FEF3C7' : status === 'PAUSED' ? '#F1F5F9' : '#DCFCE7';
+                          const fg = status === 'BREACHED' ? '#B91C1C' : status === 'AT_RISK' ? '#B45309' : status === 'PAUSED' ? '#64748B' : '#15803D';
+                          const label = status === 'BREACHED' ? 'Quá hạn SLA' : status === 'AT_RISK' ? 'Sắp quá hạn' : status === 'PAUSED' ? 'Tạm dừng' : 'Đúng hạn';
+                          return (
+                            <View key={t.ticketId} style={[styles.notiBlueItem, { paddingVertical: 12, marginBottom: 10 }]}>
+                              <View style={{ flex: 1 }}>
+                                <View style={styles.cardTopRow}>
+                                  <Text style={{ fontWeight: '700', fontSize: 14, color: '#0F172A' }}>
+                                    {t.ticketCode} • {t.ticketTitle}
+                                  </Text>
+                                  <View style={[styles.statusPill, { backgroundColor: bg }]}>
+                                    <Text style={[styles.statusPillText, { color: fg }]}>{translate(label)}</Text>
+                                  </View>
+                                </View>
+                                <Text style={styles.cardLocationText}>
+                                  Ưu tiên: {translate(PRIORITY_VN[t.priority] || t.priority)} • Danh mục: {translate(CATEGORY_SHORT_VN[t.category] || t.category)}
+                                </Text>
+                                <Text style={[styles.techNotiBodyText, { fontSize: 11.5, marginTop: 2 }]}>
+                                  Hạn xử lý: {t.resolutionDeadline ? new Date(t.resolutionDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : 'N/A'}
+                                </Text>
+                                {t.escalationLevel > 0 && (
+                                  <Text style={{ fontSize: 11.5, color: '#DC2626', fontWeight: '700', marginTop: 3 }}>
+                                    ⚠️ Cấp leo thang {t.escalationLevel}: Đã kích hoạt báo động cấp quản lý
+                                  </Text>
+                                )}
+
+                                <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.primaryActionBtn,
+                                      { paddingVertical: 6, paddingHorizontal: 12, backgroundColor: status === 'PAUSED' ? '#16A34A' : '#64748B' }
+                                    ]}
+                                    onPress={() => handleBmbTogglePauseSla(t.ticketId, status === 'PAUSED')}
+                                    disabled={loading}
+                                  >
+                                    <Text style={[styles.primaryActionBtnText, { fontSize: 11.5 }]}>
+                                      {status === 'PAUSED' ? `▶ ${translate('Tiếp tục SLA')}` : `⏸ ${translate('Tạm dừng SLA')}`}
+                                    </Text>
+                                  </TouchableOpacity>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                        })
+                      )}
+                    </View>
+                  )}
+                </ScreenTransition>
+              </ScrollView>
+
+              {/* CỘT PHẢI: QUY CHẾ VÀ HỖ TRỢ ĐỐI SOÁT */}
+              <ScrollView style={styles.bmbRightInspector} showsVerticalScrollIndicator={false}>
+                <Text style={styles.bmbPanelBlueTitle}>{translate("Quy chế & Khiếu nại lương")}</Text>
+                <View style={[styles.cleanInfoCard, { marginTop: 10 }]}>
+                  <Text style={styles.cleanInfoCardTitle}>{translate("Nguyên tắc tính lương:")}</Text>
+                  <Text style={styles.cleanInfoCardDesc}>
+                    • Lương tháng cố định chi trả vào ngày 05 hàng tháng.{'\n'}
+                    • Giờ tăng ca (OT) chỉ được tính khi có phê duyệt từ Ban Quản Lý (BMB).{'\n'}
+                    • Tăng ca khẩn cấp trong ca đêm được hỗ trợ duyệt bù sau khi có xác nhận nghiệm thu sự cố.
+                  </Text>
                 </View>
-              )}
-              </ScreenTransition>
-            </ScrollView>
 
-            {/* CỘT PHẢI: QUY CHẾ VÀ HỖ TRỢ ĐỐI SOÁT */}
-            <ScrollView style={styles.bmbRightInspector} showsVerticalScrollIndicator={false}>
-              <Text style={styles.bmbPanelBlueTitle}>{translate("Quy chế & Khiếu nại lương")}</Text>
-              <View style={[styles.cleanInfoCard, { marginTop: 10 }]}>
-                <Text style={styles.cleanInfoCardTitle}>{translate("Nguyên tắc tính lương:")}</Text>
-                <Text style={styles.cleanInfoCardDesc}>
-                  • Lương tháng cố định chi trả vào ngày 05 hàng tháng.{'\n'}
-                  • Giờ tăng ca (OT) chỉ được tính khi có phê duyệt từ Ban Quản Lý (BMB).{'\n'}
-                  • Tăng ca khẩn cấp trong ca đêm được hỗ trợ duyệt bù sau khi có xác nhận nghiệm thu sự cố.
-                </Text>
-              </View>
-
-              <Text style={[styles.cardBlockTitle, { marginTop: 14 }]}>{translate("Yêu cầu đối soát từ KTV")}</Text>
-              {(bmbPayrollSummary?.reconcileRequests || []).length === 0 ? (
-                <Text style={styles.techInfoLine}>{translate("Không có khiếu nại nào.")}</Text>
-              ) : (
-                (bmbPayrollSummary?.reconcileRequests || []).map((rc: any) => (
-                  <View key={rc.id} style={[styles.notiBlueItem, { marginBottom: 6 }]}>
-                    <Text style={{ fontWeight: '700', fontSize: 13, color: '#0F172A' }}>
-                      {rc.techName} • Tháng {rc.month}
-                    </Text>
-                    <Text style={styles.cardLocationText}>{rc.note}</Text>
-                  </View>
-                ))
-              )}
-            </ScrollView>
-          </View>
-        )}
+                <Text style={[styles.cardBlockTitle, { marginTop: 14 }]}>{translate("Yêu cầu đối soát từ KTV")}</Text>
+                {(bmbPayrollSummary?.reconcileRequests || []).length === 0 ? (
+                  <Text style={styles.techInfoLine}>{translate("Không có khiếu nại nào.")}</Text>
+                ) : (
+                  (bmbPayrollSummary?.reconcileRequests || []).map((rc: any) => (
+                    <View key={rc.id} style={[styles.notiBlueItem, { marginBottom: 6 }]}>
+                      <Text style={{ fontWeight: '700', fontSize: 13, color: '#0F172A' }}>
+                        {rc.techName} • Tháng {rc.month}
+                      </Text>
+                      <Text style={styles.cardLocationText}>{rc.note}</Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            </View>
+          )}
         </ScreenTransition>
       </View>
       <Modal
@@ -12372,7 +13173,7 @@ function AppContent() {
         visible={showFirstLoginPasswordModal}
         transparent
         animationType="fade"
-        onRequestClose={() => {}}
+        onRequestClose={() => { }}
       >
         <View style={styles.technicianModalOverlay}>
           <View style={styles.technicianModalCard}>
@@ -12468,14 +13269,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
     ...(Platform.OS === 'web'
       ? {
-          borderLeftWidth: 1,
-          borderRightWidth: 1,
-          borderColor: '#E2E8F0',
-          shadowColor: '#0F172A',
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.03,
-          shadowRadius: 10,
-        }
+        borderLeftWidth: 1,
+        borderRightWidth: 1,
+        borderColor: '#E2E8F0',
+        shadowColor: '#0F172A',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.03,
+        shadowRadius: 10,
+      }
       : {}),
   },
   scrollArea: {
@@ -12636,7 +13437,7 @@ const styles = StyleSheet.create({
   bmbMenuIconActive: {
     opacity: 1,
   },
-    bmbMenuBtnActive: {
+  bmbMenuBtnActive: {
     backgroundColor: '#EFF6FF',
   },
   bmbMenuBtnText: {

@@ -904,17 +904,10 @@
   "lockedMonths": [],
   "activeNonces": [
     {
-      "nonce": "6d91b2dd3818c7e97ea6412d5397b37d",
+      "nonce": "20c81987ff2e51228847afac6663f385",
       "techId": "622b32f6-09ef-4123-b25f-c302fbd7a881",
-      "createdAt": 1795008446791,
-      "expiresAt": 1795008626791,
-      "used": false
-    },
-    {
-      "nonce": "13335f6aad82b46938e9e2adffd35031",
-      "techId": "622b32f6-09ef-4123-b25f-c302fbd7a881",
-      "createdAt": 1795008480650,
-      "expiresAt": 1795008660650,
+      "createdAt": 1795135896259,
+      "expiresAt": 1795136076259,
       "used": false
     }
   ],

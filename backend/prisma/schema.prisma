@@ -81,6 +81,10 @@ model IncidentTicket {
   isAiValidJson       Boolean             @default(true)
   isAiFallbackManual  Boolean             @default(false)
   aiRawResponse       Json?
+  aiStatus            String              @default("ANALYZING") // "ANALYZING" | "COMPLETED" | "MANUAL_REVIEW"
+  aiRetryCount        Int                 @default(0)
+  aiError             String?
+  aiDiscrepancyNotes  String?
   finalCategory       IncidentCategory?
   finalPriority       PriorityLevel?
   bmbAdminNote        String?
@@ -115,6 +119,7 @@ model IncidentTicket {
   slaTracking         SlaTracking?
   media               TicketMedia[]
   statusLogs          TicketStatusLog[]
+  aiGuidance          TechnicianAiGuidance?
 
   @@index([status])
   @@index([residentId, status])
@@ -122,6 +127,7 @@ model IncidentTicket {
   @@index([ticketCode])
   @@index([apartmentId], map: "idx_ticket_apartment")
   @@index([isAnonymous])
+  @@index([aiStatus])
 }
 
 model TicketMedia {
@@ -152,6 +158,31 @@ model TicketStatusLog {
   ticket      IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
+}
+
+model TechnicianAiGuidance {
+  id                  String         @id @default(uuid())
+  ticketId            String         @unique
+  status              String         @default("GENERATING") // "GENERATING" | "READY" | "UNAVAILABLE"
+  possibleCauses      Json?
+  inspectionChecklist Json?
+  estimatedMaterials  Json?
+  safeHandlingSteps   Json?
+  stopAndEscalateWhen Json?
+  uncertaintyNote     String?
+  isSafetyHazard      Boolean        @default(false)
+  hazardType          String?
+  hazardWarning       String?
+  retryCount          Int            @default(0)
+  lastErrorCode       String?
+  lockedAt            DateTime?
+  lockedBy            String?
+  lockExpiresAt       DateTime?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @default(now()) @updatedAt
+  ticket              IncidentTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([status, retryCount])
 }
 
 model Notification {

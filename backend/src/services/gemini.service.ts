@@ -5,6 +5,7 @@ export interface AiAnalysisResult {
   category: IncidentCategory;
   priority: PriorityLevel;
   summary: string;
+  discrepancyNotes?: string | null;
   latencyMs: number;
   isValidJson: boolean;
   isFallbackManual: boolean;
@@ -14,8 +15,131 @@ export interface AiAnalysisResult {
 const VALID_CATEGORIES = Object.values(IncidentCategory);
 const VALID_PRIORITIES = Object.values(PriorityLevel);
 
+interface InlineImageData {
+  inlineData: {
+    mimeType: string;
+    data: string;
+  };
+}
+
+export function buildClassificationPrompt(
+  description: string,
+  locationNote?: string | null,
+  imageCount: number = 0
+): string {
+  return JSON.stringify({
+    description,
+    location: locationNote || null,
+    hasImages: imageCount > 0,
+    imageCount,
+  });
+}
+
+function normalizeTextForComparison(text: string): string {
+  return text
+    .normalize('NFC')
+    .toLocaleLowerCase('vi')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function attachDiscrepancyToSummary(
+  summary: string,
+  discrepancyNotes?: string | null
+): { summary: string; discrepancyNotes: string | null } {
+  const trimmedSummary = typeof summary === 'string' ? summary.trim() : '';
+  const rawNotes = typeof discrepancyNotes === 'string' ? discrepancyNotes.trim() : '';
+  const validNotes = rawNotes.length > 0 ? rawNotes : null;
+
+  if (!validNotes) {
+    return {
+      summary: trimmedSummary,
+      discrepancyNotes: null,
+    };
+  }
+
+  // So sánh chuẩn hóa Unicode, chữ thường và khoảng trắng
+  const normSummary = normalizeTextForComparison(trimmedSummary);
+  const normNotes = normalizeTextForComparison(validNotes);
+
+  if (normSummary.includes(normNotes)) {
+    return {
+      summary: trimmedSummary,
+      discrepancyNotes: validNotes,
+    };
+  }
+
+  // Đưa ghi chú vào summary bằng tiền tố "Cần kiểm tra: "
+  const prefix = /^cần kiểm tra\s*[:：]\s*/i.test(validNotes) ? '' : 'Cần kiểm tra: ';
+  let combined: string;
+  if (!trimmedSummary) {
+    combined = `${prefix}${validNotes}`.trim();
+  } else {
+    const sentenceEnd = /[.!?]$/.test(trimmedSummary) ? '' : '.';
+    combined = `${trimmedSummary}${sentenceEnd} ${prefix}${validNotes}`.trim();
+  }
+
+  // Giữ bản tóm tắt không vượt quá giới hạn 500 ký tự của hệ thống, ưu tiên giữ thông tin kiểm tra
+  if (combined.length > 500) {
+    const inspectionSentence = `${prefix}${validNotes}`.trim();
+    if (inspectionSentence.length >= 490) {
+      combined = inspectionSentence.slice(0, 497) + '...';
+    } else {
+      const remainingLength = 500 - inspectionSentence.length - 5;
+      const truncatedSummary = trimmedSummary.slice(0, Math.max(0, remainingLength)).trim() + '...';
+      combined = `${truncatedSummary} ${inspectionSentence}`;
+    }
+  }
+
+  return {
+    summary: combined,
+    discrepancyNotes: validNotes,
+  };
+}
+
+async function fetchImageInlineData(url: string): Promise<InlineImageData | null> {
+  if (!url || typeof url !== 'string' || !url.startsWith('https://')) {
+    return null;
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+
+    const contentType = res.headers.get('content-type') || '';
+    let mimeType = 'image/jpeg';
+    if (contentType.includes('image/png')) mimeType = 'image/png';
+    else if (contentType.includes('image/webp')) mimeType = 'image/webp';
+    else if (contentType.includes('image/jpeg') || contentType.includes('image/jpg')) mimeType = 'image/jpeg';
+    else if (!contentType.startsWith('image/')) return null;
+
+    const arrayBuf = await res.arrayBuffer();
+    // Giới hạn dung lượng mỗi ảnh không quá 5MB và không rỗng
+    if (arrayBuf.byteLength > 5 * 1024 * 1024 || arrayBuf.byteLength < 50) {
+      return null;
+    }
+    const base64 = Buffer.from(arrayBuf).toString('base64');
+    return {
+      inlineData: {
+        mimeType,
+        data: base64,
+      },
+    };
+  } catch {
+    clearTimeout(timeoutId);
+    return null;
+  }
+}
+
 // Heuristic fallback is explicitly marked for manual review; it is not reported as Gemini output.
-function analyzeWithSmartFallback(description: string, latencyMs: number, reason: string): AiAnalysisResult {
+function analyzeWithSmartFallback(
+  description: string,
+  latencyMs: number,
+  reason: string,
+  discrepancyNotes?: string | null
+): AiAnalysisResult {
   const lower = description.normalize('NFC').toLocaleLowerCase('vi').replace(/\s+/g, ' ');
   // Location alone (e.g. "hầm xe") does not identify a faulty system.
   const rules: [IncidentCategory, RegExp][] = [
@@ -37,11 +161,16 @@ function analyzeWithSmartFallback(description: string, latencyMs: number, reason
   }
 
   const cleanSummary = description.length > 90 ? description.substring(0, 87) + '...' : description;
+  const { summary: finalSummary, discrepancyNotes: validDiscrepancy } = attachDiscrepancyToSummary(
+    cleanSummary,
+    discrepancyNotes
+  );
 
   return {
     category,
     priority,
-    summary: cleanSummary,
+    summary: finalSummary,
+    discrepancyNotes: validDiscrepancy,
     latencyMs,
     isValidJson: false,
     isFallbackManual: true,
@@ -49,8 +178,12 @@ function analyzeWithSmartFallback(description: string, latencyMs: number, reason
   };
 }
 
-// Hàm chính gọi trực tiếp Google Gemini Flash API (Chấp nhận cả key AQ.* và AIzaSy*)
-export async function analyzeIncidentWithGemini(description: string, locationNote?: string): Promise<AiAnalysisResult> {
+// Hàm chính gọi Google Gemini Flash API đa phương thức (Ảnh + Mô tả + Vị trí)
+export async function analyzeIncidentWithGemini(
+  description: string,
+  locationNote?: string,
+  imageUrls?: string[]
+): Promise<AiAnalysisResult> {
   const startTime = Date.now();
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
 
@@ -59,15 +192,45 @@ export async function analyzeIncidentWithGemini(description: string, locationNot
     return analyzeWithSmartFallback(description, Date.now() - startTime, 'GEMINI_KEY_NOT_CONFIGURED');
   }
 
-  const instruction = `Phân loại báo cáo bảo trì tòa nhà cho ban quản lý. Dữ liệu đầu vào là mô tả và vị trí do cư dân cung cấp.
-Chọn hệ thống cần sửa theo triệu chứng. Vị trí chỉ là ngữ cảnh: đèn hỏng ở hầm xe là ELECTRICAL, máy lạnh rò nước là HVAC.
-PLUMBING cho cấp thoát nước; ELEVATOR cho thang máy; ACCESS_SECURITY cho kiểm soát ra vào và camera. Chọn OTHER khi thiếu bằng chứng.
-HIGH khi có nguy hiểm đang diễn ra như chập điện, người mắc kẹt hoặc nước tràn gây trơn trượt. MEDIUM cho thiết bị hỏng ảnh hưởng sử dụng; LOW cho bất tiện nhẹ.
-Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định. Tóm tắt bằng một câu tiếng Việt ngắn, chỉ nêu thông tin đã báo.`;
-  const prompt = JSON.stringify({ description, location: locationNote || null });
+  // Tải tối đa 3 ảnh hiện trường hợp lệ qua HTTPS
+  const validImageUrls = (Array.isArray(imageUrls) ? imageUrls : [])
+    .filter((u): u is string => typeof u === 'string' && u.startsWith('https://'))
+    .slice(0, 3);
+
+  const downloadedImages = await Promise.all(validImageUrls.map((u) => fetchImageInlineData(u)));
+  const validImages: InlineImageData[] = downloadedImages.filter((img): img is InlineImageData => img !== null);
+
+  const instruction = `Bạn là trợ lý AI chuyên gia phân loại bảo trì và kiểm định sự cố tòa nhà của hệ thống ResiFix.
+Nhiệm vụ của bạn là phân tích mô tả của người báo cáo, thông tin khu vực/vị trí và các ảnh chụp hiện trường (nếu có).
+
+Quy tắc nghiệp vụ:
+1. Phân loại danh mục (category):
+   - PLUMBING: Cấp thoát nước, rò rỉ đường ống, vòi nước, bồn rửa, tắc nghẽn, ngập nước.
+   - ELECTRICAL: Điện chiếu sáng, bóng đèn, ổ cắm, tủ điện, dây điện, chập điện, mất điện.
+   - ELEVATOR: Thang máy, cabin thang, bảng điều khiển thang máy, cửa thang máy.
+   - HVAC: Máy lạnh, điều hòa không khí, quạt thông gió, quạt hút.
+   - ACCESS_SECURITY: Cửa khóa, đầu đọc thẻ từ, camera giám sát, barrier, an ninh ra vào.
+   - OTHER: Khi thiếu bằng chứng hoặc thuộc danh mục khác (sơn tường, cửa gỗ, rác thải...).
+2. Đánh giá mức độ ưu tiên (priority):
+   - HIGH: Nguy hiểm khẩn cấp (chập điện, cháy nổ, người mắc kẹt trong thang máy, nước ngập tràn gây trơn trượt nguy hiểm).
+   - MEDIUM: Thiết bị hỏng làm gián đoạn sinh hoạt bình thường.
+   - LOW: Bất tiện nhẹ, rỉ nước nhẹ, nhấp nháy, tiếng ồn nhỏ.
+3. Sử dụng ảnh chụp hiện trường và đối chiếu mô tả:
+   - Dùng ảnh để quan sát các dấu hiệu vật lý thực tế (nứt vỡ, rò rỉ, cháy đen, bóng đèn hỏng...).
+   - Dùng mô tả để hiểu thời điểm, tần suất và ảnh hưởng của sự cố. Phân biệt dấu hiệu có thực với dấu hiệu phủ định ("chưa có khói", "không có mùi khét").
+   - Nếu ảnh hiện trường và mô tả có điểm MÂU THUẪN (ví dụ: mô tả vòi nước nhưng ảnh chụp bóng đèn, hoặc mô tả cửa hỏng nhưng ảnh chụp tường bình thường), hoặc có chi tiết cần kiểm tra tại chỗ: ghi rõ điểm mâu thuẫn này vào trường discrepancyNotes và nêu ngắn gọn trong summary để Ban quản lý xác nhận.
+   - Chỉ nêu nguyên nhân khi dữ liệu cung cấp đủ căn cứ xác thực; tuyệt đối không phỏng đoán vô căn cứ.
+   - Nếu không có ảnh hoặc ảnh không đọc được, tiếp tục phân tích dựa trên mô tả và dữ liệu có thể sử dụng.
+   - Không yêu cầu hay xử lý tọa độ GPS hay thông tin tài khoản của người dùng.
+4. Tóm tắt (summary):
+   - Một câu tiếng Việt ngắn gọn dưới 35 từ, nêu rõ tình trạng sự cố và điểm cần kiểm tra (nếu có).`;
 
   const genAI = new GoogleGenerativeAI(apiKey);
   const modelName = process.env.GEMINI_CLASSIFICATION_MODEL?.trim() || 'gemini-3.1-flash-lite';
+
+  let multimodalErr: unknown = null;
+  let finalHasImages = false;
+
   try {
     const model = genAI.getGenerativeModel({
       model: modelName,
@@ -89,7 +252,11 @@ Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định.
             },
             summary: {
               type: SchemaType.STRING,
-              description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 25 từ cho Ban quản lý tòa nhà.',
+              description: 'Tóm tắt ngắn gọn sự cố bằng tiếng Việt dưới 35 từ cho Ban quản lý tòa nhà, nêu điểm cần kiểm tra nếu có.',
+            },
+            discrepancyNotes: {
+              type: SchemaType.STRING,
+              description: 'Ghi chú điểm mâu thuẫn giữa mô tả và ảnh hoặc chi tiết cần Ban quản lý kiểm tra. Để chuỗi rỗng nếu không có.',
             },
           },
           required: ['category', 'priority', 'summary'],
@@ -97,16 +264,47 @@ Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định.
       },
     });
 
-    const result = await model.generateContent(prompt, { timeout: 7000 });
+    let result;
+    if (validImages.length > 0) {
+      const multimodalPrompt = buildClassificationPrompt(description, locationNote, validImages.length);
+      const contentParts: any[] = [...validImages, multimodalPrompt];
+      try {
+        result = await model.generateContent(contentParts, { timeout: 9000 });
+        finalHasImages = true;
+      } catch (err) {
+        multimodalErr = err;
+        console.warn('[Gemini Multimodal Fallback to Text]', (err as any)?.message || err);
+        // Thử lại đúng một lần bằng văn bản thuần
+        const textOnlyPrompt = buildClassificationPrompt(description, locationNote, 0);
+        result = await model.generateContent(textOnlyPrompt, { timeout: 8000 });
+        finalHasImages = false;
+      }
+    } else {
+      // Khi không có ảnh đính kèm hoặc tất cả ảnh đều tải lỗi: gọi Gemini bằng văn bản ngay từ đầu
+      const textOnlyPrompt = buildClassificationPrompt(description, locationNote, 0);
+      result = await model.generateContent(textOnlyPrompt, { timeout: 8000 });
+      finalHasImages = false;
+    }
+
     const parsed: unknown = JSON.parse(result.response.text());
     if (!parsed || typeof parsed !== 'object') throw new Error('Invalid Gemini response shape.');
     const candidate = parsed as Record<string, unknown>;
-    const summary = typeof candidate.summary === 'string' ? candidate.summary.trim() : '';
+    const rawSummary = typeof candidate.summary === 'string' ? candidate.summary.trim() : '';
+    const rawDiscrepancyNotes =
+      typeof candidate.discrepancyNotes === 'string' && candidate.discrepancyNotes.trim().length > 0
+        ? candidate.discrepancyNotes.trim()
+        : null;
+
+    const { summary: finalSummary, discrepancyNotes: validDiscrepancyNotes } = attachDiscrepancyToSummary(
+      rawSummary,
+      rawDiscrepancyNotes
+    );
 
     if (
       !VALID_CATEGORIES.includes(candidate.category as IncidentCategory) ||
       !VALID_PRIORITIES.includes(candidate.priority as PriorityLevel) ||
-      !summary || summary.length > 500
+      !finalSummary ||
+      finalSummary.length > 500
     ) {
       throw new Error('Invalid Gemini response values.');
     }
@@ -114,17 +312,28 @@ Phân biệt dấu hiệu thực tế với dấu hiệu được phủ định.
     return {
       category: candidate.category as IncidentCategory,
       priority: candidate.priority as PriorityLevel,
-      summary,
+      summary: finalSummary,
+      discrepancyNotes: validDiscrepancyNotes,
       latencyMs: Date.now() - startTime,
       isValidJson: true,
       isFallbackManual: false,
-      rawResponse: { modelUsed: modelName, category: candidate.category, priority: candidate.priority, summary },
+      rawResponse: {
+        modelUsed: modelName,
+        category: candidate.category,
+        priority: candidate.priority,
+        summary: finalSummary,
+        discrepancyNotes: validDiscrepancyNotes,
+        hasImages: finalHasImages,
+      },
     };
   } catch (error) {
+    const isTimeout =
+      error instanceof GoogleGenerativeAIAbortError ||
+      multimodalErr instanceof GoogleGenerativeAIAbortError;
     return analyzeWithSmartFallback(
       description,
       Date.now() - startTime,
-      error instanceof GoogleGenerativeAIAbortError ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
+      isTimeout ? 'GEMINI_TIMEOUT' : 'GEMINI_UNAVAILABLE'
     );
   }
 }

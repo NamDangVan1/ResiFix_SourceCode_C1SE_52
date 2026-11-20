@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { v2 as cloudinary } from 'cloudinary';
 import { Role } from '@prisma/client';
 import { authenticateJWT, AuthRequest } from '../middlewares/auth.middleware';
+import { authorizeSceneUpload, MAX_SCENE_PHOTO_BYTES } from '../services/incident_media';
 
 const router = Router();
 
@@ -22,6 +23,10 @@ router.post('/', authenticateJWT, async (req: AuthRequest, res: Response): Promi
   }
   if (folder !== 'incident_scene' && folder !== 'repair_proof') {
     res.status(400).json({ success: false, message: 'Loại ảnh tải lên không hợp lệ.' });
+    return;
+  }
+  if (folder === 'incident_scene' && Buffer.byteLength(imageBase64.split(',')[1], 'base64') > MAX_SCENE_PHOTO_BYTES) {
+    res.status(413).json({ success: false, message: 'Ảnh hiện trường vượt quá 5 MB.' });
     return;
   }
   if (
@@ -52,7 +57,9 @@ router.post('/', authenticateJWT, async (req: AuthRequest, res: Response): Promi
       success: true,
       mode: 'CLOUDINARY_CLOUD',
       message: 'Đã tải ảnh lên Cloudinary thành công.',
-      imageUrl: uploadResult.secure_url,
+      imageUrl: folder === 'incident_scene'
+        ? authorizeSceneUpload(uploadResult.secure_url, req.user!.userId)
+        : uploadResult.secure_url,
       publicId: uploadResult.public_id,
     });
   } catch (error) {
@@ -71,7 +78,7 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
     res.status(400).json({ success: false, message: 'Ảnh phải là dữ liệu JPEG, PNG hoặc WebP hợp lệ.' });
     return;
   }
-  if (imageBase64.length > 9_500_000) {
+  if (imageBase64.length > 9_500_000 || Buffer.byteLength(imageBase64.split(',')[1], 'base64') > MAX_SCENE_PHOTO_BYTES) {
     res.status(413).json({ success: false, message: 'Ảnh vượt quá dung lượng cho phép.' });
     return;
   }
@@ -100,7 +107,7 @@ router.post('/anonymous', async (req: AuthRequest, res: Response): Promise<void>
       success: true,
       mode: 'CLOUDINARY_CLOUD',
       message: 'Đã tải ảnh lên Cloudinary thành công.',
-      imageUrl: uploadResult.secure_url,
+      imageUrl: authorizeSceneUpload(uploadResult.secure_url, null),
       publicId: uploadResult.public_id,
     });
   } catch (error) {
