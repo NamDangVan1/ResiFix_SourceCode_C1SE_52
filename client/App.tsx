@@ -30,12 +30,13 @@ import { ScreenTransition, AnimatedModalContent } from './Transitions';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { buildIncidentTimeline } from './incident_timeline';
 
 // ============================================================================
 // CẤU HÌNH ĐỊA CHỈ BACKEND CHUẨN CHO CẢ WEB & ĐIỆN THOẠI
 // ============================================================================
 
-const COMPUTER_LAN_IP = '192.168.100.241'; // IP Wi-Fi hiện tại của máy tính
+const COMPUTER_LAN_IP = '192.168.1.6'; // IP Wi-Fi hiện tại của máy tính
 
 const getApiBaseUrl = () => {
   if (Platform.OS === 'web') {
@@ -463,6 +464,14 @@ function AppContent() {
   // SLA & Escalation
   const [ticketSlas, setTicketSlas] = useState<Record<string, any>>({});
   const [slaDashboard, setSlaDashboard] = useState<any | null>(null);
+  const [liveClockTime, setLiveClockTime] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveClockTime(Date.now());
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Chấm công & Lương BMB
   const [bmbPayrollSummary, setBmbPayrollSummary] = useState<any | null>(null);
@@ -3393,6 +3402,15 @@ function AppContent() {
     setBmbPriority(t.finalPriority || t.aiSuggestedPriority || 'MEDIUM');
     setBmbNote(t.bmbAdminNote || '');
     if (t.assignedTechId) setBmbTechId(t.assignedTechId);
+    if (token && t?.id) {
+      const headers = { Authorization: `Bearer ${token}`, 'bypass-tunnel-reminder': 'true' };
+      void fetch(`${API_BASE_URL}/sla/status/${t.id}`, { headers })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d?.sla) setTicketSlas((prev) => ({ ...prev, [t.id]: d.sla }));
+        })
+        .catch(() => undefined);
+    }
   };
 
   const loadSuggestedTechnicians = useCallback(
@@ -3426,9 +3444,9 @@ function AppContent() {
             setSuggestedTechnicians(data.suggestedTechnicians);
             setSuggestionsMessage(
               data.message ||
-                (data.suggestedTechnicians.length === 0
-                  ? translate('Không có kỹ thuật viên phù hợp với chuyên môn này đang trong ca trực.')
-                  : '')
+              (data.suggestedTechnicians.length === 0
+                ? translate('Không có kỹ thuật viên phù hợp với chuyên môn này đang trong ca trực.')
+                : '')
             );
           } else {
             setSuggestedTechnicians([]);
@@ -3548,6 +3566,192 @@ function AppContent() {
         })
         .catch(() => undefined);
     }
+  };
+
+  // Dòng thời gian tiến độ xử lý sự cố & SLA
+  const renderIncidentProgressTimeline = (
+    ticket: any,
+    role: 'RESIDENT' | 'BMB' | 'TECHNICIAN' | 'GUEST' = 'RESIDENT'
+  ) => {
+    if (!ticket) return null;
+
+    const ticketWithSla = {
+      ...ticket,
+      slaTracking: ticket.slaTracking || ticketSlas[ticket.id] || null,
+    };
+
+    const summary = buildIncidentTimeline(ticketWithSla, {
+      role,
+      now: liveClockTime,
+    });
+
+    const sla = summary.slaInfo;
+
+    // Màu sắc badge SLA
+    let slaBg = '#F1F5F9';
+    let slaFg = '#475569';
+    if (sla.hasSla) {
+      if (sla.slaStatus === 'PAUSED') {
+        slaBg = '#F1F5F9';
+        slaFg = '#64748B';
+      } else if (sla.slaStatus === 'BREACHED') {
+        slaBg = '#FEE2E2';
+        slaFg = '#DC2626';
+      } else if (sla.slaStatus === 'AT_RISK') {
+        slaBg = '#FEF3C7';
+        slaFg = '#D97706';
+      } else if (sla.slaStatus === 'ON_TRACK') {
+        slaBg = '#DCFCE7';
+        slaFg = '#16A34A';
+      }
+    }
+
+    return (
+      <View style={styles.whiteSectionCard}>
+        <View style={[styles.cardTopRow, { marginBottom: 10 }]}>
+          <Text style={styles.cardBlockTitle}>{translate('Tiến độ xử lý sự cố')}</Text>
+          <View style={[styles.statusPill, { backgroundColor: slaBg }]}>
+            <Text style={[styles.statusPillText, { color: slaFg, fontWeight: '700' }]}>
+              {translate(sla.slaStatusLabel)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Khối tóm tắt tiến độ & SLA */}
+        <View style={styles.timelineHeaderBox}>
+          <Text style={styles.timelineMetaLine}>
+            ⏱️ <Text style={{ fontWeight: '700' }}>{translate(summary.totalDurationLabel)}</Text>
+          </Text>
+          <Text style={styles.timelineMetaLine}>
+            🎯 <Text style={{ fontWeight: '700' }}>{translate('Hạn hoàn thành:')}</Text>{' '}
+            {sla.hasSla ? (
+              <Text>
+                {sla.formattedDeadline}{' '}
+                <Text
+                  style={{
+                    color:
+                      sla.slaStatus === 'BREACHED'
+                        ? '#DC2626'
+                        : sla.slaStatus === 'AT_RISK'
+                          ? '#D97706'
+                          : '#16A34A',
+                    fontWeight: '700',
+                  }}
+                >
+                  ({translate(sla.slaRemainingText)})
+                </Text>
+              </Text>
+            ) : (
+              <Text style={{ color: '#64748B', fontStyle: 'italic' }}>
+                {translate('Chưa có thời hạn quy định')}
+              </Text>
+            )}
+          </Text>
+          {sla.isPaused && sla.pauseReason && (
+            <Text style={[styles.timelineMetaLine, { color: '#64748B', fontStyle: 'italic' }]}>
+              ⏸️ {translate('Lý do tạm dừng:')} {sla.pauseReason}
+            </Text>
+          )}
+          {sla.escalationTier > 0 && role !== 'RESIDENT' && (
+            <Text style={[styles.timelineMetaLine, { color: '#DC2626', fontWeight: '700' }]}>
+              🚨 {translate('Cấp độ leo thang')} {sla.escalationTier}: {translate('Đã kích hoạt cảnh báo SLA')}
+            </Text>
+          )}
+        </View>
+
+        {/* Dòng thời gian dọc chi tiết */}
+        <View style={styles.timelineContainer}>
+          {summary.milestones.map((milestone, idx) => {
+            const isLast = idx === summary.milestones.length - 1;
+            const isCompleted = milestone.status === 'COMPLETED';
+            const isActive = milestone.status === 'ACTIVE';
+            const isCancelled = milestone.status === 'CANCELLED';
+
+            const dotColor = isCancelled
+              ? '#DC2626'
+              : isCompleted
+                ? '#16A34A'
+                : isActive
+                  ? '#2563EB'
+                  : '#CBD5E1';
+
+            return (
+              <View key={`${milestone.key}-${idx}`} style={styles.timelineStepRow}>
+                {/* Cột trái: Dot và đường nối dọc */}
+                <View style={styles.timelineLeftCol}>
+                  <View
+                    style={[
+                      styles.timelineDot,
+                      {
+                        backgroundColor: dotColor,
+                        width: isActive ? 12 : 10,
+                        height: isActive ? 12 : 10,
+                        borderRadius: 6,
+                      },
+                    ]}
+                  />
+                  {!isLast && <View style={[styles.timelineLine, { height: '100%', minHeight: 30 }]} />}
+                </View>
+
+                {/* Cột phải: Thông tin mốc */}
+                <View style={styles.timelineRightCol}>
+                  <View style={styles.timelineStepTitleRow}>
+                    <Text
+                      style={[
+                        styles.timelineStepTitle,
+                        isActive && { color: '#2563EB', fontWeight: '800' },
+                        isCancelled && { color: '#DC2626' },
+                        milestone.status === 'PENDING' && { color: '#94A3B8' },
+                      ]}
+                    >
+                      {translate(milestone.title)}
+                    </Text>
+                    {isActive && (
+                      <View style={{ backgroundColor: '#EFF6FF', paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 4 }}>
+                        <Text style={{ fontSize: 10, color: '#2563EB', fontWeight: '800' }}>
+                          {translate('Hiện tại')}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Thời điểm & Thời lượng */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 2 }}>
+                    <Text style={styles.timelineStepMeta}>
+                      {milestone.formattedTime}
+                    </Text>
+                    {milestone.durationLabel && (
+                      <Text
+                        style={[
+                          styles.timelineStepDuration,
+                          { color: isActive ? '#2563EB' : '#059669', marginLeft: 6 },
+                        ]}
+                      >
+                        • {translate(milestone.durationLabel)}
+                      </Text>
+                    )}
+                  </View>
+
+                  {/* Ghi chú hoặc Người thực hiện */}
+                  {milestone.note && (
+                    <View style={styles.timelineStepNoteBox}>
+                      <Text style={styles.timelineStepNoteText}>
+                        {translate(milestone.note)}
+                      </Text>
+                      {milestone.actorName && role !== 'RESIDENT' && (
+                        <Text style={{ fontSize: 10.5, color: '#64748B', marginTop: 2, fontStyle: 'italic' }}>
+                          {translate('Người cập nhật:')} {milestone.actorName}
+                        </Text>
+                      )}
+                    </View>
+                  )}
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    );
   };
 
   // Quét QR tự động điền thông tin khu vực (Màn hình 02 Cư dân)
@@ -6755,41 +6959,7 @@ function AppContent() {
                     </View>
                   </View>
 
-                  <View style={styles.whiteSectionCard}>
-                    <Text style={styles.cardBlockTitle}>Tiến độ xử lý sự cố</Text>
-                    <View style={styles.timelineRow}>
-                      <View style={[styles.timelineDot, { backgroundColor: '#16A34A' }]} />
-                      <Text style={[styles.timelineText, { color: '#15803D', fontWeight: '700' }]}>
-                        10:30 - Hoàn thành sửa chữa (KTV{' '}
-                        {activeTicket.assignedTech?.fullName || translate('Kỹ thuật viên')} đã gửi ảnh)
-                      </Text>
-                    </View>
-                    <View style={styles.timelineLine} />
-                    <View style={styles.timelineRow}>
-                      <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
-                      <Text style={styles.timelineText}>
-                        09:45 - Đang xử lý (KTV đã nhận việc)
-                      </Text>
-                    </View>
-                    <View style={styles.timelineLine} />
-                    <View style={styles.timelineRow}>
-                      <View style={[styles.timelineDot, { backgroundColor: '#2563EB' }]} />
-                      <Text style={styles.timelineText}>
-                        09:32 - Đã phân công (BMB đã duyệt gợi ý AI)
-                      </Text>
-                    </View>
-                    <View style={styles.timelineLine} />
-                    <View style={styles.timelineRow}>
-                      <View style={[styles.timelineDot, { backgroundColor: '#CBD5E1' }]} />
-                      <Text style={styles.timelineText}>
-                        {activeTicket.aiStatus === 'ANALYZING'
-                          ? translate('Đã tiếp nhận (Chờ duyệt - AI đang phân tích...)')
-                          : activeTicket.aiStatus === 'MANUAL_REVIEW'
-                            ? translate('Đã tiếp nhận (Chờ BMB phân loại thủ công)')
-                            : `${translate('Đã tiếp nhận (Chờ duyệt - AI gợi ý:')} ${translate(CATEGORY_SHORT_VN[activeTicket.aiSuggestedCategory] || 'Điện - Nước')})`}
-                      </Text>
-                    </View>
-                  </View>
+                  {renderIncidentProgressTimeline(activeTicket, 'RESIDENT')}
 
                   {/* Mục Ảnh hiện trường do Cư dân gửi */}
                   {(() => {
@@ -7709,33 +7879,7 @@ function AppContent() {
                     })()}
                   </View>
 
-                  {/* Thẻ SLA & Cam kết dịch vụ */}
-                  <View style={styles.whiteSectionCard}>
-                    <View style={styles.cardTopRow}>
-                      <Text style={styles.cardBlockTitle}>{translate("Tiến độ SLA")}</Text>
-                      {(() => {
-                        const sla = ticketSlas[activeTicket.id];
-                        const status = sla?.status || 'ON_TRACK';
-                        const bg = status === 'BREACHED' ? '#FEE2E2' : status === 'AT_RISK' ? '#FEF3C7' : status === 'PAUSED' ? '#F1F5F9' : '#DCFCE7';
-                        const fg = status === 'BREACHED' ? '#B91C1C' : status === 'AT_RISK' ? '#B45309' : status === 'PAUSED' ? '#64748B' : '#15803D';
-                        const label = status === 'BREACHED' ? 'Quá hạn SLA' : status === 'AT_RISK' ? 'Sắp quá hạn' : status === 'PAUSED' ? 'Tạm dừng' : 'Đúng hạn';
-                        return (
-                          <View style={[styles.statusPill, { backgroundColor: bg }]}>
-                            <Text style={[styles.statusPillText, { color: fg }]}>{translate(label)}</Text>
-                          </View>
-                        );
-                      })()}
-                    </View>
-                    <Text style={styles.cardLocationText}>
-                      Hạn phản hồi: {ticketSlas[activeTicket.id]?.responseDeadline ? new Date(ticketSlas[activeTicket.id].responseDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '30 phút'} •
-                      Hạn hoàn thành: {ticketSlas[activeTicket.id]?.resolutionDeadline ? new Date(ticketSlas[activeTicket.id].resolutionDeadline).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '24 giờ'}
-                    </Text>
-                    {ticketSlas[activeTicket.id]?.escalationLevel > 0 && (
-                      <Text style={{ fontSize: 11.5, color: '#DC2626', fontWeight: '700', marginTop: 4 }}>
-                        ⚠️ Leo thang cấp độ {ticketSlas[activeTicket.id].escalationLevel}: Đã thông báo cấp quản lý
-                      </Text>
-                    )}
-                  </View>
+                  {renderIncidentProgressTimeline(activeTicket, 'TECHNICIAN')}
 
                   {/* Thẻ Đề xuất chi phí & Vật tư sửa chữa */}
                   <View style={styles.whiteSectionCard}>
@@ -9806,6 +9950,9 @@ function AppContent() {
                           </View>
                         );
                       })()}
+
+                      {/* TIẾN ĐỘ XỬ LÝ SỰ CỐ & SLA (BMB INSPECTOR) */}
+                      {renderIncidentProgressTimeline(bmbSelectedTicket, 'BMB')}
 
                       {/* HỘP GỢI Ý TỪ GEMINI FLASH AI */}
                       <View style={styles.bmbGeminiPurpleCard}>
@@ -15221,6 +15368,64 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0F172A',
     marginBottom: 8,
+  },
+  timelineContainer: {
+    marginTop: 4,
+  },
+  timelineHeaderBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+    marginBottom: 12,
+  },
+  timelineMetaLine: {
+    fontSize: 12,
+    color: '#334155',
+    marginVertical: 2,
+  },
+  timelineStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  timelineLeftCol: {
+    alignItems: 'center',
+    width: 20,
+    marginRight: 10,
+  },
+  timelineRightCol: {
+    flex: 1,
+    paddingBottom: 14,
+  },
+  timelineStepTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  timelineStepTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  timelineStepMeta: {
+    fontSize: 11.5,
+    color: '#64748B',
+  },
+  timelineStepDuration: {
+    fontSize: 11.5,
+    fontWeight: '600',
+  },
+  timelineStepNoteBox: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    marginTop: 4,
+  },
+  timelineStepNoteText: {
+    fontSize: 11.5,
+    color: '#475569',
   },
   timelineRow: {
     flexDirection: 'row',

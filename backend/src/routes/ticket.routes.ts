@@ -24,6 +24,7 @@ import {
   suggestTechniciansForTicket,
   recordTicketCoordinates,
 } from '../services/technician_suggestion.service';
+import { buildIncidentTimeline } from '../services/incident_timeline.service';
 
 export async function getBuildingLocationConfig(): Promise<{
   buildingName: string;
@@ -1298,6 +1299,7 @@ router.get('/', authenticateJWT, async (req: AuthRequest, res: Response): Promis
         area: true,
         aiGuidance: true,
         media: true,
+        slaTracking: true,
         statusLogs: {
           include: { changedBy: { select: { fullName: true, role: true } } },
           orderBy: { createdAt: 'asc' },
@@ -2072,6 +2074,47 @@ router.get(
       }
       console.error('Lỗi khi lấy hướng dẫn AI cho KTV:', error);
       res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lấy hướng dẫn AI.' });
+    }
+  }
+);
+
+// GET /api/tickets/:id/timeline - Lấy tiến độ thời gian thực & SLA chi tiết của sự cố
+router.get(
+  '/:id/timeline',
+  authenticateJWT,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const ticketId = getParamAsString(req.params.id);
+      const ticket = await prisma.incidentTicket.findUnique({
+        where: { id: ticketId },
+        include: {
+          resident: { select: { fullName: true, apartmentCode: true, phone: true } },
+          assignedTech: { select: { fullName: true, specialtyLabel: true, phone: true } },
+          statusLogs: {
+            include: { changedBy: { select: { fullName: true, role: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
+          slaTracking: true,
+          area: true,
+        },
+      });
+
+      if (!ticket) {
+        res.status(404).json({ success: false, message: 'Không tìm thấy sự cố.' });
+        return;
+      }
+
+      // Kiểm tra quyền truy cập theo vai trò
+      if (req.user?.role === Role.RESIDENT && ticket.residentId && ticket.residentId !== req.user.userId) {
+        res.status(403).json({ success: false, message: 'Bạn không có quyền xem tiến độ sự cố này.' });
+        return;
+      }
+
+      const timeline = buildIncidentTimeline(ticket, { role: req.user?.role as any });
+      res.status(200).json({ success: true, timeline });
+    } catch (error) {
+      console.error('Lỗi khi lấy timeline sự cố:', error);
+      res.status(500).json({ success: false, message: 'Lỗi khi tải dòng thời gian sự cố.' });
     }
   }
 );
