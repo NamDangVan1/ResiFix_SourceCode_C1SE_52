@@ -134,15 +134,15 @@ const areaCoordinatesRegistry = new Map<string, GeoCoordinates>();
 const ticketCoordinatesRegistry = new Map<string, GeoCoordinates>();
 
 export const DEFAULT_AREA_COORDINATES: Record<string, GeoCoordinates> = {
-  'AREA-SANH-T1': { latitude: 10.7324, longitude: 106.6992 },
-  'AC-B02': { latitude: 10.7324, longitude: 106.6992 },
-  'ELV-02': { latitude: 10.7325, longitude: 106.6993 },
-  'HL-B12': { latitude: 10.7328, longitude: 106.6995 },
-  'AREA-HL-B': { latitude: 10.7328, longitude: 106.6995 },
-  'PK-B1-02': { latitude: 10.732, longitude: 106.699 },
-  'AREA-HAM-B1': { latitude: 10.732, longitude: 106.699 },
-  'WP-1204': { latitude: 10.7327, longitude: 106.6994 },
-  'AREA-CH-A1204': { latitude: 10.7327, longitude: 106.6994 },
+  'AREA-SANH-T1': { latitude: 16.0492916, longitude: 108.1600966 },
+  'AC-B02': { latitude: 16.0492916, longitude: 108.1600966 },
+  'ELV-02': { latitude: 16.04935, longitude: 108.16015 },
+  'HL-B12': { latitude: 16.0494, longitude: 108.1602 },
+  'AREA-HL-B': { latitude: 16.0494, longitude: 108.1602 },
+  'PK-B1-02': { latitude: 16.04915, longitude: 108.15995 },
+  'AREA-HAM-B1': { latitude: 16.04915, longitude: 108.15995 },
+  'WP-1204': { latitude: 16.0493, longitude: 108.1601 },
+  'AREA-CH-A1204': { latitude: 16.0493, longitude: 108.1601 },
 };
 
 // Khởi tạo tọa độ khu vực mặc định

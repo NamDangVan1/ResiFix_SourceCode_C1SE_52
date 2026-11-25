@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { DEFAULT_BUILDING_LOCATION } from '../config/building.config';
 
 export interface EmergencyContact {
   managerName: string;
@@ -387,11 +388,11 @@ const DEFAULT_STORE: ResiFixStoreData = {
     standardAllowance: 730000,
     holidays: ['2026-01-01', '2026-04-30', '2026-05-01', '2026-09-02', '2026-09-03'],
     buildingLocation: {
-      buildingName: 'Khu Tòa Nhà ResiFix - Đại học Duy Tân',
-      buildingAddress: 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng',
-      latitude: 16.0592,
-      longitude: 108.1472,
-      allowedRadiusMeters: 300,
+      buildingName: DEFAULT_BUILDING_LOCATION.buildingName,
+      buildingAddress: DEFAULT_BUILDING_LOCATION.buildingAddress,
+      latitude: DEFAULT_BUILDING_LOCATION.latitude,
+      longitude: DEFAULT_BUILDING_LOCATION.longitude,
+      allowedRadiusMeters: DEFAULT_BUILDING_LOCATION.allowedRadiusMeters,
       isConfirmed: true,
       configAuditLogs: [],
     },
@@ -484,12 +485,15 @@ class StoreManager {
         // Cập nhật vị trí chuẩn Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng
         if (
           !storeData.payrollConfig.buildingLocation.buildingAddress ||
-          storeData.payrollConfig.buildingLocation.buildingAddress.includes('Nguyễn Hữu Thọ')
+          storeData.payrollConfig.buildingLocation.buildingAddress.includes('Nguyễn Hữu Thọ') ||
+          storeData.payrollConfig.buildingLocation.latitude !== DEFAULT_BUILDING_LOCATION.latitude ||
+          storeData.payrollConfig.buildingLocation.longitude !== DEFAULT_BUILDING_LOCATION.longitude
         ) {
-          storeData.payrollConfig.buildingLocation.buildingName = 'Khu Tòa Nhà ResiFix - Đại học Duy Tân';
-          storeData.payrollConfig.buildingLocation.buildingAddress = 'Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng';
-          storeData.payrollConfig.buildingLocation.latitude = 16.0592;
-          storeData.payrollConfig.buildingLocation.longitude = 108.1472;
+          storeData.payrollConfig.buildingLocation.buildingName = DEFAULT_BUILDING_LOCATION.buildingName;
+          storeData.payrollConfig.buildingLocation.buildingAddress = DEFAULT_BUILDING_LOCATION.buildingAddress;
+          storeData.payrollConfig.buildingLocation.latitude = DEFAULT_BUILDING_LOCATION.latitude;
+          storeData.payrollConfig.buildingLocation.longitude = DEFAULT_BUILDING_LOCATION.longitude;
+          storeData.payrollConfig.buildingLocation.allowedRadiusMeters = DEFAULT_BUILDING_LOCATION.allowedRadiusMeters;
           storeData.payrollConfig.buildingLocation.isConfirmed = true;
           needsSave = true;
         }

@@ -125,12 +125,14 @@ export const sanitizeStatusLogs = (rawLogs?: any[]): any[] => {
     const title = String(log.title || '');
     const note = String(log.note || '');
 
-    // Bỏ qua log trùng lặp hoàn toàn fromStatus === toStatus nếu không có ý nghĩa chuyển giao/làm lại
+    // Bỏ qua log trùng lặp hoàn toàn fromStatus === toStatus nếu không có ý nghĩa chuyển giao/làm lại/xác minh/đến hiện trường
     const isReassignment = title.includes('Thu hồi') || title.includes('Chuyển') || note.includes('Thu hồi') || note.includes('Chuyển');
     const isRework = title.includes('làm lại') || note.includes('làm lại') || title.includes('mở lại');
     const isCancellation = title.includes('Hủy') || title.includes('Từ chối') || note.includes('Hủy') || note.includes('Từ chối');
+    const isGuestVerification = title.includes('xác minh báo cáo') || title.includes('Duyệt báo cáo khách') || title.includes('khách vãng lai');
+    const isTechArrival = title.includes('đến hiện trường') || note.includes('[ĐẾN HIỆN TRƯỜNG]');
 
-    if (log.fromStatus && log.toStatus && log.fromStatus === log.toStatus && !isReassignment && !isRework && !isCancellation) {
+    if (log.fromStatus && log.toStatus && log.fromStatus === log.toStatus && !isReassignment && !isRework && !isCancellation && !isGuestVerification && !isTechArrival) {
       continue;
     }
 
@@ -171,7 +173,10 @@ export const buildIncidentTimeline = (
   const completedLog = statusLogs.find((l) => l.toStatus === 'COMPLETED');
   const closedLog = statusLogs.find((l) => l.toStatus === 'CLOSED');
 
-  // Tìm các sự kiện đặc biệt (Thu hồi phân công, chuyển KTV, làm lại, hủy/từ chối)
+  // Tìm các sự kiện đặc biệt (Xác minh khách vãng lai, Thu hồi phân công, chuyển KTV, làm lại, hủy/từ chối)
+  const guestVerifyLog = statusLogs.find(
+    (l) => l.title?.includes('xác minh báo cáo') || l.title?.includes('Duyệt báo cáo khách')
+  );
   const reassignmentLog = statusLogs.find(
     (l) => (l.title?.includes('Thu hồi') || l.note?.includes('Thu hồi') || (l.fromStatus === 'ASSIGNED' && l.toStatus === 'PENDING'))
   );
@@ -232,7 +237,13 @@ export const buildIncidentTimeline = (
   const milestones: TimelineMilestone[] = [
     {
       key: 'INTAKE',
-      title: 'Đã tiếp nhận · Chờ duyệt',
+      title: ticket.isAnonymous
+        ? (ticket.guestVerificationStatus === 'VERIFIED' || guestVerifyLog
+          ? 'Đã gửi báo cáo (Khách vãng lai)'
+          : ticket.guestVerificationStatus === 'REJECTED'
+            ? 'Báo cáo khách vãng lai bị từ chối'
+            : 'Đã gửi báo cáo · Chờ BMB xác minh')
+        : 'Đã tiếp nhận · Chờ duyệt',
       status: isIntakeActive ? 'ACTIVE' : 'COMPLETED',
       timestamp: intakeMs ? new Date(intakeMs).toISOString() : null,
       formattedTime: formatIncidentDateTime(intakeMs),
@@ -241,6 +252,22 @@ export const buildIncidentTimeline = (
       actorName: intakeLog?.changedBy?.fullName || (ticket.isAnonymous ? 'Khách vãng lai' : ticket.resident?.fullName || null),
     },
   ];
+
+  // Nếu có sự kiện BMB xác minh báo cáo khách vãng lai
+  if (guestVerifyLog) {
+    const gvMs = new Date(guestVerifyLog.createdAt).getTime();
+    milestones.push({
+      key: 'SPECIAL',
+      title: guestVerifyLog.title || 'Đã duyệt báo cáo khách vãng lai',
+      status: 'COMPLETED',
+      timestamp: new Date(gvMs).toISOString(),
+      formattedTime: formatIncidentDateTime(gvMs),
+      durationLabel: null,
+      note: guestVerifyLog.note || 'Ban quản lý đã xác minh báo cáo khách vãng lai hợp lệ và tiếp nhận xử lý.',
+      actorName: guestVerifyLog.changedBy?.fullName || 'Ban Quản Lý',
+      isSpecialEvent: true,
+    });
+  }
 
   // Nếu có sự kiện Thu hồi phân công / Chuyển KTV
   if (reassignmentLog) {
@@ -294,7 +321,10 @@ export const buildIncidentTimeline = (
     actorName: assignLog?.changedBy?.fullName || (ticket.bmbApprovedById ? 'Ban Quản Lý' : null),
   });
 
-  // 3. MỐC 3: KTV đã nhận việc · Đang xử lý
+  // 3. MỐC 3: KTV đã nhận việc · Đang xử lý (và mốc KTV đã đến hiện trường nếu có arrivalLog)
+  const arrivalLog = statusLogs.find(
+    (l) => l.title?.includes('đến hiện trường') || l.note?.includes('[ĐẾN HIỆN TRƯỜNG]')
+  );
   const hasAcknowledged = Boolean(acknowledgedMs || inProgressLog || ['IN_PROGRESS', 'COMPLETED', 'CLOSED'].includes(ticketStatus));
   const isInProgressActive = ticketStatus === 'IN_PROGRESS';
   let inProgressDurationLabel: string | null = null;
@@ -310,16 +340,57 @@ export const buildIncidentTimeline = (
     }
   }
 
+  if (arrivalLog) {
+    const acceptMs = inProgressLog?.createdAt ? new Date(inProgressLog.createdAt).getTime() : acknowledgedMs;
+    const arriveMs = new Date(arrivalLog.createdAt).getTime();
+    let arriveNote = 'Kỹ thuật viên đã có mặt tại hiện trường sự cố.';
+    if (assignedMs !== null && arriveMs >= assignedMs) {
+      const respMins = Math.floor((arriveMs - assignedMs) / 60000);
+      const lateMins = Math.max(0, respMins - 15);
+      const respBadge = lateMins > 0
+        ? `Phản hồi sau ${respMins} phút (Trễ ${lateMins} phút so với chuẩn 15p)`
+        : `Phản hồi trong ${respMins} phút (Đúng giờ ≤ 15p)`;
+      if (role === 'BMB' || role === 'TECHNICIAN') {
+        arriveNote = `${arrivalLog.note?.replace('[ĐẾN HIỆN TRƯỜNG]', '').trim() || arriveNote}\n⏱️ ${respBadge}`;
+      }
+    }
+    milestones.push({
+      key: 'SPECIAL',
+      title: 'KTV đã đến hiện trường',
+      status: 'COMPLETED',
+      timestamp: new Date(arriveMs).toISOString(),
+      formattedTime: formatIncidentDateTime(arriveMs),
+      durationLabel: acceptMs && arriveMs >= acceptMs ? `Di chuyển ${formatDuration(arriveMs - acceptMs)}` : null,
+      note: arriveNote,
+      actorName: arrivalLog.changedBy?.fullName || techName,
+      isSpecialEvent: true,
+    });
+  }
+
+  let inProgressNote = hasAcknowledged
+    ? (arrivalLog
+      ? 'Kỹ thuật viên đang tiến hành kiểm tra và khắc phục sự cố tại hiện trường.'
+      : 'Kỹ thuật viên đã tiếp nhận tại hiện trường và tiến hành kiểm tra, sửa chữa.')
+    : 'Kỹ thuật viên sẽ kiểm tra hiện trường sau khi nhận việc';
+  if (!arrivalLog && hasAcknowledged && assignedMs !== null && acknowledgedMs !== null && acknowledgedMs >= assignedMs) {
+    const respMins = Math.floor((acknowledgedMs - assignedMs) / 60000);
+    const lateMins = Math.max(0, respMins - 15);
+    const respBadge = lateMins > 0 ? `Đến hiện trường sau ${respMins} phút (Trễ ${lateMins} phút so với chuẩn 15p)` : `Đến hiện trường trong ${respMins} phút (Đúng giờ ≤ 15p)`;
+    if (role === 'BMB' || role === 'TECHNICIAN') {
+      inProgressNote = `${inProgressNote}\n⏱️ Phản hồi hiện trường: ${respBadge}${ticket.isQrVerifiedByTech ? ' • Đã quét QR hiện trường' : ''}`;
+    } else if (ticket.isQrVerifiedByTech) {
+      inProgressNote = `${inProgressNote} (KTV đã check-in QR tại hiện trường)`;
+    }
+  }
+
   milestones.push({
     key: 'IN_PROGRESS',
-    title: 'KTV đã nhận việc · Đang xử lý',
+    title: arrivalLog ? 'Đang xử lý sự cố' : 'KTV đã nhận việc · Đang xử lý',
     status: isInProgressActive ? 'ACTIVE' : hasAcknowledged && acknowledgedMs ? 'COMPLETED' : 'PENDING',
     timestamp: acknowledgedMs ? new Date(acknowledgedMs).toISOString() : null,
     formattedTime: hasAcknowledged ? formatIncidentDateTime(acknowledgedMs) : 'Chờ KTV nhận việc',
     durationLabel: inProgressDurationLabel,
-    note: hasAcknowledged
-      ? 'Kỹ thuật viên đã tiếp nhận tại hiện trường và tiến hành kiểm tra, sửa chữa.'
-      : 'Kỹ thuật viên sẽ kiểm tra hiện trường sau khi nhận việc',
+    note: inProgressNote,
     actorName: inProgressLog?.changedBy?.fullName || techName,
   });
 

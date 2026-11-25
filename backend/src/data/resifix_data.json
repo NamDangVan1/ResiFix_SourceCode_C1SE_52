@@ -746,10 +746,10 @@
       "2026-09-03"
     ],
     "buildingLocation": {
-      "buildingName": "Khu Tòa Nhà ResiFix - Đại học Duy Tân",
-      "buildingAddress": "Đại học Duy Tân, Hòa Khánh Nam, Đà Nẵng",
-      "latitude": 16.0592,
-      "longitude": 108.1472,
+      "buildingName": "Đại học Duy Tân",
+      "buildingAddress": "120 Hoàng Minh Thảo, Hòa Khánh Nam, Đà Nẵng, Việt Nam",
+      "latitude": 16.0492916,
+      "longitude": 108.1600966,
       "allowedRadiusMeters": 300,
       "isConfirmed": true,
       "configAuditLogs": []
@@ -904,17 +904,45 @@
   "lockedMonths": [],
   "activeNonces": [
     {
-      "nonce": "12b1fa715f3a9cfa3d0046b4848299dd",
-      "techId": "622b32f6-09ef-4123-b25f-c302fbd7a881",
-      "createdAt": 1795530520328,
-      "expiresAt": 1795530700328,
+      "nonce": "0ad24a81ca647cb4182b71adb1d13c66",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633104685,
+      "expiresAt": 1795633284685,
       "used": false
     },
     {
-      "nonce": "d2c98c551abc422a3b4f1ed08760849e",
-      "techId": "622b32f6-09ef-4123-b25f-c302fbd7a881",
-      "createdAt": 1795530577098,
-      "expiresAt": 1795530757098,
+      "nonce": "25f37574347e6a823af9e80cf0e0a4e5",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633106829,
+      "expiresAt": 1795633286829,
+      "used": false
+    },
+    {
+      "nonce": "32a399b2c87062d18b94935a0f640498",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633108008,
+      "expiresAt": 1795633288008,
+      "used": false
+    },
+    {
+      "nonce": "6f2bd13529fdcb64796fbe116a2091fc",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633108927,
+      "expiresAt": 1795633288927,
+      "used": false
+    },
+    {
+      "nonce": "212c6690a4614caeafa1449cc2d54094",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633110511,
+      "expiresAt": 1795633290511,
+      "used": false
+    },
+    {
+      "nonce": "ea99eab5397b3c3e788d847fb2d7cb5f",
+      "techId": "64c86f88-4d40-4b76-9c4e-69f2724db737",
+      "createdAt": 1795633115445,
+      "expiresAt": 1795633295445,
       "used": false
     }
   ],

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { Role } from '@prisma/client';
 import { authenticateJWT, authorizeRoles, AuthRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../db';
+import { DEFAULT_BUILDING_LOCATION } from '../config/building.config';
 import {
   AttendanceRecord,
   OvertimeRequest,
@@ -198,12 +199,12 @@ async function getPayrollConfig() {
     otMultiplierHoliday: 3.0,
     standardAllowance: 730000,
     buildingLocation: {
-      buildingName: 'Tòa nhà ResiFix SkyView',
-      buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
-      latitude: 10.7324,
-      longitude: 106.6992,
-      allowedRadiusMeters: 300,
-      isConfirmed: false,
+      buildingName: DEFAULT_BUILDING_LOCATION.buildingName,
+      buildingAddress: DEFAULT_BUILDING_LOCATION.buildingAddress,
+      latitude: DEFAULT_BUILDING_LOCATION.latitude,
+      longitude: DEFAULT_BUILDING_LOCATION.longitude,
+      allowedRadiusMeters: DEFAULT_BUILDING_LOCATION.allowedRadiusMeters,
+      isConfirmed: true,
     },
   };
 }
@@ -244,6 +245,414 @@ async function saveReconcileRequests(reqs: ReconcileRequest[]): Promise<void> {
     create: { key: 'payroll_reconcile_requests', value: reqs as any },
     update: { value: reqs as any },
   });
+}
+
+export interface PayrollBonusHistoryItem {
+  bonusAmount: number;
+  note: string;
+  updatedById: string;
+  updatedByName: string;
+  updatedAt: string;
+}
+
+export interface PayrollBonusRecord {
+  techId: string;
+  month: string;
+  bonusAmount: number;
+  note: string;
+  updatedById: string;
+  updatedByName: string;
+  updatedAt: string;
+  history: PayrollBonusHistoryItem[];
+}
+
+const PAYROLL_BONUSES_SETTING_KEY = 'payroll_bonuses';
+const FIXED_MONTHLY_BASE_SALARY = 5000000; // 5.000.000 VNĐ / tháng
+const FIXED_STANDARD_MONTHLY_HOURS = 180; // 180 giờ / tháng
+const FIXED_HOURLY_RATE = FIXED_MONTHLY_BASE_SALARY / FIXED_STANDARD_MONTHLY_HOURS; // ~27.777,78 VNĐ/giờ
+const ON_SITE_RESPONSE_THRESHOLD_MINUTES = 15; // Ngưỡng đến hiện trường 15 phút
+
+async function getPayrollBonusesMap(): Promise<Record<string, PayrollBonusRecord>> {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: PAYROLL_BONUSES_SETTING_KEY } });
+    if (setting?.value && typeof setting.value === 'object' && !Array.isArray(setting.value)) {
+      return setting.value as unknown as Record<string, PayrollBonusRecord>;
+    }
+  } catch (err) {
+    console.warn('[PAYROLL_BONUSES_READ_WARN]', err);
+  }
+  return {};
+}
+
+async function savePayrollBonusRecord(record: PayrollBonusRecord): Promise<void> {
+  const map = await getPayrollBonusesMap();
+  const key = `${record.month}__${record.techId}`;
+  map[key] = record;
+  await prisma.systemSetting.upsert({
+    where: { key: PAYROLL_BONUSES_SETTING_KEY },
+    create: { key: PAYROLL_BONUSES_SETTING_KEY, value: map as any },
+    update: { value: map as any },
+  });
+}
+
+function getVietnamMinutesOfDay(isoOrDate: string | Date): number {
+  const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+  if (isNaN(d.getTime())) return -1;
+  const timeStr = d.toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  return timeToMinutes(timeStr);
+}
+
+function enrichAttendanceShiftTiming(log: AttendanceRecord) {
+  const shiftStartStr = log.shiftStartTime || (log.shiftScheduled ? log.shiftScheduled.split('-')[0]?.trim() : '07:00') || '07:00';
+  const shiftEndStr = log.shiftEndTime || (log.shiftScheduled ? log.shiftScheduled.split('-')[1]?.trim() : '15:00') || '15:00';
+  const startMin = timeToMinutes(shiftStartStr);
+  const endMin = timeToMinutes(shiftEndStr);
+  const checkInMin = log.checkIn ? getVietnamMinutesOfDay(log.checkIn) : -1;
+  const checkOutMin = log.checkOut ? getVietnamMinutesOfDay(log.checkOut) : -1;
+
+  let earlyArrivalMinutes = 0;
+  let lateArrivalMinutes = log.lateMinutes || 0;
+  if (startMin >= 0 && checkInMin >= 0) {
+    const diffIn = checkInMin - startMin;
+    if (diffIn < 0) {
+      earlyArrivalMinutes = Math.abs(diffIn);
+    } else if (diffIn > 15 && lateArrivalMinutes === 0) {
+      lateArrivalMinutes = diffIn;
+    }
+  }
+
+  let earlyLeaveMinutes = log.earlyMinutes || 0;
+  let lateCheckoutMinutes = 0;
+  if (endMin >= 0 && checkOutMin >= 0) {
+    const diffOut = checkOutMin - endMin;
+    if (diffOut < -15 && earlyLeaveMinutes === 0) {
+      earlyLeaveMinutes = Math.abs(diffOut);
+    } else if (diffOut > 0) {
+      lateCheckoutMinutes = diffOut;
+    }
+  }
+
+  const arrivalLabel =
+    lateArrivalMinutes > 0
+      ? `Đi trễ ${lateArrivalMinutes} phút`
+      : earlyArrivalMinutes > 0
+      ? `Đi sớm ${earlyArrivalMinutes} phút`
+      : 'Đúng giờ';
+
+  const departureLabel = !log.checkOut
+    ? 'Đang trong ca'
+    : earlyLeaveMinutes > 0
+    ? `Về sớm ${earlyLeaveMinutes} phút`
+    : lateCheckoutMinutes > 0
+    ? `Về muộn ${lateCheckoutMinutes} phút`
+    : 'Đúng giờ';
+
+  const gpsWithin = log.checkInGps ? (log.checkInGps.isWithinAllowedRadius ?? (log.checkInGps as any).isWithinRadius) !== false : false;
+  const gpsAcc = log.checkInGps ? Number(log.checkInGps.accuracy ?? (log.checkInGps as any).accuracyMeters ?? 10) : 999;
+  const gpsValid = Boolean(log.checkInGps && gpsWithin && gpsAcc <= 100);
+  const gpsStatusLabel = !log.checkInGps
+    ? 'Thiếu dữ liệu GPS'
+    : !gpsWithin
+    ? `Ngoài bán kính (~${log.checkInGps.distanceMeters ?? 0}m)`
+    : gpsAcc > 100
+    ? `GPS sai số cao (±${gpsAcc}m)`
+    : 'GPS hợp lệ';
+
+  const shiftStatus = !log.checkOut ? 'ON_DUTY' : 'COMPLETED';
+  const validWorkHours =
+    log.verificationStatus === 'REJECTED'
+      ? 0
+      : Math.round(Number(log.billableHours ?? log.workHours ?? 0) * 100) / 100;
+
+  return {
+    earlyArrivalMinutes,
+    lateArrivalMinutes,
+    earlyLeaveMinutes,
+    lateCheckoutMinutes,
+    arrivalLabel,
+    departureLabel,
+    gpsValid,
+    gpsStatusLabel,
+    shiftStatus,
+    validWorkHours,
+  };
+}
+
+async function computeTechnicianMonthlyPerformance(
+  techId: string,
+  targetMonth: string,
+  monthLogs: AttendanceRecord[],
+  bonusRecord?: PayrollBonusRecord | null
+) {
+  const verifiedLogs = monthLogs.filter(
+    (a) => a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'APPROVED'
+  );
+  const disputedLogs = monthLogs.filter(
+    (a) => a.verificationStatus === 'PENDING_REVIEW' || a.verificationStatus === 'NEEDS_EXPLANATION'
+  );
+  const unclosedLogs = monthLogs.filter((a) => !a.checkOut);
+
+  // Nhóm 1: Giờ công (chỉ tính từ chấm công ca làm hợp lệ, không cộng trùng thời gian sự cố)
+  const validWorkHours = Math.round(
+    verifiedLogs.reduce((sum, a) => sum + Number(a.billableHours ?? a.workHours ?? 0), 0) * 100
+  ) / 100;
+  const workDaysCount = new Set(verifiedLogs.map((a) => a.date)).size;
+  const lateCheckInCount = monthLogs.filter(
+    (a) => a.punctualityStatus === 'LATE' || a.punctualityStatus === 'LATE_AND_EARLY' || (a.lateMinutes || 0) > 0
+  ).length;
+  const earlyLeaveCount = monthLogs.filter(
+    (a) => a.punctualityStatus === 'EARLY_LEAVE' || a.punctualityStatus === 'LATE_AND_EARLY' || (a.earlyMinutes || 0) > 0
+  ).length;
+
+  // Ngày nghỉ theo lịch được duyệt trong tháng
+  let scheduledLeaveDaysCount = 0;
+  try {
+    const approvedLeaves = await prisma.shiftScheduleRequest.findMany({
+      where: {
+        techId,
+        type: 'LEAVE',
+        status: 'APPROVED',
+        date: { startsWith: targetMonth },
+      },
+    });
+    scheduledLeaveDaysCount = approvedLeaves.length;
+  } catch {}
+
+  // Nhóm 2, 3, 4: Sự cố, Thời gian phản hồi hiện trường & Đánh giá cư dân trong tháng
+  const monthStart = new Date(`${targetMonth}-01T00:00:00.000+07:00`);
+  const [yearNum, monthNum] = targetMonth.split('-').map(Number);
+  const nextMonthStart =
+    !isNaN(yearNum) && !isNaN(monthNum)
+      ? new Date(yearNum, monthNum, 1, 0, 0, 0)
+      : new Date(Date.now() + 30 * 86400000);
+
+  let techTickets: any[] = [];
+  try {
+    techTickets = await prisma.incidentTicket.findMany({
+      where: {
+        assignedTechId: techId,
+        OR: [
+          { assignedAt: { gte: monthStart, lt: nextMonthStart } },
+          { assignedAt: null, createdAt: { gte: monthStart, lt: nextMonthStart } },
+        ],
+      },
+      select: {
+        id: true,
+        ticketCode: true,
+        title: true,
+        status: true,
+        finalPriority: true,
+        aiSuggestedPriority: true,
+        assignedAt: true,
+        acknowledgedAt: true,
+        startedAt: true,
+        resolvedAt: true,
+        closedAt: true,
+        ratingStars: true,
+        ratingComment: true,
+        ratedAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  } catch (err) {
+    console.warn('[TECH_MONTHLY_TICKETS_WARN]', err);
+  }
+
+  const totalAssignedTickets = techTickets.length;
+  let highPriorityCount = 0;
+  let mediumPriorityCount = 0;
+  let lowPriorityCount = 0;
+  let completedTicketsCount = 0;
+
+  let onTimeArrivalCount = 0;
+  let lateArrivalCount = 0;
+  let totalLateArrivalMinutes = 0;
+  let pendingArrivalCount = 0;
+
+  const lateTicketsDetail: Array<{
+    ticketId: string;
+    ticketCode: string;
+    title: string;
+    priority: string;
+    assignedAt: string;
+    acknowledgedAt: string;
+    responseMinutes: number;
+    lateMinutes: number;
+  }> = [];
+
+  const monthTicketsDetail: Array<{
+    ticketId: string;
+    ticketCode: string;
+    title: string;
+    status: string;
+    priority: string;
+    assignedAt: string | null;
+    acknowledgedAt: string | null;
+    responseMinutes: number | null;
+    lateMinutes: number | null;
+    arrivalStatus: 'ON_TIME' | 'LATE' | 'MISSING_DATA';
+    ratingStars: number | null;
+  }> = [];
+
+  const ratingsList: Array<{
+    ticketCode: string;
+    title: string;
+    ratingStars: number;
+    ratingComment: string | null;
+    ratedAt: string | null;
+  }> = [];
+
+  for (const t of techTickets) {
+    const prio = String(t.finalPriority || t.aiSuggestedPriority || 'MEDIUM').toUpperCase();
+    if (prio === 'HIGH') highPriorityCount += 1;
+    else if (prio === 'LOW') lowPriorityCount += 1;
+    else mediumPriorityCount += 1;
+
+    if (t.status === 'COMPLETED' || t.status === 'CLOSED') {
+      completedTicketsCount += 1;
+    }
+
+    // Thời gian phản hồi = Thời gian check-in hiện trường (acknowledgedAt || startedAt) - Thời gian được phân công (assignedAt)
+    const assignedDate = t.assignedAt ? new Date(t.assignedAt) : null;
+    const arrivedDate = t.acknowledgedAt
+      ? new Date(t.acknowledgedAt)
+      : t.startedAt
+      ? new Date(t.startedAt)
+      : null;
+
+    let responseMinutes: number | null = null;
+    let lateMinutes: number | null = null;
+    let arrivalStatus: 'ON_TIME' | 'LATE' | 'MISSING_DATA' = 'MISSING_DATA';
+
+    if (
+      assignedDate &&
+      arrivedDate &&
+      !isNaN(assignedDate.getTime()) &&
+      !isNaN(arrivedDate.getTime()) &&
+      arrivedDate.getTime() >= assignedDate.getTime()
+    ) {
+      responseMinutes = Math.floor((arrivedDate.getTime() - assignedDate.getTime()) / 60000);
+      if (responseMinutes <= ON_SITE_RESPONSE_THRESHOLD_MINUTES) {
+        arrivalStatus = 'ON_TIME';
+        lateMinutes = 0;
+        onTimeArrivalCount += 1;
+      } else {
+        arrivalStatus = 'LATE';
+        lateMinutes = Math.max(0, responseMinutes - ON_SITE_RESPONSE_THRESHOLD_MINUTES);
+        lateArrivalCount += 1;
+        totalLateArrivalMinutes += lateMinutes;
+        lateTicketsDetail.push({
+          ticketId: t.id,
+          ticketCode: t.ticketCode,
+          title: t.title,
+          priority: prio,
+          assignedAt: assignedDate.toISOString(),
+          acknowledgedAt: arrivedDate.toISOString(),
+          responseMinutes,
+          lateMinutes,
+        });
+      }
+    } else {
+      pendingArrivalCount += 1;
+    }
+
+    monthTicketsDetail.push({
+      ticketId: t.id,
+      ticketCode: t.ticketCode,
+      title: t.title,
+      status: t.status,
+      priority: prio,
+      assignedAt: assignedDate ? assignedDate.toISOString() : null,
+      acknowledgedAt: arrivedDate ? arrivedDate.toISOString() : null,
+      responseMinutes,
+      lateMinutes,
+      arrivalStatus,
+      ratingStars: t.ratingStars ?? null,
+    });
+
+    if (typeof t.ratingStars === 'number' && t.ratingStars > 0) {
+      ratingsList.push({
+        ticketCode: t.ticketCode,
+        title: t.title,
+        ratingStars: t.ratingStars,
+        ratingComment: t.ratingComment || null,
+        ratedAt: t.ratedAt ? new Date(t.ratedAt).toISOString() : null,
+      });
+    }
+  }
+
+  const totalRatingsCount = ratingsList.length;
+  const averageRating =
+    totalRatingsCount > 0
+      ? Math.round((ratingsList.reduce((sum, r) => sum + r.ratingStars, 0) / totalRatingsCount) * 10) / 10
+      : null;
+
+  // Công thức tính lương cố định (Phần G1):
+  // Lương cơ bản = 5.000.000 VNĐ / 180 giờ
+  // Lương theo giờ = (5.000.000 / 180) * Số giờ công hợp lệ
+  // Tổng lương = Lương theo giờ + Tiền thưởng BMB
+  const hourlySalary = Math.round(FIXED_HOURLY_RATE * validWorkHours);
+  const bmbBonus = bonusRecord && typeof bonusRecord.bonusAmount === 'number' ? Math.max(0, Math.round(bonusRecord.bonusAmount)) : 0;
+  const totalSalary = hourlySalary + bmbBonus;
+  const disputedHours = Math.round(
+    disputedLogs.reduce((sum, a) => sum + Number(a.disputedHours || a.workHours || 0), 0) * 100
+  ) / 100;
+
+  return {
+    baseSalaryFixed: FIXED_MONTHLY_BASE_SALARY,
+    standardMonthlyHoursFixed: FIXED_STANDARD_MONTHLY_HOURS,
+    hourlyRateFixed: Math.round(FIXED_HOURLY_RATE * 100) / 100,
+    validWorkHours,
+    hourlySalary,
+    bmbBonus,
+    bmbBonusNote: bonusRecord?.note || '',
+    bmbBonusUpdatedBy: bonusRecord?.updatedByName || null,
+    bmbBonusUpdatedAt: bonusRecord?.updatedAt || null,
+    bmbBonusHistory: bonusRecord?.history || [],
+    totalSalary,
+    disputedHours,
+    unclosedShiftsCount: unclosedLogs.length,
+    performance: {
+      workHoursGroup: {
+        validWorkHours,
+        workDaysCount,
+        scheduledLeaveDaysCount,
+        lateCheckInCount,
+        earlyLeaveCount,
+        unclosedShiftsCount: unclosedLogs.length,
+        totalLogsCount: monthLogs.length,
+        verifiedShiftsCount: verifiedLogs.length,
+        disputedShiftsCount: disputedLogs.length,
+      },
+      incidentsGroup: {
+        totalAssignedTickets,
+        highPriorityCount,
+        mediumPriorityCount,
+        lowPriorityCount,
+        completedTicketsCount,
+      },
+      responseTimeGroup: {
+        thresholdMinutes: ON_SITE_RESPONSE_THRESHOLD_MINUTES,
+        onTimeArrivalCount,
+        lateArrivalCount,
+        totalLateArrivalMinutes,
+        pendingArrivalCount,
+        lateTicketsDetail,
+      },
+      ratingsGroup: {
+        totalRatingsCount,
+        averageRating,
+        ratingsList,
+      },
+      monthTicketsDetail,
+    },
+  };
 }
 
 const router = Router();
@@ -498,12 +907,12 @@ router.post(
 
       const cfg = await getPayrollConfig();
       const buildingLoc = cfg.buildingLocation || {
-        buildingName: 'Tòa nhà ResiFix SkyView',
-        buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
-        latitude: 10.7324,
-        longitude: 106.6992,
-        allowedRadiusMeters: 300,
-        isConfirmed: false,
+        buildingName: DEFAULT_BUILDING_LOCATION.buildingName,
+        buildingAddress: DEFAULT_BUILDING_LOCATION.buildingAddress,
+        latitude: DEFAULT_BUILDING_LOCATION.latitude,
+        longitude: DEFAULT_BUILDING_LOCATION.longitude,
+        allowedRadiusMeters: DEFAULT_BUILDING_LOCATION.allowedRadiusMeters,
+        isConfirmed: true,
       };
 
       // 4. Kiểm tra vị trí GPS so với tọa độ tòa nhà
@@ -699,11 +1108,12 @@ router.post(
 
       const cfg = await getPayrollConfig();
       const buildingLoc = cfg.buildingLocation || {
-        buildingName: 'Tòa nhà ResiFix SkyView',
-        buildingAddress: '123 Đường Nguyễn Hữu Thọ, Phường Tân Hưng, Quận 7, TP.HCM',
-        latitude: 10.7324,
-        longitude: 106.6992,
-        allowedRadiusMeters: 300,
+        buildingName: DEFAULT_BUILDING_LOCATION.buildingName,
+        buildingAddress: DEFAULT_BUILDING_LOCATION.buildingAddress,
+        latitude: DEFAULT_BUILDING_LOCATION.latitude,
+        longitude: DEFAULT_BUILDING_LOCATION.longitude,
+        allowedRadiusMeters: DEFAULT_BUILDING_LOCATION.allowedRadiusMeters,
+        isConfirmed: true,
       };
 
       let checkOutGps: AttendanceGpsSnapshot | null = null;
@@ -972,10 +1382,10 @@ router.get(
 );
 
 // ============================================================================
-// 3. TÍNH LƯƠNG & PHIẾU LƯƠNG CỦA KỸ THUẬT VIÊN (ĐƠN GIÁ 50.000 VNĐ/GIỜ)
+// 3. TÍNH LƯƠNG & PHIẾU LƯƠNG CỦA KỸ THUẬT VIÊN (LƯƠNG CƠ BẢN 5.000.000 VNĐ / 180 GIỜ + THƯỞNG BMB)
 // ============================================================================
 
-// GET /api/payroll/my-salary - KTV xem phiếu lương cá nhân minh bạch
+// GET /api/payroll/my-salary - KTV xem phiếu lương & thống kê hiệu suất cá nhân minh bạch
 router.get(
   '/my-salary',
   authenticateJWT,
@@ -983,10 +1393,9 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const techId = req.user!.userId;
-      const targetMonth = typeof req.query.month === 'string' ? req.query.month : new Date().toISOString().slice(0, 7);
-
-      const cfg = await getPayrollConfig();
-      const hourlyRate = cfg.hourlyRateDefault || 50000;
+      const targetMonth = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month)
+        ? req.query.month
+        : new Date().toISOString().slice(0, 7);
 
       // Các ca chấm công trong tháng từ PostgreSQL
       const dbLogs = await prisma.attendanceLog.findMany({
@@ -995,40 +1404,22 @@ router.get(
       });
       const monthLogs = dbLogs.map(unpackAttendanceLog);
 
-      const verifiedLogs = monthLogs.filter(
-        (a) => a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'APPROVED'
-      );
-      const disputedLogs = monthLogs.filter(
-        (a) => a.verificationStatus === 'PENDING_REVIEW' || a.verificationStatus === 'NEEDS_EXPLANATION'
-      );
-
-      const regularHours = verifiedLogs.reduce((sum, a) => sum + (a.regularHours || a.billableHours || a.workHours || 0), 0);
-      const nightHours = verifiedLogs.reduce((sum, a) => sum + (a.nightHours || 0), 0);
-      const disputedHours = disputedLogs.reduce((sum, a) => sum + (a.disputedHours || a.workHours || 0), 0);
-
-      // Tăng ca đã phê duyệt từ PostgreSQL
+      // Tăng ca đã phê duyệt (giữ để hiển thị lịch sử tham khảo; chưa cộng vào công thức lương hiện tại)
       const dbOts = await prisma.overtimeRequest.findMany({
         where: { technicianId: techId, status: 'APPROVED', date: { startsWith: targetMonth } },
       });
       const approvedOts = dbOts.map(formatOvertime);
       const totalOtHours = approvedOts.reduce((sum, o) => sum + (o.approvedHours ?? o.hours), 0);
 
-      const shiftSalary = calculateShiftSalaryVietnam(regularHours, nightHours, hourlyRate);
-      const regularPay = shiftSalary.regularPay;
-      const nightPay = shiftSalary.nightPay;
+      const bonusesMap = await getPayrollBonusesMap();
+      const bonusRecord = bonusesMap[`${targetMonth}__${techId}`] || null;
 
-      let totalOtPay = 0;
-      for (const ot of approvedOts) {
-        const otH = ot.approvedHours ?? ot.hours;
-        const dType = ot.dayType || getDayType(ot.date);
-        const isNight = Boolean(ot.isNightOt);
-        totalOtPay += calculateOvertimePay(otH, dType, isNight, hourlyRate);
-      }
-      const otPay = totalOtPay;
-
-      const allowance = cfg.standardAllowance || 730000;
-      const totalSalary = regularPay + nightPay + otPay + allowance;
-      const disputedPayEstimated = Math.round(disputedHours * hourlyRate);
+      const perfAndPay = await computeTechnicianMonthlyPerformance(
+        techId,
+        targetMonth,
+        monthLogs,
+        bonusRecord
+      );
 
       const lock = await prisma.monthlyPayrollLock.findUnique({ where: { month: targetMonth } });
       const isLocked = Boolean(lock);
@@ -1037,24 +1428,34 @@ router.get(
         success: true,
         payroll: {
           month: targetMonth,
-          hourlyRate,
-          regularHours,
-          regularPay,
-          nightHours,
-          nightPay,
+          baseSalary: perfAndPay.baseSalaryFixed,
+          standardMonthlyHours: perfAndPay.standardMonthlyHoursFixed,
+          hourlyRate: perfAndPay.hourlyRateFixed,
+          validWorkHours: perfAndPay.validWorkHours,
+          regularHours: perfAndPay.validWorkHours,
+          hourlySalary: perfAndPay.hourlySalary,
+          regularPay: perfAndPay.hourlySalary,
+          bmbBonus: perfAndPay.bmbBonus,
+          bmbBonusNote: perfAndPay.bmbBonusNote,
+          bmbBonusUpdatedBy: perfAndPay.bmbBonusUpdatedBy,
+          bmbBonusUpdatedAt: perfAndPay.bmbBonusUpdatedAt,
+          bmbBonusHistory: perfAndPay.bmbBonusHistory,
+          nightHours: 0,
+          nightPay: 0,
           approvedOtHours: totalOtHours,
-          otPay,
-          standardAllowance: allowance,
-          disputedHours,
-          disputedPayEstimated,
+          otPay: 0,
+          standardAllowance: 0,
+          disputedHours: perfAndPay.disputedHours,
+          disputedPayEstimated: Math.round(perfAndPay.disputedHours * FIXED_HOURLY_RATE),
           deductions: 0,
-          totalSalary,
+          totalSalary: perfAndPay.totalSalary,
           isLocked,
-          formulaDetail: `Lương = (Ngày: ${regularHours.toFixed(1)}h x ${hourlyRate.toLocaleString('vi-VN')}đ) + (Đêm: ${nightHours.toFixed(1)}h x ${(hourlyRate * 1.3).toLocaleString('vi-VN')}đ [BLLĐ Điều 98 K.2]) + (OT: ${otPay.toLocaleString('vi-VN')}đ [BLLĐ Điều 98 K.1,3]) + Phụ cấp ${allowance.toLocaleString('vi-VN')}đ`,
+          formulaDetail: `Lương theo giờ = (5.000.000 / 180) × ${perfAndPay.validWorkHours}h = ${perfAndPay.hourlySalary.toLocaleString('vi-VN')}đ | Thưởng BMB: +${perfAndPay.bmbBonus.toLocaleString('vi-VN')}đ | Tổng lương = ${perfAndPay.totalSalary.toLocaleString('vi-VN')}đ`,
           overtimeDetails: approvedOts,
           attendanceLogsCount: monthLogs.length,
-          verifiedShiftsCount: verifiedLogs.length,
-          disputedShiftsCount: disputedLogs.length,
+          verifiedShiftsCount: perfAndPay.performance.workHoursGroup.verifiedShiftsCount,
+          disputedShiftsCount: perfAndPay.performance.workHoursGroup.disputedShiftsCount,
+          performance: perfAndPay.performance,
         },
       });
     } catch (error) {
@@ -1192,10 +1593,16 @@ router.get(
         where.technicianId = techId.trim();
       }
 
-      const dbLogs = await prisma.attendanceLog.findMany({
-        where,
-        orderBy: { checkIn: 'desc' },
-      });
+      const [dbLogs, activeTechnicians] = await Promise.all([
+        prisma.attendanceLog.findMany({
+          where,
+          orderBy: { checkIn: 'desc' },
+        }),
+        prisma.user.findMany({
+          where: { role: Role.TECHNICIAN, isActive: true },
+          select: { id: true, fullName: true, phone: true, shiftName: true, buildingBlock: true, isOnDuty: true },
+        }),
+      ]);
 
       let logs = dbLogs.map(unpackAttendanceLog);
 
@@ -1203,61 +1610,171 @@ router.get(
         logs = logs.filter((l) => (l.buildingBlock || 'Tòa S1').toUpperCase() === buildingBlock.trim().toUpperCase());
       }
 
-      if (status && typeof status === 'string' && status !== 'ALL') {
-        const s = status.trim().toUpperCase();
-        if (s === 'VERIFIED') {
-          logs = logs.filter((l) => l.verificationStatus === 'VERIFIED' || l.verificationStatus === 'APPROVED');
-        } else if (s === 'PENDING_REVIEW') {
-          logs = logs.filter((l) => l.verificationStatus === 'PENDING_REVIEW' || l.verificationStatus === 'NEEDS_EXPLANATION');
-        } else if (s === 'LATE') {
-          logs = logs.filter((l) => l.punctualityStatus === 'LATE' || l.punctualityStatus === 'LATE_AND_EARLY');
-        } else if (s === 'REJECTED') {
-          logs = logs.filter((l) => l.verificationStatus === 'REJECTED');
-        } else if (s === 'EXCEPTION') {
-          logs = logs.filter((l) => Boolean(l.anomalyNotes));
+      // Làm giàu thông tin đi sớm/trễ, về sớm/muộn, trạng thái GPS và giờ công hợp lệ
+      let enrichedLogs = logs.map((log) => {
+        const timing = enrichAttendanceShiftTiming(log);
+        return {
+          ...log,
+          ...timing,
+          checkInMapUrl: log.checkInGps
+            ? `https://www.google.com/maps?q=${log.checkInGps.latitude},${log.checkInGps.longitude}`
+            : null,
+          checkOutMapUrl: log.checkOutGps
+            ? `https://www.google.com/maps?q=${log.checkOutGps.latitude},${log.checkOutGps.longitude}`
+            : null,
+        };
+      });
+
+      // Tính toán 6 chỉ số KPI tổng quan phía trên (trước khi lọc status để tổng quan rõ ràng, hoặc trên tập dữ liệu hiện tại)
+      const currentlyOnDutyCount = enrichedLogs.filter((l) => !l.checkOut).length;
+      const completedShiftCount = enrichedLogs.filter((l) => Boolean(l.checkOut)).length;
+      const lateCount = enrichedLogs.filter(
+        (l) => l.punctualityStatus === 'LATE' || l.punctualityStatus === 'LATE_AND_EARLY' || (l.lateArrivalMinutes || 0) > 0
+      ).length;
+      const earlyLeaveCount = enrichedLogs.filter(
+        (l) => l.punctualityStatus === 'EARLY_LEAVE' || l.punctualityStatus === 'LATE_AND_EARLY' || (l.earlyLeaveMinutes || 0) > 0
+      ).length;
+      const pendingReviewCount = enrichedLogs.filter(
+        (l) => l.verificationStatus === 'PENDING_REVIEW' || l.verificationStatus === 'NEEDS_EXPLANATION'
+      ).length;
+      const verifiedCount = enrichedLogs.filter(
+        (l) => l.verificationStatus === 'VERIFIED' || l.verificationStatus === 'APPROVED'
+      ).length;
+
+      // Xác định KTV chưa check-in hoặc nghỉ theo lịch trong ngày đang chọn (hoặc hôm nay)
+      const targetDayForRoster =
+        date && typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date.trim())
+          ? date.trim()
+          : new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
+
+      const checkedInTechIdsOnTargetDay = new Set(
+        enrichedLogs.filter((l) => l.date === targetDayForRoster).map((l) => l.techId)
+      );
+
+      let notCheckedInCount = 0;
+      const technicianRosterStatus: Array<{
+        techId: string;
+        techName: string;
+        techPhone: string | null;
+        buildingBlock: string;
+        date: string;
+        shiftScheduled: string;
+        rosterStatus: 'ON_DUTY' | 'COMPLETED' | 'NOT_STARTED' | 'ABSENT' | 'ON_LEAVE';
+        rosterStatusLabel: string;
+      }> = [];
+
+      const nowVnMinutes = getVietnamMinutesOfDay(new Date());
+
+      for (const tech of activeTechnicians) {
+        if (techId && techId !== 'ALL' && tech.id !== techId.trim()) continue;
+        if (
+          buildingBlock &&
+          buildingBlock !== 'ALL' &&
+          (tech.buildingBlock || 'Tòa S1').toUpperCase() !== buildingBlock.trim().toUpperCase()
+        ) {
+          continue;
+        }
+
+        const techDayLog = enrichedLogs.find((l) => l.techId === tech.id && l.date === targetDayForRoster);
+        const shiftStr = tech.shiftName || '07:00 - 15:00';
+        if (techDayLog) {
+          const rStatus = techDayLog.checkOut ? 'COMPLETED' : 'ON_DUTY';
+          technicianRosterStatus.push({
+            techId: tech.id,
+            techName: tech.fullName,
+            techPhone: tech.phone,
+            buildingBlock: tech.buildingBlock || 'Tòa S1',
+            date: targetDayForRoster,
+            shiftScheduled: techDayLog.shiftScheduled || shiftStr,
+            rosterStatus: rStatus,
+            rosterStatusLabel: rStatus === 'ON_DUTY' ? 'Đang trực' : 'Đã kết thúc',
+          });
+        } else {
+          const onLeave = await isTechOnApprovedLeaveDb(tech.id, targetDayForRoster);
+          if (onLeave) {
+            technicianRosterStatus.push({
+              techId: tech.id,
+              techName: tech.fullName,
+              techPhone: tech.phone,
+              buildingBlock: tech.buildingBlock || 'Tòa S1',
+              date: targetDayForRoster,
+              shiftScheduled: shiftStr,
+              rosterStatus: 'ON_LEAVE',
+              rosterStatusLabel: 'Nghỉ theo lịch',
+            });
+          } else {
+            notCheckedInCount += 1;
+            const shiftEndMin = timeToMinutes(shiftStr.split('-')[1]?.trim() || '15:00');
+            const isPastShift = shiftEndMin > 0 && nowVnMinutes > shiftEndMin;
+            technicianRosterStatus.push({
+              techId: tech.id,
+              techName: tech.fullName,
+              techPhone: tech.phone,
+              buildingBlock: tech.buildingBlock || 'Tòa S1',
+              date: targetDayForRoster,
+              shiftScheduled: shiftStr,
+              rosterStatus: isPastShift ? 'ABSENT' : 'NOT_STARTED',
+              rosterStatusLabel: isPastShift ? 'Vắng mặt theo lịch' : 'Chưa bắt đầu',
+            });
+          }
         }
       }
 
-      const pendingCheckouts = logs.filter((l) => !l.checkOut);
-      const anomalies: string[] = [];
-      if (pendingCheckouts.length > 0) {
-        anomalies.push(`Có ${pendingCheckouts.length} lượt trực chưa hoàn thành check-out.`);
+      // Áp dụng bộ lọc trạng thái cho danh sách hiển thị
+      if (status && typeof status === 'string' && status !== 'ALL') {
+        const s = status.trim().toUpperCase();
+        if (s === 'VERIFIED') {
+          enrichedLogs = enrichedLogs.filter((l) => l.verificationStatus === 'VERIFIED' || l.verificationStatus === 'APPROVED');
+        } else if (s === 'PENDING_REVIEW') {
+          enrichedLogs = enrichedLogs.filter((l) => l.verificationStatus === 'PENDING_REVIEW' || l.verificationStatus === 'NEEDS_EXPLANATION');
+        } else if (s === 'ON_DUTY') {
+          enrichedLogs = enrichedLogs.filter((l) => !l.checkOut);
+        } else if (s === 'COMPLETED') {
+          enrichedLogs = enrichedLogs.filter((l) => Boolean(l.checkOut));
+        } else if (s === 'LATE') {
+          enrichedLogs = enrichedLogs.filter(
+            (l) => l.punctualityStatus === 'LATE' || l.punctualityStatus === 'LATE_AND_EARLY' || (l.lateArrivalMinutes || 0) > 0
+          );
+        } else if (s === 'EARLY_LEAVE') {
+          enrichedLogs = enrichedLogs.filter(
+            (l) => l.punctualityStatus === 'EARLY_LEAVE' || l.punctualityStatus === 'LATE_AND_EARLY' || (l.earlyLeaveMinutes || 0) > 0
+          );
+        } else if (s === 'REJECTED') {
+          enrichedLogs = enrichedLogs.filter((l) => l.verificationStatus === 'REJECTED');
+        } else if (s === 'EXCEPTION') {
+          enrichedLogs = enrichedLogs.filter((l) => Boolean(l.anomalyNotes) || !l.gpsValid);
+        }
       }
-      const pendingReviewCount = logs.filter(
-        (l) => l.verificationStatus === 'PENDING_REVIEW' || l.verificationStatus === 'NEEDS_EXPLANATION'
-      ).length;
+
+      const anomalies: string[] = [];
+      if (currentlyOnDutyCount > 0) {
+        anomalies.push(`Có ${currentlyOnDutyCount} kỹ thuật viên đang trực (chưa check-out).`);
+      }
       if (pendingReviewCount > 0) {
         anomalies.push(`Có ${pendingReviewCount} ca chấm công có ngoại lệ đang chờ BMB xem xét.`);
       }
 
-      const verifiedCount = logs.filter((l) => l.verificationStatus === 'VERIFIED' || l.verificationStatus === 'APPROVED').length;
-      const lateCount = logs.filter((l) => l.punctualityStatus === 'LATE' || l.punctualityStatus === 'LATE_AND_EARLY').length;
-      const totalBillableHours = Math.round(logs.reduce((sum, l) => sum + (l.billableHours || 0), 0) * 100) / 100;
-      const totalDisputedHours = Math.round(logs.reduce((sum, l) => sum + (l.disputedHours || 0), 0) * 100) / 100;
-
-      const enrichedLogs = logs.map((log) => ({
-        ...log,
-        checkInMapUrl: log.checkInGps
-          ? `https://www.google.com/maps?q=${log.checkInGps.latitude},${log.checkInGps.longitude}`
-          : null,
-        checkOutMapUrl: log.checkOutGps
-          ? `https://www.google.com/maps?q=${log.checkOutGps.latitude},${log.checkOutGps.longitude}`
-          : null,
-      }));
+      const totalBillableHours = Math.round(enrichedLogs.reduce((sum, l) => sum + (l.validWorkHours || 0), 0) * 100) / 100;
+      const totalDisputedHours = Math.round(enrichedLogs.reduce((sum, l) => sum + (l.disputedHours || 0), 0) * 100) / 100;
 
       const cfg = await getPayrollConfig();
 
       res.status(200).json({
         success: true,
-        totalLogs: logs.length,
+        totalLogs: enrichedLogs.length,
+        currentlyOnDutyCount,
+        completedShiftCount,
         verifiedCount,
         pendingReviewCount,
         lateCount,
+        earlyLeaveCount,
+        notCheckedInCount,
         totalBillableHours,
         totalDisputedHours,
         anomalies,
         buildingLocation: cfg.buildingLocation,
         attendanceLogs: enrichedLogs,
+        technicianRosterStatus,
       });
     } catch (error) {
       console.error('Lỗi khi lấy dữ liệu chấm công BMB:', error);
@@ -1497,14 +2014,16 @@ router.patch(
   }
 );
 
-// GET /api/payroll/admin/summary - BMB xem bảng lương tổng hợp theo tháng (Đơn giá 50.000 VNĐ/giờ)
+// GET /api/payroll/admin/summary - BMB xem bảng lương tổng hợp & thống kê hiệu suất 4 nhóm theo tháng
 router.get(
   '/admin/summary',
   authenticateJWT,
   authorizeRoles(Role.BMB),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const targetMonth = typeof req.query.month === 'string' ? req.query.month : new Date().toISOString().slice(0, 7);
+      const targetMonth = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month)
+        ? req.query.month
+        : new Date().toISOString().slice(0, 7);
 
       const technicians = await prisma.user.findMany({
         where: { role: Role.TECHNICIAN, isActive: true },
@@ -1512,13 +2031,12 @@ router.get(
       });
 
       const cfg = await getPayrollConfig();
-      const hourlyRate = cfg.hourlyRateDefault || 50000;
-
       const lock = await prisma.monthlyPayrollLock.findUnique({ where: { month: targetMonth } });
       const isLocked = Boolean(lock);
 
       const dbAllMonthLogs = await prisma.attendanceLog.findMany({
         where: { date: { startsWith: targetMonth } },
+        orderBy: { checkIn: 'desc' },
       });
       const allMonthLogs = dbAllMonthLogs.map(unpackAttendanceLog);
 
@@ -1527,63 +2045,72 @@ router.get(
       });
       const allMonthOts = dbAllMonthOts.map(formatOvertime);
 
-      const payrollList = technicians.map((tech) => {
-        const monthLogs = allMonthLogs.filter((a) => a.techId === tech.id);
-        const verifiedLogs = monthLogs.filter(
-          (a) => a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'APPROVED'
-        );
-        const disputedLogs = monthLogs.filter(
-          (a) => a.verificationStatus === 'PENDING_REVIEW' || a.verificationStatus === 'NEEDS_EXPLANATION'
-        );
+      const bonusesMap = await getPayrollBonusesMap();
 
-        const regularHours = verifiedLogs.reduce((sum, a) => sum + (a.regularHours || a.billableHours || a.workHours || 0), 0);
-        const nightHours = verifiedLogs.reduce((sum, a) => sum + (a.nightHours || 0), 0);
-        const disputedHours = disputedLogs.reduce((sum, a) => sum + (a.disputedHours || a.workHours || 0), 0);
+      const payrollList = await Promise.all(
+        technicians.map(async (tech) => {
+          const monthLogs = allMonthLogs.filter((a) => a.techId === tech.id);
+          const approvedOts = allMonthOts.filter((o) => o.techId === tech.id);
+          const otHours = approvedOts.reduce((sum, o) => sum + (o.approvedHours ?? o.hours), 0);
 
-        const approvedOts = allMonthOts.filter((o) => o.techId === tech.id);
-        const otHours = approvedOts.reduce((sum, o) => sum + (o.approvedHours ?? o.hours), 0);
+          const bonusRecord = bonusesMap[`${targetMonth}__${tech.id}`] || null;
+          const perfAndPay = await computeTechnicianMonthlyPerformance(
+            tech.id,
+            targetMonth,
+            monthLogs,
+            bonusRecord
+          );
 
-        const shiftSalary = calculateShiftSalaryVietnam(regularHours, nightHours, hourlyRate);
-        const regularPay = shiftSalary.regularPay;
-        const nightPay = shiftSalary.nightPay;
-
-        let totalOtPay = 0;
-        for (const ot of approvedOts) {
-          const otH = ot.approvedHours ?? ot.hours;
-          const dType = ot.dayType || getDayType(ot.date);
-          const isNight = Boolean(ot.isNightOt);
-          totalOtPay += calculateOvertimePay(otH, dType, isNight, hourlyRate);
-        }
-        const otPay = totalOtPay;
-
-        const allowance = cfg.standardAllowance || 730000;
-        const totalSalary = regularPay + nightPay + otPay + allowance;
-        const disputedPayEstimated = Math.round(disputedHours * hourlyRate);
-
-        return {
-          techId: tech.id,
-          fullName: tech.fullName,
-          phone: tech.phone,
-          specialtyLabel: tech.specialtyLabel,
-          buildingBlock: tech.buildingBlock || 'Tòa S1',
-          hourlyRate,
-          regularHours: Math.round(regularHours * 100) / 100,
-          regularPay,
-          nightHours: Math.round(nightHours * 100) / 100,
-          nightPay,
-          otHours: Math.round(otHours * 100) / 100,
-          otPay,
-          allowance,
-          disputedHours: Math.round(disputedHours * 100) / 100,
-          disputedPayEstimated,
-          deductions: 0,
-          totalSalary,
-          totalShiftsCount: monthLogs.length,
-          verifiedShiftsCount: verifiedLogs.length,
-          disputedShiftsCount: disputedLogs.length,
-          formulaDetail: `Lương = (${regularHours.toFixed(1)}h x ${hourlyRate.toLocaleString('vi-VN')}đ) + (${nightHours.toFixed(1)}h đêm x 30%) + (${otHours.toFixed(1)}h OT x 1.5) + Phụ cấp ${allowance.toLocaleString('vi-VN')}đ`,
-        };
-      });
+          return {
+            techId: tech.id,
+            fullName: tech.fullName,
+            phone: tech.phone,
+            specialtyLabel: tech.specialtyLabel || 'Đa năng',
+            shiftName: tech.shiftName || '07:00 - 15:00',
+            buildingBlock: tech.buildingBlock || 'Tòa S1',
+            baseSalary: perfAndPay.baseSalaryFixed,
+            standardMonthlyHours: perfAndPay.standardMonthlyHoursFixed,
+            hourlyRate: perfAndPay.hourlyRateFixed,
+            validWorkHours: perfAndPay.validWorkHours,
+            regularHours: perfAndPay.validWorkHours,
+            hourlySalary: perfAndPay.hourlySalary,
+            regularPay: perfAndPay.hourlySalary,
+            bmbBonus: perfAndPay.bmbBonus,
+            bmbBonusNote: perfAndPay.bmbBonusNote,
+            bmbBonusUpdatedBy: perfAndPay.bmbBonusUpdatedBy,
+            bmbBonusUpdatedAt: perfAndPay.bmbBonusUpdatedAt,
+            bmbBonusHistory: perfAndPay.bmbBonusHistory,
+            nightHours: 0,
+            nightPay: 0,
+            otHours: Math.round(otHours * 100) / 100,
+            otPay: 0,
+            allowance: 0,
+            disputedHours: perfAndPay.disputedHours,
+            disputedPayEstimated: Math.round(perfAndPay.disputedHours * FIXED_HOURLY_RATE),
+            deductions: 0,
+            totalSalary: perfAndPay.totalSalary,
+            totalShiftsCount: monthLogs.length,
+            verifiedShiftsCount: perfAndPay.performance.workHoursGroup.verifiedShiftsCount,
+            disputedShiftsCount: perfAndPay.performance.workHoursGroup.disputedShiftsCount,
+            unclosedShiftsCount: perfAndPay.unclosedShiftsCount,
+            performance: perfAndPay.performance,
+            attendanceLogs: monthLogs.map((l) => ({
+              id: l.id,
+              date: l.date,
+              shiftScheduled: l.shiftScheduled,
+              checkIn: l.checkIn,
+              checkOut: l.checkOut,
+              workHours: l.workHours,
+              billableHours: l.billableHours,
+              punctualityStatus: l.punctualityStatus,
+              lateMinutes: l.lateMinutes,
+              earlyMinutes: l.earlyMinutes,
+              verificationStatus: l.verificationStatus,
+            })),
+            formulaDetail: `Lương theo giờ = (5.000.000 / 180) × ${perfAndPay.validWorkHours}h = ${perfAndPay.hourlySalary.toLocaleString('vi-VN')}đ | Thưởng BMB: +${perfAndPay.bmbBonus.toLocaleString('vi-VN')}đ | Tổng lương = ${perfAndPay.totalSalary.toLocaleString('vi-VN')}đ`,
+          };
+        })
+      );
 
       const totalPayout = payrollList.reduce((sum, p) => sum + p.totalSalary, 0);
       const allReconciles = await getReconcileRequests();
@@ -1593,7 +2120,15 @@ router.get(
         success: true,
         month: targetMonth,
         isLocked,
-        config: cfg,
+        baseSalaryFixed: FIXED_MONTHLY_BASE_SALARY,
+        standardMonthlyHoursFixed: FIXED_STANDARD_MONTHLY_HOURS,
+        hourlyRateFixed: Math.round(FIXED_HOURLY_RATE * 100) / 100,
+        config: {
+          ...cfg,
+          baseSalaryDefault: FIXED_MONTHLY_BASE_SALARY,
+          standardMonthlyHours: FIXED_STANDARD_MONTHLY_HOURS,
+          hourlyRateDefault: Math.round(FIXED_HOURLY_RATE),
+        },
         totalPayout,
         payrolls: payrollList,
         reconcileRequests: monthReconciles,
@@ -1601,6 +2136,117 @@ router.get(
     } catch (error) {
       console.error('Lỗi khi tính bảng lương BMB:', error);
       res.status(500).json({ success: false, message: 'Lỗi khi tính bảng lương.' });
+    }
+  }
+);
+
+// PATCH /api/payroll/admin/bonus - BMB nhập và lưu tiền thưởng thủ công cho từng KTV theo tháng
+router.patch(
+  '/admin/bonus',
+  authenticateJWT,
+  authorizeRoles(Role.BMB),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { techId, month, bonusAmount, note } = req.body || {};
+
+      if (!techId || typeof techId !== 'string' || !techId.trim()) {
+        res.status(400).json({ success: false, message: 'Thiếu mã kỹ thuật viên (techId).' });
+        return;
+      }
+
+      const targetMonth =
+        typeof month === 'string' && /^\d{4}-\d{2}$/.test(month.trim())
+          ? month.trim()
+          : new Date().toISOString().slice(0, 7);
+
+      const parsedBonus = Number(bonusAmount);
+      if (bonusAmount === undefined || bonusAmount === null || bonusAmount === '' || isNaN(parsedBonus) || !isFinite(parsedBonus)) {
+        res.status(400).json({
+          success: false,
+          message: 'Tiền thưởng không hợp lệ. Vui lòng nhập số tiền hợp lệ (>= 0 VNĐ).',
+        });
+        return;
+      }
+      if (parsedBonus < 0) {
+        res.status(400).json({
+          success: false,
+          message: 'Tiền thưởng không được là số âm.',
+        });
+        return;
+      }
+      if (parsedBonus > 100_000_000) {
+        res.status(400).json({
+          success: false,
+          message: 'Tiền thưởng vượt quá hạn mức cho phép trong tháng (tối đa 100.000.000 VNĐ).',
+        });
+        return;
+      }
+
+      const lock = await prisma.monthlyPayrollLock.findUnique({ where: { month: targetMonth } });
+      if (lock) {
+        res.status(403).json({
+          success: false,
+          message: `Bảng lương tháng ${targetMonth} đã được khóa sổ. Không thể chỉnh sửa tiền thưởng.`,
+        });
+        return;
+      }
+
+      const tech = await prisma.user.findFirst({
+        where: { id: techId.trim(), role: Role.TECHNICIAN },
+        select: { id: true, fullName: true },
+      });
+      if (!tech) {
+        res.status(404).json({ success: false, message: 'Không tìm thấy kỹ thuật viên.' });
+        return;
+      }
+
+      const cleanBonus = Math.round(parsedBonus);
+      const cleanNote = typeof note === 'string' && note.trim()
+        ? note.trim()
+        : cleanBonus > 0
+        ? 'Thưởng hiệu suất làm việc trong tháng do BMB xét duyệt'
+        : 'Đặt lại mức thưởng 0 VNĐ';
+
+      const nowIso = new Date().toISOString();
+      const bmbId = req.user?.userId || 'bmb-admin';
+      const bmbName = req.user?.fullName || 'Ban Quản Lý (BMB)';
+
+      const bonusesMap = await getPayrollBonusesMap();
+      const existing = bonusesMap[`${targetMonth}__${tech.id}`];
+      const history: PayrollBonusHistoryItem[] = Array.isArray(existing?.history) ? [...existing.history] : [];
+      history.unshift({
+        bonusAmount: cleanBonus,
+        note: cleanNote,
+        updatedById: bmbId,
+        updatedByName: bmbName,
+        updatedAt: nowIso,
+      });
+
+      const updatedRecord: PayrollBonusRecord = {
+        techId: tech.id,
+        month: targetMonth,
+        bonusAmount: cleanBonus,
+        note: cleanNote,
+        updatedById: bmbId,
+        updatedByName: bmbName,
+        updatedAt: nowIso,
+        history: history.slice(0, 25),
+      };
+
+      await savePayrollBonusRecord(updatedRecord);
+
+      console.log(
+        `[AUDIT_BONUS] BMB (${bmbName}) đã cập nhật tiền thưởng tháng ${targetMonth} cho KTV ${tech.fullName}: ${cleanBonus.toLocaleString('vi-VN')} VNĐ. Ghi chú: ${cleanNote}`
+      );
+
+      res.status(200).json({
+        success: true,
+        message: `Đã lưu tiền thưởng ${cleanBonus.toLocaleString('vi-VN')} VNĐ cho KTV ${tech.fullName} (Tháng ${targetMonth}).`,
+        bonusRecord: updatedRecord,
+      });
+    } catch (error) {
+      console.error('Lỗi khi lưu tiền thưởng KTV:', error);
+      res.status(500).json({ success: false, message: 'Lỗi máy chủ khi lưu tiền thưởng.' });
     }
   }
 );

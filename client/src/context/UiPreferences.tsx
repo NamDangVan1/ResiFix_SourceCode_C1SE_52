@@ -11,6 +11,8 @@ import type { ComponentProps, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   ActivityIndicator as NativeActivityIndicator,
+  Animated,
+  Easing,
   Platform,
   SafeAreaView as NativeSafeAreaView,
   ScrollView as NativeScrollView,
@@ -217,17 +219,54 @@ export function UiView(props: ComponentProps<typeof NativeView>) {
   return <NativeView {...props} style={themedStyle(props.style, themeMode)} />;
 }
 
+const AnimatedTouchableOpacity = Animated.createAnimatedComponent(NativeTouchableOpacity);
+const CINEMATIC_EASING = Easing.bezier(0.22, 1, 0.36, 1);
+
 export function UiTextInput(props: ComponentProps<typeof NativeTextInput>) {
   const { themeMode } = useUiPreferences();
-  const webInputReset = Platform.OS === 'web' ? ({ outlineWidth: 0 } as any) : null;
+  const [isFocused, setIsFocused] = useState(false);
+  const webInputReset =
+    Platform.OS === 'web'
+      ? ({
+          outlineWidth: 0,
+          transition:
+            'border-color 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease',
+        } as any)
+      : null;
+
+  const handleFocus = useCallback(
+    (e: any) => {
+      setIsFocused(true);
+      props.onFocus?.(e);
+    },
+    [props.onFocus]
+  );
+
+  const handleBlur = useCallback(
+    (e: any) => {
+      setIsFocused(false);
+      props.onBlur?.(e);
+    },
+    [props.onBlur]
+  );
+
+  const focusStyle = isFocused
+    ? {
+        borderColor: themeMode === 'dark' ? '#60A5FA' : '#2563EB',
+      }
+    : null;
+
   return (
     <NativeTextInput
       {...props}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
       style={[
         webInputReset,
         themeMode === 'dark'
           ? [{ color: '#F1F5F9' }, themedStyle(props.style, themeMode)]
           : props.style,
+        focusStyle,
       ]}
       placeholderTextColor={
         themeMode === 'dark'
@@ -240,12 +279,54 @@ export function UiTextInput(props: ComponentProps<typeof NativeTextInput>) {
 
 export function UiTouchableOpacity(props: ComponentProps<typeof NativeTouchableOpacity>) {
   const { themeMode } = useUiPreferences();
-  const webCursor = Platform.OS === 'web' ? ({ cursor: 'pointer', transition: 'all 0.18s cubic-bezier(0.4, 0, 0.2, 1)' } as any) : null;
+  const scale = useRef(new Animated.Value(1)).current;
+
+  const handlePressIn = useCallback(
+    (e: any) => {
+      Animated.timing(scale, {
+        toValue: 0.985,
+        duration: 160,
+        easing: CINEMATIC_EASING,
+        useNativeDriver: Platform.OS !== 'web',
+      }).start();
+      props.onPressIn?.(e);
+    },
+    [props.onPressIn, scale]
+  );
+
+  const handlePressOut = useCallback(
+    (e: any) => {
+      Animated.timing(scale, {
+        toValue: 1,
+        duration: 160,
+        easing: CINEMATIC_EASING,
+        useNativeDriver: Platform.OS !== 'web',
+      }).start();
+      props.onPressOut?.(e);
+    },
+    [props.onPressOut, scale]
+  );
+
+  const webCursor =
+    Platform.OS === 'web'
+      ? ({
+          cursor: 'pointer',
+          transition:
+            'transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.16s ease',
+        } as any)
+      : null;
+
   return (
-    <NativeTouchableOpacity
-      activeOpacity={props.activeOpacity ?? 0.78}
+    <AnimatedTouchableOpacity
+      activeOpacity={props.activeOpacity ?? 0.8}
       {...props}
-      style={[webCursor, themedStyle(props.style, themeMode)]}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      style={[
+        webCursor,
+        themedStyle(props.style, themeMode),
+        { transform: [{ scale }] },
+      ]}
     />
   );
 }

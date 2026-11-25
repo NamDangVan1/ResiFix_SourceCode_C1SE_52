@@ -379,6 +379,12 @@ export async function transcribeAudioWithGemini(
       if (error.status === 401 || error.status === 403 || error.status === 404) {
         throw new TranscriptionError(503, 'Backend chưa truy cập được model phiên âm. Vui lòng kiểm tra cấu hình Gemini.');
       }
+      if (error.status === 503) {
+        throw new TranscriptionError(503, 'Dịch vụ AI phiên âm của Google hiện đang quá tải (503). Vui lòng nhập mô tả sự cố thủ công hoặc thử lại sau ít phút.', 'GEMINI_OVERLOADED');
+      }
+      if (typeof error.status === 'number' && error.status >= 500) {
+        throw new TranscriptionError(503, `Máy chủ AI Google tạm thời gặp sự cố (${error.status}). Vui lòng nhập mô tả thủ công hoặc thử lại sau.`, 'GEMINI_SERVER_ERROR');
+      }
       if (error.status === 400) {
         if (reason?.startsWith('API_KEY_') || /API key (?:not valid|expired|is invalid)/i.test(error.message)) {
           throw new TranscriptionError(503, 'Gemini từ chối API key. Hãy kiểm tra GEMINI_API_KEY trong backend/.env và khởi động lại backend.', reason || 'API_KEY_INVALID');
@@ -392,6 +398,9 @@ export async function transcribeAudioWithGemini(
         throw new TranscriptionError(502, 'Google trả về lỗi 400 khi phiên âm.', reason || 'GEMINI_INVALID_ARGUMENT');
       }
     }
-    throw new TranscriptionError(502, 'Không nhận được bản phiên âm từ Gemini. Vui lòng thử lại.');
+    if (error instanceof Error && (error.message.includes('fetch failed') || (error as any).code === 'ENOTFOUND')) {
+      throw new TranscriptionError(503, 'Không thể kết nối tới máy chủ Google Gemini. Vui lòng kiểm tra kết nối internet hoặc nhập mô tả thủ công.', 'NETWORK_ERROR');
+    }
+    throw new TranscriptionError(502, 'Không nhận được bản phiên âm từ Gemini. Vui lòng thử lại hoặc nhập mô tả bằng tay.');
   }
 }

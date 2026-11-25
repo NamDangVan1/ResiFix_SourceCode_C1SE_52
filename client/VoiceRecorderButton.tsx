@@ -17,8 +17,8 @@ const buttonLabels = {
   idle: '🎤 Nhấn để nói',
   starting: 'Đang mở micro…',
   recording: 'Đang ghi âm · Nhấn để dừng',
-  processing: 'Đang xử lý',
-  error: '🎤 Nhấn để nói',
+  processing: 'Đang xử lý…',
+  error: '🎤 Nhấn để thử lại',
 } as const;
 
 export default function VoiceRecorderButton({ apiBaseUrl, token, disabled, onBusyChange, onTranscribed }: Props) {
@@ -88,7 +88,7 @@ export default function VoiceRecorderButton({ apiBaseUrl, token, disabled, onBus
       const data = await response.json().catch(() => null);
       if (!response.ok || !data?.success || typeof data.text !== 'string' || !data.text.trim()) {
         const fallback = response.status === 413 ? 'Bản ghi quá lớn. Vui lòng ghi một đoạn ngắn hơn.'
-          : 'Không nhận được bản chép lời. Vui lòng thử lại.';
+          : 'Không nhận được bản phiên âm từ AI. Bạn có thể nhập mô tả thủ công vào ô bên dưới hoặc nhấn để thử lại.';
         throw new Error(typeof data?.message === 'string' ? data.message : fallback);
       }
       if (controller.signal.aborted) return;
@@ -97,7 +97,7 @@ export default function VoiceRecorderButton({ apiBaseUrl, token, disabled, onBus
     } catch (err) {
       if (controller.signal.aborted) return;
       cancel();
-      const message = err instanceof Error ? err.message : 'Không nhận được bản chép lời. Vui lòng thử lại.';
+      const message = err instanceof Error ? err.message : 'Không nhận được bản phiên âm từ AI. Bạn có thể nhập mô tả thủ công vào ô bên dưới.';
       setError(err instanceof TypeError ? 'Không kết nối được backend. Vui lòng thử lại.' : message);
       setPhase('error');
     }

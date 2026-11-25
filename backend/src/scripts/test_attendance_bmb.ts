@@ -22,19 +22,19 @@ async function runAttendanceTests() {
 
   // TEST 1: Haversine GPS Distance Calculation
   console.log('\n--- 1. Kiểm tra tính khoảng cách GPS (Haversine Formula) ---');
-  const buildingLat = 10.7324;
-  const buildingLon = 106.6992;
+  const buildingLat = 16.0492916;
+  const buildingLon = 108.1600966;
 
   // Cùng tọa độ
   const distZero = calculateDistanceMeters(buildingLat, buildingLon, buildingLat, buildingLon);
   runAssertion('Khoảng cách tại chính tòa nhà xấp xỉ 0m', distZero === 0, `Nhận được: ${distZero}`);
 
-  // Tọa độ lệch nhẹ (~50-100m)
-  const distNear = calculateDistanceMeters(buildingLat, buildingLon, 10.7328, 106.6995);
+  // Tọa độ lệch nhẹ (~50-100m) tại khuôn viên Đại học Duy Tân
+  const distNear = calculateDistanceMeters(buildingLat, buildingLon, 16.0496, 108.1604);
   runAssertion('Khoảng cách gần nằm trong bán kính 300m', distNear < 300 && distNear > 20, `Nhận được: ${distNear}m`);
 
-  // Tọa độ xa (~2.5km)
-  const distFar = calculateDistanceMeters(buildingLat, buildingLon, 10.7550, 106.6992);
+  // Tọa độ xa (~2.8km)
+  const distFar = calculateDistanceMeters(buildingLat, buildingLon, 16.0750, 108.1600966);
   runAssertion('Khoảng cách xa nằm ngoài bán kính 300m', distFar > 2000, `Nhận được: ${distFar}m`);
 
   // TEST 2: Đánh giá đúng giờ / Đi muộn (Punctuality) độc lập với Gian lận

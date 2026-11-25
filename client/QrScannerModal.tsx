@@ -25,6 +25,7 @@ const SAMPLE_QR_CODES = [
   { code: 'AC-B02', name: 'Sảnh tầng 1 (Tòa S1)' },
   { code: 'PK-B1-02', name: 'Hầm gửi xe B1' },
   { code: 'ELV-02', name: 'Khu vực Thang máy Tầng 1' },
+  { code: 'ROOM:F203', name: 'Căn hộ F203 (Tòa F - Tầng 2)' },
   { code: 'WP-1204', name: 'Căn hộ A-1204 (Tầng 12)' },
 ];
 
@@ -74,14 +75,19 @@ export default function QrScannerModal({
     if (scanned || !data) return;
     setScanned(true);
 
-    let cleanCode = data.trim().toUpperCase();
+    let cleanCode = data.replace(/[\u200B-\u200D\uFEFF]/g, '').trim().toUpperCase();
     try {
       if (cleanCode.startsWith('{')) {
         const parsed = JSON.parse(data);
-        if (parsed.qrCode) cleanCode = String(parsed.qrCode).toUpperCase();
-      } else if (cleanCode.includes('/')) {
-        const parts = cleanCode.split('/');
-        cleanCode = parts[parts.length - 1];
+        if (parsed.qrCode) cleanCode = String(parsed.qrCode).trim().toUpperCase();
+      } else {
+        const queryMatch = data.match(/[?&](?:data|qrcode|code)=([^&#]+)/i);
+        if (queryMatch?.[1]) {
+          cleanCode = decodeURIComponent(queryMatch[1]).trim().toUpperCase();
+        } else if (cleanCode.includes('/')) {
+          const parts = cleanCode.split('/').filter(Boolean);
+          cleanCode = (parts[parts.length - 1] || cleanCode).trim().toUpperCase();
+        }
       }
     } catch {
       // Giữ nguyên chuỗi gốc
